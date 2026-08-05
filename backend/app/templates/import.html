@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block titel %}Import – {{ mandant.name }}{% endblock %}
+{% block inhalt %}
+<div class="seite">
+  <h1>Datenimport</h1>
+  <p class="hinweis">
+    Unterstützt: DATEV-Buchungsstapel (EXTF/DTVF-CSV), generisches CSV
+    (<code>Datum;Konto;Gegenkonto;Betrag;SH;Belegfeld;Text</code> – für Addison-Exporte passend
+    abbildbar) sowie BWA-/Saldenlisten (<code>Konto;Jahr;Monat;Betrag</code>).
+  </p>
+  {% if not leser %}
+  <form id="upload-form" class="formular-zeilen">
+    <label>Datei<input type="file" name="datei" accept=".csv,.txt" required></label>
+    <label>Format
+      <select name="format">
+        <option value="auto">automatisch erkennen</option>
+        <option value="datev">DATEV-Buchungsstapel</option>
+        <option value="csv">generisches CSV</option>
+        <option value="bwa">BWA / Saldenliste</option>
+      </select>
+    </label>
+    <button type="submit">Importieren</button>
+  </form>
+  <div id="ergebnis"></div>
+  {% endif %}
+  <h2>Bisherige Importe</h2>
+  <table class="liste">
+    <thead><tr><th>Datum</th><th>Datei</th><th>Format</th><th class="zahl">Sätze</th><th>Warnungen</th><th></th></tr></thead>
+    <tbody id="batches"></tbody>
+  </table>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+const MANDANT_ID = {{ mandant.id }};
+const LESER = {{ 'true' if leser else 'false' }};
+
+async function ladeBatches() {
+  const batches = await api("GET", `/api/mandanten/${MANDANT_ID}/importe`);
+  const tb = document.getElementById("batches");
+  tb.innerHTML = "";
+  for (const b of batches) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${new Date(b.erstellt_am).toLocaleString("de-DE")}</td>
+      <td>${b.dateiname}</td><td>${b.format}</td><td class="zahl">${b.anzahl}</td>
+      <td class="klein">${b.warnungen ? b.warnungen.split("\n").slice(0,3).join("<br>") : ""}</td>
+      <td>${LESER ? "" : `<button class="gefahr klein-knopf" data-id="${b.id}">Löschen</button>`}</td>`;
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll("button[data-id]").forEach(btn => btn.addEventListener("click", async () => {
+    if (!confirm("Import samt Buchungen löschen?")) return;
+    try { await api("DELETE", `/api/importe/${btn.dataset.id}`); ladeBatches(); }
+    catch (e) { toast(e.message); }
+  }));
+}
+
+const form = document.getElementById("upload-form");
+if (form) form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData(form);
+  const format = fd.get("format");
+  fd.delete("format");
+  try {
+    const erg = await apiDatei(`/api/mandanten/${MANDANT_ID}/import?format=${format}`, fd);
+    const box = document.getElementById("ergebnis");
+    let html = `<div class="warnung" style="background:#e8f5ec;border-color:#9fd3ae;color:#1e5c38">
+      ${erg.anzahl} Sätze importiert (${erg.format}).</div>`;
+    if (erg.unbekannte_konten.length) {
+      html += `<div class="warnung">Nicht angelegte Konten: ${erg.unbekannte_konten.join(", ")}
+        – bitte unter <a href="/mandanten/${MANDANT_ID}/konten">Konten</a> ergänzen.</div>`;
+    }
+    if (erg.warnungen.length) {
+      html += `<div class="warnung">${erg.warnungen.slice(0, 10).join("<br>")}</div>`;
+    }
+    box.innerHTML = html;
+    form.reset();
+    ladeBatches();
+  } catch (err) { toast(err.message); }
+});
+ladeBatches();
+</script>
+{% endblock %}

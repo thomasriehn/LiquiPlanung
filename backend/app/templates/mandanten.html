@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block titel %}Mandanten – LiquiPlanung{% endblock %}
+{% block inhalt %}
+<div class="seite">
+  <h1>Mandanten</h1>
+  <div class="karten">
+    {% for m in mandanten %}
+    <a class="karte {% if not m.aktiv %}inaktiv{% endif %}" href="/mandanten/{{ m.id }}/plan">
+      <strong>{{ m.name }}</strong>
+      <span>{{ m.kontenrahmen }} · {{ m.bundesland }} · {{ m.verfahrensstatus }}</span>
+      {% if m.aktenzeichen %}<span class="klein">{{ m.aktenzeichen }}</span>{% endif %}
+    </a>
+    {% else %}
+    <p>Noch keine Mandanten vorhanden.</p>
+    {% endfor %}
+  </div>
+
+  {% if ist_admin %}
+  <h2>Neuen Mandanten anlegen</h2>
+  <form id="mandant-form" class="formular-zeilen">
+    <label>Name<input name="name" required></label>
+    <label>Kurzname<input name="kurzname" required pattern="[a-z0-9\-]+" title="Kleinbuchstaben, Ziffern, Bindestrich"></label>
+    <label>Kontenrahmen
+      <select name="kontenrahmen">
+        <option value="SKR03">SKR03</option>
+        <option value="SKR04">SKR04</option>
+        <option value="EIGEN">Eigener (leer)</option>
+      </select>
+    </label>
+    <label>Bundesland
+      <select name="bundesland">
+        {% for kz in ["BW","BY","BE","BB","HB","HH","HE","MV","NI","NW","RP","SL","SN","ST","SH","TH"] %}
+        <option value="{{ kz }}" {% if kz == "NW" %}selected{% endif %}>{{ kz }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>USt-Zeitraum
+      <select name="ust_zeitraum">
+        <option value="MONAT">monatlich</option>
+        <option value="QUARTAL">vierteljährlich</option>
+      </select>
+    </label>
+    <label class="cb"><input type="checkbox" name="dauerfrist"> Dauerfristverlängerung</label>
+    <label>Verfahrensstatus
+      <select name="verfahrensstatus">
+        <option value="REGELMANDAT">Regelmandat</option>
+        <option value="VORLAEUFIG">vorläufiges Verfahren</option>
+        <option value="EROEFFNET">eröffnetes Verfahren</option>
+        <option value="EIGENVERWALTUNG">Eigenverwaltung</option>
+      </select>
+    </label>
+    <label>Aktenzeichen<input name="aktenzeichen"></label>
+    <label>Insolvenz-Stichtag<input type="date" name="insolvenz_stichtag"></label>
+    <button type="submit">Anlegen</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}
+{% block skripte %}
+{% if ist_admin %}
+<script>
+document.getElementById('mandant-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const daten = Object.fromEntries(f.entries());
+  daten.dauerfrist = f.get('dauerfrist') === 'on';
+  if (!daten.insolvenz_stichtag) daten.insolvenz_stichtag = null;
+  try {
+    const erg = await api('POST', '/api/mandanten', daten);
+    location.href = `/mandanten/${erg.id}/plan`;
+  } catch (err) { toast(err.message); }
+});
+</script>
+{% endif %}
+{% endblock %}

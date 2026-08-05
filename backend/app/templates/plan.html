@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block titel %}13-Wochen-Plan – {{ mandant.name }}{% endblock %}
+{% block inhalt %}
+<div class="seite-breit">
+  <div class="werkzeuge">
+    <label>Start <input type="date" id="start"></label>
+    <label>Wochen <input type="number" id="wochen" value="13" min="1" max="26" style="width:60px"></label>
+    <label>Spalten
+      <select id="ansicht">
+        <option value="tage">Tage</option>
+        <option value="wochen">Wochen</option>
+      </select>
+    </label>
+    <label>Werte
+      <select id="metrik">
+        <option value="auto">Ist bis heute, Plan ab morgen</option>
+        <option value="plan">Plan</option>
+        <option value="ist">Ist</option>
+        <option value="delta">Abweichung (Ist − Soll)</option>
+      </select>
+    </label>
+    <button id="laden" class="sekundaer">Aktualisieren</button>
+    {% if not leser %}<button id="einfrieren" title="Aktuellen Plan als Soll-Vorgabe einfrieren">Plan einfrieren</button>{% endif %}
+    <span class="hinweis" id="basis-info"></span>
+  </div>
+  <div id="warnungen"></div>
+  <div class="matrix-huelle"><table class="matrix" id="matrix"></table></div>
+  <div class="legende">
+    <span>▾/▸ Gruppen auf-/zuklappen</span>
+    <span style="text-decoration: underline dotted #9db4d0;">Ist-Wert</span>
+    <span style="color:var(--rot)">negative Liquidität / Unterdeckung</span>
+    <span>Gelbe Spalte = heute</span>
+  </div>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>const MANDANT_ID = {{ mandant.id }};</script>
+<script src="/static/plan.js"></script>
+{% endblock %}

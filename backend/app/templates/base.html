@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block titel %}LiquiPlanung{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="kopf">
+  <a class="marke" href="/">💧 LiquiPlanung</a>
+  {% if mandant is defined and mandant %}
+  <nav class="mandant-nav">
+    <span class="mandant-name" title="{{ mandant.verfahrensstatus }}{% if mandant.aktenzeichen %} · {{ mandant.aktenzeichen }}{% endif %}">{{ mandant.name }}</span>
+    <a href="/mandanten/{{ mandant.id }}/plan" class="{% if aktiv_tab == 'plan' %}aktiv{% endif %}">13-Wochen-Plan</a>
+    <a href="/mandanten/{{ mandant.id }}/sollist">Soll/Ist</a>
+    <a href="/mandanten/{{ mandant.id }}/posten">Posten</a>
+    <a href="/mandanten/{{ mandant.id }}/budget">Budget</a>
+    <a href="/mandanten/{{ mandant.id }}/kalender">Kalender</a>
+    <a href="/mandanten/{{ mandant.id }}/konten">Konten</a>
+    <a href="/mandanten/{{ mandant.id }}/import">Import</a>
+    <a href="/mandanten/{{ mandant.id }}/einstellungen">Einstellungen</a>
+  </nav>
+  {% endif %}
+  <div class="kopf-rechts">
+    {% if benutzer is defined and benutzer %}
+      {% if ist_admin %}<a href="/benutzer">Benutzer</a>{% endif %}
+      <span class="benutzer-name">{{ benutzer.name }}</span>
+      <a href="/logout">Abmelden</a>
+    {% endif %}
+  </div>
+</header>
+<main>
+{% block inhalt %}{% endblock %}
+</main>
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+{% block skripte %}{% endblock %}
+</body>
+</html>

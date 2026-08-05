@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block titel %}Einstellungen – {{ mandant.name }}{% endblock %}
+{% block inhalt %}
+<div class="seite">
+  <h1>Einstellungen – {{ mandant.name }}</h1>
+  <form id="form" class="formular-zeilen">
+    <label>Name<input name="name" value="{{ mandant.name }}"></label>
+    <label>Bundesland
+      <select name="bundesland">
+        {% for kz, name in bundeslaender.items() %}
+        <option value="{{ kz }}" {% if kz == mandant.bundesland %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>USt-Zeitraum
+      <select name="ust_zeitraum">
+        <option value="MONAT" {% if mandant.ust_zeitraum == "MONAT" %}selected{% endif %}>monatlich</option>
+        <option value="QUARTAL" {% if mandant.ust_zeitraum == "QUARTAL" %}selected{% endif %}>vierteljährlich</option>
+      </select>
+    </label>
+    <label class="cb"><input type="checkbox" name="dauerfrist" {% if mandant.dauerfrist %}checked{% endif %}> Dauerfristverlängerung (USt)</label>
+    <label>Verfahrensstatus
+      <select name="verfahrensstatus">
+        {% for s in ["REGELMANDAT", "VORLAEUFIG", "EROEFFNET", "EIGENVERWALTUNG"] %}
+        <option value="{{ s }}" {% if s == mandant.verfahrensstatus %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Aktenzeichen<input name="aktenzeichen" value="{{ mandant.aktenzeichen or '' }}"></label>
+    <label>Insolvenz-Stichtag<input type="date" name="insolvenz_stichtag" value="{{ mandant.insolvenz_stichtag or '' }}"></label>
+    <label class="cb"><input type="checkbox" name="aktiv" {% if mandant.aktiv %}checked{% endif %}> Mandant aktiv</label>
+    {% if not leser %}<button type="submit">Speichern</button>{% endif %}
+  </form>
+
+  <h2>Bestände (Anker für die Fortschreibung)</h2>
+  <p class="hinweis">Der jüngste Bestand je Bank-/Kassenkonto ist der Startpunkt der
+    Bestandsfortschreibung (Wert = Kontostand zum Tagesende). Warenbestände werden
+    nachrichtlich fortgeschrieben.</p>
+  {% if not leser %}
+  <form id="bestand-form" class="formular-zeilen">
+    <label>Typ<select name="typ" id="bestand-typ">
+      <option value="BANK">Bank</option><option value="KASSE">Kasse</option><option value="WAREN">Waren</option>
+    </select></label>
+    <label>Konto<select name="konto_id" id="bestand-konto"></select></label>
+    <label>Datum<input type="date" name="datum" required></label>
+    <label>Wert<input type="number" step="0.01" name="wert" required></label>
+    <button type="submit">Erfassen</button>
+  </form>
+  {% endif %}
+  <table class="liste">
+    <thead><tr><th>Datum</th><th>Typ</th><th>Konto</th><th class="zahl">Wert</th><th></th></tr></thead>
+    <tbody id="bestaende"></tbody>
+  </table>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+const MANDANT_ID = {{ mandant.id }};
+const LESER = {{ 'true' if leser else 'false' }};
+let konten = [];
+
+document.getElementById("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const daten = Object.fromEntries(f.entries());
+  daten.dauerfrist = f.get("dauerfrist") === "on";
+  daten.aktiv = f.get("aktiv") === "on";
+  if (!daten.insolvenz_stichtag) daten.insolvenz_stichtag = null;
+  try { await api("PATCH", `/api/mandanten/${MANDANT_ID}`, daten); toast("Gespeichert.", false); }
+  catch (err) { toast(err.message); }
+});
+
+function kontoName(id) {
+  const k = konten.find(k => k.id === id);
+  return k ? `${k.nummer} ${k.bezeichnung}` : "–";
+}
+
+async function ladeBestaende() {
+  const bestaende = await api("GET", `/api/mandanten/${MANDANT_ID}/bestaende`);
+  const tb = document.getElementById("bestaende");
+  tb.innerHTML = "";
+  for (const b of bestaende) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${b.datum}</td><td>${b.typ}</td><td>${kontoName(b.konto_id)}</td>
+      <td class="zahl">${eur(b.wert)}</td>
+      <td>${LESER ? "" : `<button class="gefahr" data-id="${b.id}">✕</button>`}</td>`;
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll("button[data-id]").forEach(btn => btn.addEventListener("click", async () => {
+    if (!confirm("Bestand löschen?")) return;
+    try { await api("DELETE", `/api/bestaende/${btn.dataset.id}`); ladeBestaende(); }
+    catch (e) { toast(e.message); }
+  }));
+}
+
+const bestandForm = document.getElementById("bestand-form");
+if (bestandForm) {
+  document.getElementById("bestand-typ").addEventListener("change", fuelleKonten);
+  bestandForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(bestandForm);
+    const daten = Object.fromEntries(f.entries());
+    daten.wert = parseFloat(daten.wert);
+    daten.konto_id = daten.konto_id ? parseInt(daten.konto_id) : null;
+    try { await api("POST", `/api/mandanten/${MANDANT_ID}/bestaende`, daten); bestandForm.reset(); fuelleKonten(); ladeBestaende(); }
+    catch (err) { toast(err.message); }
+  });
+}
+
+function fuelleKonten() {
+  const typ = document.getElementById("bestand-typ") ? document.getElementById("bestand-typ").value : "BANK";
+  const sel = document.getElementById("bestand-konto");
+  if (!sel) return;
+  const passend = konten.filter(k => typ === "WAREN" ? false : k.typ === typ);
+  sel.innerHTML = typ === "WAREN" ? `<option value="">–</option>`
+    : passend.map(k => `<option value="${k.id}">${k.nummer} ${k.bezeichnung}</option>`).join("");
+}
+
+api("GET", `/api/mandanten/${MANDANT_ID}/konten`).then(d => {
+  konten = d.konten;
+  fuelleKonten();
+  ladeBestaende();
+});
+</script>
+{% endblock %}

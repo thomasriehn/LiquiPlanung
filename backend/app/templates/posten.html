@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block titel %}Posten – {{ mandant.name }}{% endblock %}
+{% block inhalt %}
+<div class="seite">
+  <h1>Offene Posten &amp; Dauerbuchungen</h1>
+  <div class="tab-leiste">
+    <button id="tab-op" class="aktiv">Offene Posten</button>
+    <button id="tab-dauer">Dauerbuchungen</button>
+  </div>
+
+  <div id="bereich-op">
+    {% if not leser %}
+    <form id="op-form" class="formular-zeilen">
+      <label>Art<select name="art"><option value="KREDITOR">Eingangsrechnung</option><option value="DEBITOR">Forderung</option></select></label>
+      <label>Partner<input name="partner" required></label>
+      <label>Beleg-Nr.<input name="belegnr"></label>
+      <label>Fällig am<input type="date" name="faellig_am" required></label>
+      <label>Zahlung geplant<input type="date" name="zahlung_geplant_am"></label>
+      <label>Betrag brutto<input type="number" step="0.01" name="betrag_brutto" required></label>
+      <label>Konto<select name="konto_id" class="konto-auswahl"></select></label>
+      <button type="submit">Anlegen</button>
+    </form>
+    {% endif %}
+    <table class="liste">
+      <thead><tr><th>Art</th><th>Partner</th><th>Beleg</th><th>Fällig</th><th>Geplant</th>
+        <th class="zahl">Betrag</th><th>Konto</th><th>Status</th><th></th></tr></thead>
+      <tbody id="op-tabelle"></tbody>
+    </table>
+  </div>
+
+  <div id="bereich-dauer" style="display:none">
+    {% if not leser %}
+    <form id="dauer-form" class="formular-zeilen">
+      <label>Name<input name="name" required></label>
+      <label>Art<select name="art"><option value="KREDITOR">Verbindlichkeit</option><option value="DEBITOR">Erlös</option></select></label>
+      <label>Betrag brutto<input type="number" step="0.01" name="betrag_brutto" required></label>
+      <label>Intervall<select name="intervall">
+        <option value="MONATLICH">monatlich</option><option value="WOECHENTLICH">wöchentlich</option>
+        <option value="QUARTAL">vierteljährlich</option><option value="JAEHRLICH">jährlich</option></select></label>
+      <label>Stichtag (Tag bzw. 0=Mo..6=So)<input type="number" name="stichtag" value="1" min="0" max="31"></label>
+      <label>Gültig von<input type="date" name="gueltig_von" required></label>
+      <label>Gültig bis<input type="date" name="gueltig_bis"></label>
+      <label>Konto<select name="konto_id" class="konto-auswahl"></select></label>
+      <button type="submit">Anlegen</button>
+    </form>
+    {% endif %}
+    <table class="liste">
+      <thead><tr><th>Name</th><th>Art</th><th class="zahl">Betrag</th><th>Intervall</th>
+        <th>Stichtag</th><th>Gültig</th><th>Konto</th><th>aktiv</th><th></th></tr></thead>
+      <tbody id="dauer-tabelle"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+const MANDANT_ID = {{ mandant.id }};
+const LESER = {{ 'true' if leser else 'false' }};
+let konten = [];
+
+function kontoName(id) {
+  const k = konten.find(k => k.id === id);
+  return k ? `${k.nummer} ${k.bezeichnung}` : "–";
+}
+
+async function ladeKonten() {
+  const d = await api("GET", `/api/mandanten/${MANDANT_ID}/konten`);
+  konten = d.konten.filter(k => k.aktiv);
+  const optionen = `<option value="">–</option>` + konten.map(k =>
+    `<option value="${k.id}">${k.nummer} ${k.bezeichnung}</option>`).join("");
+  document.querySelectorAll(".konto-auswahl").forEach(sel => sel.innerHTML = optionen);
+}
+
+async function ladeOP() {
+  const posten = await api("GET", `/api/mandanten/${MANDANT_ID}/posten`);
+  const tb = document.getElementById("op-tabelle");
+  tb.innerHTML = "";
+  for (const p of posten) {
+    const tr = document.createElement("tr");
+    if (p.status !== "OFFEN") tr.style.opacity = ".5";
+    tr.innerHTML = `
+      <td>${p.art === "KREDITOR" ? "ER" : "FO"}</td>
+      <td>${p.partner}</td><td>${p.belegnr || ""}</td>
+      <td>${p.faellig_am}</td><td>${p.zahlung_geplant_am || ""}</td>
+      <td class="zahl">${eur(p.betrag_brutto)}</td>
+      <td>${kontoName(p.konto_id)}</td><td>${p.status}</td>
+      <td>${LESER ? "" : `
+        ${p.status === "OFFEN" ? `<button class="sekundaer" data-aktion="bezahlt" data-id="${p.id}">bezahlt</button>` : ""}
+        <button class="gefahr" data-aktion="loeschen" data-id="${p.id}">✕</button>`}</td>`;
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
+    try {
+      if (btn.dataset.aktion === "bezahlt") {
+        await api("PATCH", `/api/posten/${btn.dataset.id}`,
+          { status: "BEZAHLT", bezahlt_am: new Date().toISOString().slice(0, 10) });
+      } else {
+        if (!confirm("Posten löschen?")) return;
+        await api("DELETE", `/api/posten/${btn.dataset.id}`);
+      }
+      ladeOP();
+    } catch (e) { toast(e.message); }
+  }));
+}
+
+async function ladeDauer() {
+  const dauer = await api("GET", `/api/mandanten/${MANDANT_ID}/dauerbuchungen`);
+  const tb = document.getElementById("dauer-tabelle");
+  tb.innerHTML = "";
+  for (const d of dauer) {
+    const tr = document.createElement("tr");
+    if (!d.aktiv) tr.style.opacity = ".5";
+    tr.innerHTML = `
+      <td>${d.name}</td><td>${d.art === "KREDITOR" ? "Ausgabe" : "Einnahme"}</td>
+      <td class="zahl">${eur(d.betrag_brutto)}</td><td>${d.intervall}</td>
+      <td>${d.stichtag}</td><td>${d.gueltig_von}${d.gueltig_bis ? " – " + d.gueltig_bis : ""}</td>
+      <td>${kontoName(d.konto_id)}</td><td>${d.aktiv ? "✓" : "–"}</td>
+      <td>${LESER ? "" : `
+        <button class="sekundaer" data-aktion="toggle" data-id="${d.id}" data-aktiv="${d.aktiv}">${d.aktiv ? "deaktivieren" : "aktivieren"}</button>
+        <button class="gefahr" data-aktion="loeschen" data-id="${d.id}">✕</button>`}</td>`;
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
+    try {
+      if (btn.dataset.aktion === "toggle") {
+        await api("PATCH", `/api/dauerbuchungen/${btn.dataset.id}`, { aktiv: btn.dataset.aktiv !== "true" });
+      } else {
+        if (!confirm("Dauerbuchung löschen?")) return;
+        await api("DELETE", `/api/dauerbuchungen/${btn.dataset.id}`);
+      }
+      ladeDauer();
+    } catch (e) { toast(e.message); }
+  }));
+}
+
+const opForm = document.getElementById("op-form");
+if (opForm) opForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(opForm);
+  const daten = Object.fromEntries(f.entries());
+  daten.betrag_brutto = parseFloat(daten.betrag_brutto);
+  daten.konto_id = daten.konto_id ? parseInt(daten.konto_id) : null;
+  for (const feld of ["belegnr", "zahlung_geplant_am"]) if (!daten[feld]) daten[feld] = null;
+  try { await api("POST", `/api/mandanten/${MANDANT_ID}/posten`, daten); opForm.reset(); ladeOP(); }
+  catch (err) { toast(err.message); }
+});
+
+const dauerForm = document.getElementById("dauer-form");
+if (dauerForm) dauerForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(dauerForm);
+  const daten = Object.fromEntries(f.entries());
+  daten.betrag_brutto = parseFloat(daten.betrag_brutto);
+  daten.stichtag = parseInt(daten.stichtag);
+  daten.konto_id = daten.konto_id ? parseInt(daten.konto_id) : null;
+  if (!daten.gueltig_bis) daten.gueltig_bis = null;
+  try { await api("POST", `/api/mandanten/${MANDANT_ID}/dauerbuchungen`, daten); dauerForm.reset(); ladeDauer(); }
+  catch (err) { toast(err.message); }
+});
+
+document.getElementById("tab-op").addEventListener("click", () => wechsel("op"));
+document.getElementById("tab-dauer").addEventListener("click", () => wechsel("dauer"));
+function wechsel(tab) {
+  document.getElementById("bereich-op").style.display = tab === "op" ? "" : "none";
+  document.getElementById("bereich-dauer").style.display = tab === "dauer" ? "" : "none";
+  document.getElementById("tab-op").classList.toggle("aktiv", tab === "op");
+  document.getElementById("tab-dauer").classList.toggle("aktiv", tab === "dauer");
+}
+
+ladeKonten().then(() => { ladeOP(); ladeDauer(); });
+</script>
+{% endblock %}

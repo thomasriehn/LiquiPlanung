@@ -1,0 +1,210 @@
+# LiquiPlanung – 13-Wochen-Liquiditätsplanung für Insolvenzbuchhalter
+
+Konzept- und Architekturdokument. Stand: Erstimplementierung.
+
+## 1. Ziel und Kontext
+
+Zentralisierte, mandantenfähige Webanwendung zur rollierenden 13-Wochen-Liquiditätsplanung
+als Ablösung der bisherigen Excel-Lösung. Betreiber ist ein Insolvenzbuchhalter, der die
+Planung für diverse Mandanten (Schuldnerunternehmen in Eigenverwaltung, vorläufigen und
+eröffneten Verfahren sowie Regelmandate) auf einem eigenen Server (Proxmox / LXC) betreibt.
+
+Kernanforderungen aus der Aufgabenstellung:
+
+- Historienwerte als Basis: Buchungssätze und BWA aus Buchhaltungssystemen (DATEV, Addison).
+- Auswählbare Kontenrahmen (SKR03, SKR04, eigene); je Konto definierte Umsatzsteuerpflicht
+  inkl. Prozentsatz.
+- Aufgelaufene Eingangsrechnungen (offene Posten) und Dauerverbindlichkeiten als Planbasis.
+- Zahlungskalender für Sozialversicherungsbeiträge und Steuerarten (USt-VA, Lohnsteuer,
+  Gewerbesteuer, Körperschaftsteuer).
+- Budgetplanung auf Kontenebene für den Zukunftszeitraum.
+- Rollierende 13-Wochen-Darstellung: Spalten = Tage, Zeilen = Konten der BWA inkl.
+  Aggregationsknoten; Soll-/Ist-Vergleich mit Abweichungsausweis.
+- Bestände (Banken, Kassen, Waren) und Liquiditätsentwicklung.
+- Multimandantenfähig, PostgreSQL, Betrieb im LXC-Container (Postgres im Docker).
+
+## 2. Was über die Aufgabenstellung hinaus notwendig ist
+
+Diese Punkte wurden bewusst durchdacht; ein Teil ist bereits implementiert (✔),
+ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
+
+**Fachlich / insolvenzspezifisch**
+
+1. ✔ **Plan-Einfrieren (Snapshots):** Ein ehrlicher Soll-/Ist-Vergleich ist nur möglich,
+   wenn der Plan zum Zeitpunkt X eingefroren wird. Eine "lebende" Planung würde sich
+   nachträglich den Ist-Werten annähern und Abweichungen verschleiern. Daher gibt es
+   Plan-Snapshots (manuell oder wöchentlich), gegen die das Ist verglichen wird.
+2. ✔ **Überfällige Posten:** Offene Posten mit Fälligkeit vor dem Planungsbeginn dürfen
+   nicht verschwinden – sie werden in die erste Planwoche gezogen und markiert.
+3. ✔ **Forderungsseite:** Neben Eingangsrechnungen (Kreditoren) werden auch
+   Ausgangsrechnungen/Forderungen (Debitoren) als erwartete Einzahlungen geführt.
+4. ✔ **Doppelzählungs-Vermeidung ("Restbudget-Logik"):** Budget je Konto und Woche wird um
+   bereits explizit geplante Posten (OPs, Dauerbuchungen, Kalendertermine) desselben Kontos
+   gekürzt (Untergrenze 0). Sonst würde z. B. die Miete doppelt geplant (Dauerbuchung + Budget).
+5. ✔ **Kontokorrent-/Kreditlinien:** Verfügbare Liquidität = Bestand + freie Linie.
+   Je Bankkonto ist eine Kreditlinie hinterlegbar; die Darstellung weist beides aus.
+6. → **Masseverbindlichkeiten vs. Insolvenzforderungen (§ 38 / § 55 InsO):** Im eröffneten
+   Verfahren dürfen Altverbindlichkeiten nicht bedient werden. Vorgesehen: Kennzeichen je
+   offenem Posten (Insolvenzforderung / Masseverbindlichkeit / Aus-/Absonderung) mit
+   Zahlungssperre für Insolvenzforderungen ab Stichtag. Der Verfahrensstatus und Stichtag
+   sind je Mandant bereits erfasst.
+7. → **Insolvenzgeld:** Im Insolvenzgeldzeitraum (bis 3 Monate) entfallen Lohnauszahlungen
+   beim Schuldner; Vorfinanzierung wirkt als Einzahlung. Abbildbar über Budget/Posten,
+   später als eigener Assistent.
+8. → **Szenarien (Best/Base/Worst):** Mehrere Planvarianten je Mandant.
+9. → **Bankdatenimport (MT940 / CAMT.053):** Kontoauszüge als zusätzliche, tagesaktuelle
+   Ist-Quelle unabhängig vom Buchhaltungsexport.
+
+**Steuer-/SV-Regeln**
+
+10. ✔ **Bankarbeitstage & Feiertage je Bundesland:** SV-Beiträge sind am drittletzten
+    Bankarbeitstag des Monats fällig; Bankarbeitstage = Mo–Fr ohne gesetzliche Feiertage,
+    ohne 24.12. und 31.12. Feiertage werden je Bundesland berechnet (inkl. beweglicher
+    Feiertage über die Osterformel).
+11. ✔ **Steuertermine mit Verschiebung:** Fälligkeiten (10. bzw. 15.) verschieben sich auf
+    den nächsten Werktag, wenn sie auf Sa/So/Feiertag fallen (§ 108 Abs. 3 AO).
+12. ✔ **USt-Zeitraum & Dauerfristverlängerung:** je Mandant monatlich/vierteljährlich,
+    Dauerfristverlängerung (+1 Monat) konfigurierbar.
+13. ✔ **Beitrags-/Steuerhöhe:** Je Terminart eine Regel: fester Betrag oder Schätzung aus
+    der Historie (Durchschnitt der letzten Ist-Zahlungen auf den verknüpften Konten).
+    Generierte Termine sind einzeln übersteuerbar.
+14. → **USt-Sondervorauszahlung (1/11)** und Schonfristen: Ausbaustufe.
+
+**Technisch / organisatorisch**
+
+15. ✔ **Benutzer- und Rollenmodell:** Admin / Bearbeiter / Leser, Zuordnung von Benutzern
+    zu Mandanten (Mandantentrennung auf Anwendungsebene, jede Abfrage mandantengefiltert).
+16. ✔ **Audit-Log:** Wesentliche Änderungen (Importe, Stammdaten, Snapshots) werden mit
+    Benutzer und Zeitstempel protokolliert (GoBD-orientierte Nachvollziehbarkeit).
+17. ✔ **Import-Validierung:** Buchungen auf Konten ohne Stammsatz gehen nicht verloren,
+    sondern werden ausgewiesen ("unbekannte Konten"), damit der Kontenrahmen gepflegt
+    werden kann.
+18. ✔ **Demo-Mandant:** Auf Wunsch wird ein Beispielmandant mit Daten angelegt, damit die
+    Darstellung sofort prüfbar ist.
+19. → **Export (PDF/Excel):** Berichte für Gericht, Sachwalter, Gläubigerausschuss.
+20. → **Datensicherung:** pg_dump-Cron im LXC (Anleitung in `deploy/PROXMOX_LXC.md`),
+    später integrierte Sicherung.
+21. → **DSGVO:** Personenbezogene Daten (Kreditoren-/Debitorennamen) – Löschkonzept nach
+    Verfahrensende; TLS via Reverse Proxy (Anleitung enthalten).
+22. → **Alembic-Migrationen:** Erststand nutzt `create_all`; sobald produktive Daten
+    vorliegen, werden Schemaänderungen über Alembic versioniert.
+
+## 3. Architektur
+
+```
+┌─────────────────────────── LXC-Container (Proxmox) ───────────────────────────┐
+│  ┌──────────── Docker ────────────┐      ┌──────────── Docker ─────────────┐  │
+│  │  app: FastAPI + Uvicorn        │◄────►│  db: PostgreSQL 16              │  │
+│  │  (Jinja2-Seiten + JSON-API)    │      │  Volume: pgdata                 │  │
+│  └────────────────────────────────┘      └─────────────────────────────────┘  │
+│           ▲  Port 8000 (per Reverse Proxy / TLS veröffentlichen)              │
+└───────────┼───────────────────────────────────────────────────────────────────┘
+            │
+   Browser der Sachbearbeiter (Mandantenauswahl, Import, Planung, Soll/Ist)
+```
+
+- **Backend:** Python 3.12, FastAPI, SQLAlchemy 2, PostgreSQL (Entwicklung/Tests auch SQLite).
+- **Frontend:** Serverseitig gerenderte Seiten (Jinja2) + leichtgewichtiges Vanilla-JS für
+  die Plan-Matrix, Budget-Editor usw. Kein Node-Build nötig → einfacher Betrieb im LXC.
+- **Auth:** Session-Cookie (signiert), Passwörter mit PBKDF2-HMAC-SHA256.
+- **Deployment:** `docker compose up -d` im LXC (Anleitung: `deploy/PROXMOX_LXC.md`).
+
+## 4. Datenmodell (Kern)
+
+| Tabelle | Zweck |
+|---|---|
+| `benutzer`, `benutzer_mandanten` | Benutzer, Rollen, Mandantenzuordnung |
+| `mandanten` | Mandant inkl. Kontenrahmen-Typ, Bundesland, USt-Zeitraum, Dauerfrist, Verfahrensstatus/-stichtag |
+| `konto_gruppen` | BWA-Aggregationsknoten (Baum), Richtung EIN/AUS/INFO |
+| `konten` | Konten je Mandant: Nummer, Bezeichnung, Typ (BANK/KASSE/ERLOES/…), **USt-Satz**, Gruppe, Kreditlinie |
+| `import_batches`, `buchungen` | Importierte Ist-Buchungssätze (DATEV/CSV) |
+| `offene_posten` | Eingangs-/Ausgangsrechnungen: Fälligkeit, geplantes Zahldatum, Status |
+| `dauerbuchungen` | Dauerverbindlichkeiten/-aufträge mit Intervall und Stichtag |
+| `budgets`, `budget_wochen` | Budget je Konto/Monat (netto) + Wochen-Override |
+| `termin_regeln`, `zahlungstermine` | Kalenderregeln (SV, USt-VA, LSt, GewSt, KSt) und generierte, editierbare Termine |
+| `bestaende` | Anfangs-/Stichtagsbestände Bank/Kasse/Waren |
+| `plan_snapshots`, `plan_snapshot_werte` | Eingefrorene Plandaten für den Soll-/Ist-Vergleich |
+| `audit_log` | Protokoll wesentlicher Aktionen |
+
+Alle mandantenbezogenen Tabellen tragen `mandant_id`; jeder Zugriff läuft über eine
+Berechtigungsprüfung (Benutzer ↔ Mandant).
+
+## 5. Planungslogik (Engine)
+
+Planungsfenster: rollierend 13 ISO-Wochen (91 Tage), Beginn Montag der laufenden Woche.
+
+**Ist** (aus importierten Buchungen): Ein Buchungssatz ist liquiditätswirksam, wenn genau
+eine Seite ein Finanzkonto (Bank/Kasse) ist. Der Zahlungsfluss (+ Einzahlung / − Auszahlung,
+Vorzeichen aus Soll/Haben der Finanzkontoseite) wird der Sachkontoseite zugeordnet –
+dadurch entstehen die BWA-Zeilen. Bank-an-Bank = Umbuchung (nur Bestandsverschiebung).
+
+**Plan** je Konto/Tag aus vier Quellen:
+
+1. Offene Posten (geplantes Zahldatum, sonst Fälligkeit; überfällig → erste Planwoche),
+2. Dauerbuchungen (Intervall-Expansion, Verschiebung auf Bankarbeitstag),
+3. Zahlungstermine aus dem Kalender (SV/Steuern),
+4. Budget: Wochenbudget (Override oder Monatsbudget anteilig nach Bankarbeitstagen),
+   **abzüglich** der expliziten Posten desselben Kontos in der Woche (Restbudget ≥ 0),
+   verteilt auf die Bankarbeitstage der Woche. Netto-Budgets werden über den USt-Satz des
+   Kontos auf Brutto-Zahlungswirkung umgerechnet.
+
+**Bestände & Liquidität:** Je Finanzkonto Ankerbestand (Stichtag) + Ist-Bewegungen bis
+heute; ab morgen Fortschreibung über den geplanten Netto-Cashflow. Warenbestand wird
+nachrichtlich fortgeschrieben (letzter erfasster Wert). Verfügbare Liquidität = Bestand +
+freie Kreditlinien.
+
+**Soll/Ist:** Für vergangene Tage im Fenster wird das Ist gegen den eingefrorenen Plan
+(neuester Snapshot, dessen Fenster den Tag abdeckt) gestellt; Abweichung = Ist − Plan.
+Ohne Snapshot dient der Live-Plan als Vergleichsbasis (gekennzeichnet).
+
+## 6. Zahlungskalender-Regeln (implementiert)
+
+| Terminart | Regel |
+|---|---|
+| SV-Beiträge | drittletzter Bankarbeitstag des Monats (Mo–Fr, ohne Feiertage des Bundeslands, ohne 24.12./31.12.) |
+| USt-VA | 10. des Folgemonats (Monat) bzw. 10. nach Quartalsende; Dauerfrist: +1 Monat; Verschiebung auf nächsten Werktag |
+| Lohnsteuer | 10. des Folgemonats (Verschiebung wie oben) |
+| GewSt-Vorauszahlung | 15.02. / 15.05. / 15.08. / 15.11. |
+| KSt-/ESt-Vorauszahlung | 10.03. / 10.06. / 10.09. / 10.12. |
+
+Beträge je Regel: fest oder Historien-Schätzung (Ø der letzten 3 Monats-Zahlungen auf dem
+verknüpften Konto). Generierte Termine sind editier- und löschbar; manuell angepasste
+Termine werden bei Neugenerierung nicht überschrieben.
+
+## 7. Importformate
+
+- **DATEV Buchungsstapel (EXTF/DTVF, CSV):** Header wird ausgewertet (Wirtschaftsjahr,
+  Zeitraum); Spalten per Kopfzeile oder Positionsfallback (Umsatz, S/H, Konto, Gegenkonto,
+  Belegdatum TTMM, Belegfeld 1, Buchungstext). Encoding-Erkennung (CP1252/UTF-8),
+  Dezimalkomma.
+- **Generisches CSV** (für Addison u. a.): Spalten `Datum;Konto;Gegenkonto;Betrag;SH;Belegfeld;Text`
+  (Kopfzeilen-Erkennung, flexible Datumsformate). Ein Addison-Export lässt sich darauf abbilden.
+- **BWA-/Saldenimport:** `Konto;Jahr;Monat;Betrag` als Historienbasis für Budgetvorschläge.
+
+Unbekannte Konten werden beim Import gemeldet und können direkt angelegt werden.
+
+## 8. Kontenrahmen
+
+SKR03 und SKR04 werden als Vorlage mit den planungsrelevanten Konten (inkl. USt-Satz und
+BWA-Gruppenzuordnung) je Mandant eingespielt und sind danach frei editier- und erweiterbar
+(auch als CSV-Import). Ein leerer, eigener Kontenrahmen ist ebenfalls möglich. Die
+Vorbelegungen (USt-Sätze, Gruppenzuordnung) sind Vorschlagswerte und je Mandant zu prüfen.
+
+## 9. Sicherheit & Mandantentrennung
+
+- Jede API-Route prüft Login und Mandantenberechtigung; Queries sind immer auf
+  `mandant_id` gefiltert.
+- Rollen: `ADMIN` (alles, Benutzerverwaltung), `BEARBEITER` (zugeordnete Mandanten
+  schreibend), `LESER` (lesend).
+- Session-Cookies signiert (`SECRET_KEY` zwingend setzen), Passwort-Hashing PBKDF2.
+- Betrieb hinter Reverse Proxy mit TLS empfohlen (siehe Deployment-Doku).
+
+## 10. Roadmap (bewusst noch nicht in der Erstversion)
+
+1. Masse-/Insolvenzforderungs-Kennzeichen mit Zahlungssperre; Insolvenzgeld-Assistent.
+2. Szenarien (Best/Base/Worst) je Mandant.
+3. MT940/CAMT.053-Bankimport; automatischer OP-Ausgleich.
+4. PDF-/Excel-Export der 13-Wochen-Übersicht und des Soll-/Ist-Berichts.
+5. Alembic-Migrationen, integrierte Backups, 2-Faktor-Login.
+6. USt-Zahllast-Vorschau aus Budget (Erlöse × Satz − Vorsteuer) statt Historienschätzung.
+7. Feingranulare Verteilungsprofile für Budgets (z. B. Zahllauf freitags).

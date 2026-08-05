@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block titel %}Budget – {{ mandant.name }}{% endblock %}
+{% block inhalt %}
+<div class="seite">
+  <h1>Budgetplanung (Netto-Beträge je Konto und Monat)</h1>
+  <p class="hinweis">
+    Beträge netto und positiv erfassen – das Vorzeichen ergibt sich aus der BWA-Gruppe
+    (Einzahlung/Auszahlung). Die Zahlungswirkung wird über den USt-Satz des Kontos auf brutto
+    umgerechnet und wochenweise um bereits explizit geplante Posten gekürzt (Restbudget).
+  </p>
+  <div class="werkzeuge">
+    <label>Jahr <input type="number" id="jahr" style="width:90px"></label>
+    <button id="laden" class="sekundaer">Anzeigen</button>
+    {% if not leser %}<button id="speichern">Speichern</button>{% endif %}
+  </div>
+  <div class="matrix-huelle" style="max-height:calc(100vh - 250px)">
+    <table class="liste" id="tabelle"></table>
+  </div>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+const MANDANT_ID = {{ mandant.id }};
+const LESER = {{ 'true' if leser else 'false' }};
+const MONATE = ["Jan","Feb","Mrz","Apr","Mai","Jun","Jul","Aug","Sep","Okt","Nov","Dez"];
+let konten = [], geaendert = new Map();
+
+document.getElementById("jahr").value = new Date().getFullYear();
+
+async function lade() {
+  const jahr = parseInt(document.getElementById("jahr").value);
+  const kd = await api("GET", `/api/mandanten/${MANDANT_ID}/konten`);
+  const gruppenName = Object.fromEntries(kd.gruppen.map(g => [g.id, g.name]));
+  konten = kd.konten.filter(k => k.aktiv && !["BANK", "KASSE", "INFO"].includes(k.typ));
+  const budgets = await api("GET", `/api/mandanten/${MANDANT_ID}/budgets?jahr=${jahr}`);
+  const werte = {};
+  for (const b of budgets) werte[`${b.konto_id}:${b.monat}`] = b.betrag_netto;
+  geaendert = new Map();
+
+  const tabelle = document.getElementById("tabelle");
+  let html = `<thead><tr><th>Konto</th><th>Gruppe</th>` +
+    MONATE.map(m => `<th class="zahl">${m}</th>`).join("") + `</tr></thead><tbody>`;
+  for (const k of konten) {
+    html += `<tr><td><span class="konto-nr">${k.nummer}</span> ${k.bezeichnung}` +
+      (k.ust_satz ? ` <span class="klein">(${k.ust_satz}%)</span>` : "") + `</td>` +
+      `<td class="klein">${gruppenName[k.gruppe_id] || "–"}</td>`;
+    for (let m = 1; m <= 12; m++) {
+      const wert = werte[`${k.id}:${m}`];
+      html += `<td class="zahl"><input type="number" step="0.01" min="0" style="width:90px"
+        data-konto="${k.id}" data-monat="${m}" value="${wert ?? ""}" ${LESER ? "disabled" : ""}></td>`;
+    }
+    html += `</tr>`;
+  }
+  tabelle.innerHTML = html + "</tbody>";
+  tabelle.addEventListener("change", (e) => {
+    if (!e.target.dataset.konto) return;
+    geaendert.set(`${e.target.dataset.konto}:${e.target.dataset.monat}`, e.target.value);
+  });
+}
+
+const speichernKnopf = document.getElementById("speichern");
+if (speichernKnopf) speichernKnopf.addEventListener("click", async () => {
+  const jahr = parseInt(document.getElementById("jahr").value);
+  const zellen = [];
+  for (const [schluessel, wert] of geaendert.entries()) {
+    const [kontoId, monat] = schluessel.split(":");
+    zellen.push({
+      konto_id: parseInt(kontoId), jahr, monat: parseInt(monat),
+      betrag_netto: wert === "" ? null : parseFloat(wert),
+    });
+  }
+  if (!zellen.length) { toast("Keine Änderungen.", false); return; }
+  try {
+    await api("PUT", `/api/mandanten/${MANDANT_ID}/budgets`, zellen);
+    toast(`${zellen.length} Zellen gespeichert.`, false);
+    geaendert = new Map();
+  } catch (e) { toast(e.message); }
+});
+document.getElementById("laden").addEventListener("click", lade);
+lade();
+</script>
+{% endblock %}

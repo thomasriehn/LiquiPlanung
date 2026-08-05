@@ -1,0 +1,133 @@
+:root {
+  --blau: #1d4e89; --blau-hell: #eaf1fa; --rand: #d6dde6; --text: #1c2530;
+  --gruen: #1e7f4f; --rot: #b3362c; --grau: #6b7684; --hintergrund: #f5f7fa;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  color: var(--text); background: var(--hintergrund); font-size: 14px;
+}
+a { color: var(--blau); text-decoration: none; }
+h1 { font-size: 20px; margin: 0 0 12px; }
+h2 { font-size: 16px; margin: 24px 0 8px; }
+
+.kopf {
+  display: flex; align-items: center; gap: 16px; padding: 8px 16px;
+  background: var(--blau); color: #fff; flex-wrap: wrap;
+}
+.kopf a { color: #dce7f5; padding: 4px 6px; border-radius: 4px; }
+.kopf a:hover, .kopf a.aktiv { background: rgba(255,255,255,.15); color: #fff; }
+.marke { font-weight: 700; font-size: 16px; }
+.mandant-nav { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
+.mandant-name { font-weight: 600; margin-right: 8px; color: #fff; }
+.kopf-rechts { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.benutzer-name { color: #cdd9ea; }
+
+main { padding: 16px; }
+.seite { max-width: 1100px; margin: 0 auto; }
+.seite-breit { max-width: none; }
+
+.karten { display: flex; gap: 12px; flex-wrap: wrap; }
+.karte {
+  display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; min-width: 240px;
+  background: #fff; border: 1px solid var(--rand); border-radius: 8px; color: var(--text);
+}
+.karte:hover { border-color: var(--blau); }
+.karte.inaktiv { opacity: .5; }
+.karte span { color: var(--grau); font-size: 12px; }
+.klein { font-size: 12px; color: var(--grau); }
+
+.login-box {
+  max-width: 360px; margin: 10vh auto; background: #fff; padding: 24px;
+  border: 1px solid var(--rand); border-radius: 8px;
+}
+.login-box label, .formular-zeilen label { display: block; margin-bottom: 10px; }
+.fehler { color: var(--rot); }
+
+input, select, button, textarea {
+  font: inherit; padding: 6px 8px; border: 1px solid var(--rand); border-radius: 4px;
+}
+input, select, textarea { width: 100%; background: #fff; }
+label { font-size: 13px; color: #3a4553; }
+label input, label select { margin-top: 2px; }
+button {
+  background: var(--blau); color: #fff; border: none; cursor: pointer; width: auto;
+  padding: 7px 14px;
+}
+button:hover { filter: brightness(1.1); }
+button.sekundaer { background: #fff; color: var(--blau); border: 1px solid var(--blau); }
+button.gefahr { background: var(--rot); }
+
+.formular-zeilen {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px; background: #fff; padding: 16px; border: 1px solid var(--rand);
+  border-radius: 8px; align-items: end;
+}
+.formular-zeilen .cb { display: flex; align-items: center; gap: 6px; }
+.formular-zeilen .cb input { width: auto; }
+
+table.liste { width: 100%; border-collapse: collapse; background: #fff; }
+table.liste th, table.liste td {
+  border: 1px solid var(--rand); padding: 5px 8px; text-align: left;
+}
+table.liste th { background: var(--blau-hell); position: sticky; top: 0; }
+table.liste td.zahl, table.liste th.zahl { text-align: right; font-variant-numeric: tabular-nums; }
+table.liste input, table.liste select { padding: 3px 5px; }
+
+.werkzeuge {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px;
+  background: #fff; border: 1px solid var(--rand); border-radius: 8px; padding: 10px 12px;
+}
+.werkzeuge label { display: flex; align-items: center; gap: 6px; }
+.werkzeuge input, .werkzeuge select { width: auto; }
+.hinweis { color: var(--grau); font-size: 12px; }
+.warnung { color: #8a5a00; background: #fff6e0; border: 1px solid #e8c56b;
+  padding: 8px 10px; border-radius: 6px; margin: 8px 0; }
+
+/* ---- Plan-Matrix ---- */
+.matrix-huelle {
+  overflow: auto; max-height: calc(100vh - 190px); background: #fff;
+  border: 1px solid var(--rand); border-radius: 8px;
+}
+table.matrix { border-collapse: separate; border-spacing: 0; font-size: 12px; }
+.matrix th, .matrix td {
+  border-right: 1px solid #edf0f4; border-bottom: 1px solid #edf0f4;
+  padding: 3px 6px; white-space: nowrap; text-align: right;
+  font-variant-numeric: tabular-nums; background: #fff;
+}
+.matrix thead th { position: sticky; background: var(--blau-hell); z-index: 3; }
+.matrix thead tr:nth-child(1) th { top: 0; }
+.matrix thead tr:nth-child(2) th { top: 25px; }
+.matrix .zeilkopf {
+  position: sticky; left: 0; text-align: left; z-index: 2; min-width: 230px; max-width: 320px;
+  overflow: hidden; text-overflow: ellipsis; border-right: 2px solid var(--rand);
+}
+.matrix thead .zeilkopf { z-index: 4; }
+.matrix tr.gruppe td { background: #f0f4f9; font-weight: 600; cursor: pointer; }
+.matrix tr.gruppe td.zeilkopf::before { content: "▾ "; color: var(--grau); }
+.matrix tr.gruppe.zu td.zeilkopf::before { content: "▸ "; }
+.matrix tr.summe td { background: #e8eef6; font-weight: 700; border-top: 2px solid var(--rand); }
+.matrix tr.bestand td { background: #f6f2e8; }
+.matrix tr.bestand.gesamt td { font-weight: 700; }
+.matrix td.we { background: #f7f8fa; }
+.matrix td.heute-spalte { background: #fdf3d7 !important; }
+.matrix th.heute-spalte { background: #f5d98a; }
+.matrix td.negativ { color: var(--rot); font-weight: 600; }
+.matrix td.positiv { color: var(--gruen); }
+.matrix td.ist-wert { text-decoration: underline dotted #9db4d0; text-underline-offset: 2px; }
+.matrix .konto-nr { color: var(--grau); margin-right: 4px; }
+.legende { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--grau); }
+
+#toast {
+  position: fixed; bottom: 20px; right: 20px; z-index: 99;
+  display: flex; flex-direction: column; gap: 8px;
+}
+#toast .meldung {
+  background: #223041; color: #fff; padding: 10px 14px; border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,.25); max-width: 420px;
+}
+#toast .meldung.fehler { background: var(--rot); }
+
+.tab-leiste { display: flex; gap: 4px; margin-bottom: 12px; }
+.tab-leiste button { background: #fff; color: var(--text); border: 1px solid var(--rand); }
+.tab-leiste button.aktiv { background: var(--blau); color: #fff; border-color: var(--blau); }

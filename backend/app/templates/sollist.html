@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block titel %}Soll/Ist – {{ mandant.name }}{% endblock %}
+{% block inhalt %}
+<div class="seite-breit">
+  <div class="werkzeuge">
+    <label>Eingefrorener Plan <select id="snapshot"></select></label>
+    <button id="laden" class="sekundaer">Anzeigen</button>
+    <span class="hinweis">Vergleich je Kalenderwoche: Soll (eingefroren) / Ist / Abweichung.
+      Der Plan wird über „Plan einfrieren“ auf der Plan-Seite festgeschrieben.</span>
+  </div>
+  <div class="matrix-huelle"><table class="matrix" id="tabelle"></table></div>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+const MANDANT_ID = {{ mandant.id }};
+
+async function ladeSnapshots() {
+  const snaps = await api("GET", `/api/mandanten/${MANDANT_ID}/plan/snapshots`);
+  const sel = document.getElementById("snapshot");
+  sel.innerHTML = snaps.length
+    ? snaps.map(s => `<option value="${s.id}">Stichtag ${s.stichtag} (erstellt ${new Date(s.erstellt_am).toLocaleDateString("de-DE")})</option>`).join("")
+    : `<option value="">– noch kein Snapshot –</option>`;
+}
+
+async function lade() {
+  const snapId = document.getElementById("snapshot").value;
+  const url = `/api/mandanten/${MANDANT_ID}/sollist` + (snapId ? `?snapshot_id=${snapId}` : "");
+  let d;
+  try { d = await api("GET", url); } catch (e) { toast(e.message); return; }
+  const tabelle = document.getElementById("tabelle");
+  if (!d.snapshot) {
+    tabelle.innerHTML = "<tr><td style='padding:16px'>Noch kein eingefrorener Plan vorhanden – bitte zuerst auf der Plan-Seite „Plan einfrieren“ ausführen.</td></tr>";
+    return;
+  }
+  const wochen = d.wochen;
+  let html = `<thead><tr><th class="zeilkopf">Zeile</th>` +
+    wochen.map(w => `<th colspan="3">${w.label}<br><span class="klein">${w.von.slice(8,10)}.${w.von.slice(5,7)}.–${w.bis.slice(8,10)}.${w.bis.slice(5,7)}.</span></th>`).join("") +
+    `</tr><tr><th class="zeilkopf"></th>` +
+    wochen.map(() => `<th>Soll</th><th>Ist</th><th>Δ</th>`).join("") + `</tr></thead><tbody>`;
+  const heuteKW = d.heute;
+  for (const z of d.zeilen) {
+    html += `<tr><td class="zeilkopf">${z.name}</td>`;
+    for (const w of wochen) {
+      const schluessel = `${w.jahr}-${String(w.kw).padStart(2, "0")}`;
+      const soll = z.plan[schluessel] || 0;
+      const vergangen = w.von <= heuteKW;
+      const ist = vergangen ? (z.ist[schluessel] || 0) : null;
+      const delta = vergangen ? ist - soll : null;
+      const deltaKlasse = delta === null ? "" : (delta < -0.005 ? "negativ" : (delta > 0.005 ? "positiv" : ""));
+      html += `<td>${soll ? eur(soll) : ""}</td>` +
+        `<td class="ist-wert">${ist === null || ist === 0 ? "" : eur(ist)}</td>` +
+        `<td class="${deltaKlasse}">${delta === null || Math.abs(delta) < 0.005 ? "" : eur(delta)}</td>`;
+    }
+    html += `</tr>`;
+  }
+  tabelle.innerHTML = html + "</tbody>";
+}
+
+document.getElementById("laden").addEventListener("click", lade);
+ladeSnapshots().then(lade);
+</script>
+{% endblock %}

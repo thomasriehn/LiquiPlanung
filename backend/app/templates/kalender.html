@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block titel %}Zahlungskalender – {{ mandant.name }}{% endblock %}
+{% block inhalt %}
+<div class="seite">
+  <h1>Zahlungskalender (SV-Beiträge &amp; Steuern)</h1>
+  <h2>Regeln</h2>
+  <p class="hinweis">
+    SV-Beiträge: drittletzter Bankarbeitstag des Monats · USt-VA/LSt: 10. des Folgemonats
+    {% if mandant.dauerfrist %}(USt mit Dauerfristverlängerung: +1 Monat){% endif %}
+    · GewSt: 15.02/05/08/11 · KSt: 10.03/06/09/12. Betrag „Historie“ = Ø der letzten
+    Ist-Zahlungen auf dem verknüpften Konto.
+  </p>
+  <table class="liste" id="regeln"></table>
+  <div class="werkzeuge" style="margin-top:12px">
+    {% if not leser %}<button id="generieren">Termine für 13 Wochen generieren</button>{% endif %}
+    <span class="hinweis">Bereits vorhandene oder manuell angepasste Termine bleiben unverändert.</span>
+  </div>
+  <h2>Termine</h2>
+  <table class="liste">
+    <thead><tr><th>Datum</th><th>Art</th><th class="zahl">Betrag</th><th>Konto</th>
+      <th>Kommentar</th><th>Status</th><th></th></tr></thead>
+    <tbody id="termine"></tbody>
+  </table>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+const MANDANT_ID = {{ mandant.id }};
+const LESER = {{ 'true' if leser else 'false' }};
+const TYP_NAMEN = { SV: "SV-Beiträge", UST_VA: "USt-VA", LST: "Lohnsteuer",
+  GEWST: "Gewerbesteuer", KST: "Körperschaftsteuer", SONSTIG: "Sonstiges" };
+let konten = [];
+
+function kontoName(id) {
+  const k = konten.find(k => k.id === id);
+  return k ? `${k.nummer} ${k.bezeichnung}` : "–";
+}
+
+async function ladeRegeln() {
+  const regeln = await api("GET", `/api/mandanten/${MANDANT_ID}/termin-regeln`);
+  const kontoOpt = (wert) => `<option value="">–</option>` + konten.map(k =>
+    `<option value="${k.id}" ${k.id===wert?"selected":""}>${k.nummer} ${k.bezeichnung}</option>`).join("");
+  let html = `<thead><tr><th>Art</th><th>aktiv</th><th>Betragsermittlung</th>
+    <th class="zahl">fester Betrag</th><th>Konto (BWA-Zeile)</th></tr></thead><tbody>`;
+  for (const r of regeln) {
+    html += `<tr data-id="${r.id}">
+      <td>${TYP_NAMEN[r.typ] || r.typ}</td>
+      <td><input type="checkbox" data-feld="aktiv" ${r.aktiv ? "checked" : ""}></td>
+      <td><select data-feld="betrag_modus">
+        <option value="FIX" ${r.betrag_modus==="FIX"?"selected":""}>fester Betrag</option>
+        <option value="HISTORIE" ${r.betrag_modus==="HISTORIE"?"selected":""}>aus Historie schätzen</option>
+      </select></td>
+      <td class="zahl"><input type="number" step="0.01" data-feld="betrag_fix" value="${r.betrag_fix || ""}" style="width:110px"></td>
+      <td><select data-feld="konto_id">${kontoOpt(r.konto_id)}</select></td></tr>`;
+  }
+  const tabelle = document.getElementById("regeln");
+  tabelle.innerHTML = html + "</tbody>";
+  if (LESER) tabelle.querySelectorAll("input,select").forEach(el => el.disabled = true);
+  tabelle.addEventListener("change", async (e) => {
+    const feld = e.target.dataset.feld;
+    if (!feld) return;
+    const id = e.target.closest("tr").dataset.id;
+    let wert;
+    if (e.target.type === "checkbox") wert = e.target.checked;
+    else if (feld === "betrag_fix") wert = parseFloat(e.target.value || 0);
+    else if (feld === "konto_id") wert = e.target.value === "" ? null : parseInt(e.target.value);
+    else wert = e.target.value;
+    try { await api("PATCH", `/api/termin-regeln/${id}`, { [feld]: wert }); }
+    catch (err) { toast(err.message); }
+  });
+}
+
+async function ladeTermine() {
+  const termine = await api("GET", `/api/mandanten/${MANDANT_ID}/termine`);
+  const tb = document.getElementById("termine");
+  tb.innerHTML = "";
+  for (const t of termine) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${LESER ? t.datum : `<input type="date" value="${t.datum}" data-feld="datum" style="width:140px">`}</td>
+      <td>${TYP_NAMEN[t.typ] || t.typ}</td>
+      <td class="zahl">${LESER ? eur(t.betrag) : `<input type="number" step="0.01" value="${t.betrag}" data-feld="betrag" style="width:110px">`}</td>
+      <td>${kontoName(t.konto_id)}</td>
+      <td class="klein">${t.kommentar || ""}</td>
+      <td>${t.status}</td>
+      <td>${LESER ? "" : `<button class="gefahr" data-id="${t.id}">✕</button>`}</td>`;
+    tr.dataset.id = t.id;
+    tb.appendChild(tr);
+  }
+  tb.addEventListener("change", async (e) => {
+    const feld = e.target.dataset.feld;
+    if (!feld) return;
+    const id = e.target.closest("tr").dataset.id;
+    const wert = feld === "betrag" ? parseFloat(e.target.value) : e.target.value;
+    try { await api("PATCH", `/api/termine/${id}`, { [feld]: wert }); }
+    catch (err) { toast(err.message); ladeTermine(); }
+  });
+  tb.querySelectorAll("button[data-id]").forEach(btn => btn.addEventListener("click", async () => {
+    if (!confirm("Termin löschen?")) return;
+    try { await api("DELETE", `/api/termine/${btn.dataset.id}`); ladeTermine(); }
+    catch (e) { toast(e.message); }
+  }));
+}
+
+const genKnopf = document.getElementById("generieren");
+if (genKnopf) genKnopf.addEventListener("click", async () => {
+  try {
+    const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/termine/generieren`, {});
+    toast(`${erg.angelegt} Termine angelegt, ${erg.uebersprungen} bereits vorhanden.`, false);
+    ladeTermine();
+  } catch (e) { toast(e.message); }
+});
+
+api("GET", `/api/mandanten/${MANDANT_ID}/konten`).then(d => {
+  konten = d.konten.filter(k => k.aktiv);
+  ladeRegeln();
+  ladeTermine();
+});
+</script>
+{% endblock %}

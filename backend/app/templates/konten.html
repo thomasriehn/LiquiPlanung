@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block titel %}Konten – {{ mandant.name }}{% endblock %}
+{% block inhalt %}
+<div class="seite">
+  <h1>Kontenrahmen ({{ mandant.kontenrahmen }})</h1>
+  <p class="hinweis">USt-Satz leer = nicht umsatzsteuerpflichtig. Änderungen werden sofort gespeichert.</p>
+  {% if not leser %}
+  <form id="neu-form" class="formular-zeilen">
+    <label>Nummer<input name="nummer" required></label>
+    <label>Bezeichnung<input name="bezeichnung" required></label>
+    <label>Typ<select name="typ" id="neu-typ"></select></label>
+    <label>USt-Satz %<input name="ust_satz" type="number" step="0.01" min="0" max="100" placeholder="leer = keine"></label>
+    <label>Gruppe<select name="gruppe_id" id="neu-gruppe"></select></label>
+    <button type="submit">Konto anlegen</button>
+  </form>
+  {% endif %}
+  <div style="height:10px"></div>
+  <table class="liste" id="tabelle">
+    <thead><tr>
+      <th>Nummer</th><th>Bezeichnung</th><th>Typ</th><th class="zahl">USt %</th>
+      <th>Gruppe</th><th class="zahl">Kreditlinie</th><th>liq.wirksam</th><th>aktiv</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+const MANDANT_ID = {{ mandant.id }};
+const LESER = {{ 'true' if leser else 'false' }};
+const TYPEN = ["BANK","KASSE","ERLOES","AUFWAND","PERSONAL","SV","STEUER","INVESTITION","FINANZIERUNG","INFO"];
+let gruppen = [];
+
+function typSelect(wert) {
+  return `<select data-feld="typ">` + TYPEN.map(t =>
+    `<option value="${t}" ${t===wert?"selected":""}>${t}</option>`).join("") + `</select>`;
+}
+function gruppeSelect(wert) {
+  return `<select data-feld="gruppe_id"><option value="">–</option>` + gruppen.map(g =>
+    `<option value="${g.id}" ${g.id===wert?"selected":""}>${g.name}</option>`).join("") + `</select>`;
+}
+
+async function lade() {
+  const d = await api("GET", `/api/mandanten/${MANDANT_ID}/konten`);
+  gruppen = d.gruppen;
+  const ng = document.getElementById("neu-gruppe");
+  if (ng) ng.innerHTML = `<option value="">–</option>` + gruppen.map(g => `<option value="${g.id}">${g.name}</option>`).join("");
+  const nt = document.getElementById("neu-typ");
+  if (nt) nt.innerHTML = TYPEN.map(t => `<option ${t==="AUFWAND"?"selected":""}>${t}</option>`).join("");
+  const tb = document.querySelector("#tabelle tbody");
+  tb.innerHTML = "";
+  for (const k of d.konten) {
+    const tr = document.createElement("tr");
+    if (!k.aktiv) tr.style.opacity = ".45";
+    tr.dataset.id = k.id;
+    tr.innerHTML = `
+      <td>${k.nummer}</td>
+      <td><input data-feld="bezeichnung" value="${k.bezeichnung.replaceAll('"','&quot;')}"></td>
+      <td>${typSelect(k.typ)}</td>
+      <td class="zahl"><input data-feld="ust_satz" type="number" step="0.01" min="0" max="100" style="width:70px" value="${k.ust_satz ?? ""}"></td>
+      <td>${gruppeSelect(k.gruppe_id)}</td>
+      <td class="zahl"><input data-feld="kreditlinie" type="number" step="0.01" style="width:100px" value="${k.kreditlinie || ""}"></td>
+      <td><input data-feld="liquiditaetswirksam" type="checkbox" ${k.liquiditaetswirksam?"checked":""}></td>
+      <td><input data-feld="aktiv" type="checkbox" ${k.aktiv?"checked":""}></td>`;
+    tb.appendChild(tr);
+  }
+  if (LESER) tb.querySelectorAll("input,select").forEach(el => el.disabled = true);
+}
+
+document.getElementById("tabelle").addEventListener("change", async (e) => {
+  const feld = e.target.dataset.feld;
+  if (!feld) return;
+  const id = e.target.closest("tr").dataset.id;
+  let wert;
+  if (e.target.type === "checkbox") wert = e.target.checked;
+  else if (feld === "ust_satz") wert = e.target.value === "" ? null : parseFloat(e.target.value);
+  else if (feld === "gruppe_id") wert = e.target.value === "" ? null : parseInt(e.target.value);
+  else if (feld === "kreditlinie") wert = e.target.value === "" ? 0 : parseFloat(e.target.value);
+  else wert = e.target.value;
+  try { await api("PATCH", `/api/konten/${id}`, { [feld]: wert }); }
+  catch (err) { toast(err.message); lade(); }
+});
+
+const neuForm = document.getElementById("neu-form");
+if (neuForm) neuForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(neuForm);
+  const daten = {
+    nummer: f.get("nummer"), bezeichnung: f.get("bezeichnung"), typ: f.get("typ"),
+    ust_satz: f.get("ust_satz") === "" ? null : parseFloat(f.get("ust_satz")),
+    gruppe_id: f.get("gruppe_id") === "" ? null : parseInt(f.get("gruppe_id")),
+  };
+  try { await api("POST", `/api/mandanten/${MANDANT_ID}/konten`, daten); neuForm.reset(); lade(); }
+  catch (err) { toast(err.message); }
+});
+lade();
+</script>
+{% endblock %}

@@ -1,0 +1,196 @@
+"""Zahlungskalender: SV-Beiträge und Steuertermine.
+
+Regeln:
+- SV-Beiträge: fällig am drittletzten Bankarbeitstag des Monats.
+- USt-Voranmeldung: 10. des Folgemonats (Monatszahler) bzw. 10. nach Quartalsende;
+  mit Dauerfristverlängerung jeweils einen Monat später. Fällt der Termin auf
+  Sa/So/Feiertag, verschiebt er sich auf den nächsten Werktag (§ 108 Abs. 3 AO).
+- Lohnsteuer: 10. des Folgemonats (Verschiebung wie oben).
+- Gewerbesteuer-Vorauszahlung: 15.02. / 15.05. / 15.08. / 15.11.
+- Körperschaftsteuer-Vorauszahlung: 10.03. / 10.06. / 10.09. / 10.12.
+"""
+
+from dataclasses import dataclass
+from datetime import date, timedelta
+from decimal import Decimal
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .. import models
+from ..models import TerminStatus, TerminTyp, UStZeitraum
+from .feiertage import bankarbeitstage_im_monat, naechster_werktag
+
+
+@dataclass(frozen=True)
+class TerminVorschlag:
+    typ: str
+    datum: date
+    beschreibung: str
+
+
+def sv_faelligkeit(jahr: int, monat: int, bundesland: str = "NW") -> date:
+    tage = bankarbeitstage_im_monat(jahr, monat, bundesland)
+    return tage[-3]
+
+
+def _monat_plus(jahr: int, monat: int, plus: int) -> tuple[int, int]:
+    idx = (jahr * 12 + (monat - 1)) + plus
+    return idx // 12, idx % 12 + 1
+
+
+def steuertermine(
+    von: date,
+    bis: date,
+    bundesland: str,
+    ust_zeitraum: str = UStZeitraum.MONAT.value,
+    dauerfrist: bool = False,
+) -> list[TerminVorschlag]:
+    """Alle Steuer-/SV-Termine, deren (verschobenes) Datum in [von, bis] liegt."""
+    ergebnisse: list[TerminVorschlag] = []
+
+    # großzügiger Monatsbereich, Verschiebungen werden danach gefiltert
+    start_j, start_m = _monat_plus(von.year, von.month, -3)
+    ende_j, ende_m = _monat_plus(bis.year, bis.month, 1)
+
+    j, m = start_j, start_m
+    while (j, m) <= (ende_j, ende_m):
+        # SV: drittletzter Bankarbeitstag des Monats
+        ergebnisse.append(
+            TerminVorschlag(TerminTyp.SV.value, sv_faelligkeit(j, m, bundesland),
+                            f"SV-Beiträge {m:02d}/{j}")
+        )
+        # Lohnsteuer: 10. des Folgemonats für Monat m
+        fj, fm = _monat_plus(j, m, 1)
+        lst = naechster_werktag(date(fj, fm, 10), bundesland)
+        ergebnisse.append(
+            TerminVorschlag(TerminTyp.LST.value, lst, f"Lohnsteuer {m:02d}/{j}")
+        )
+        # USt-VA
+        if ust_zeitraum == UStZeitraum.MONAT.value:
+            plus = 2 if dauerfrist else 1
+            uj, um = _monat_plus(j, m, plus)
+            ust = naechster_werktag(date(uj, um, 10), bundesland)
+            ergebnisse.append(
+                TerminVorschlag(TerminTyp.UST_VA.value, ust, f"USt-VA {m:02d}/{j}")
+            )
+        else:
+            if m in (3, 6, 9, 12):  # Quartalsende
+                plus = 2 if dauerfrist else 1
+                uj, um = _monat_plus(j, m, plus)
+                ust = naechster_werktag(date(uj, um, 10), bundesland)
+                q = m // 3
+                ergebnisse.append(
+                    TerminVorschlag(TerminTyp.UST_VA.value, ust, f"USt-VA Q{q}/{j}")
+                )
+        # GewSt-VZ
+        if m in (2, 5, 8, 11):
+            gewst = naechster_werktag(date(j, m, 15), bundesland)
+            ergebnisse.append(
+                TerminVorschlag(TerminTyp.GEWST.value, gewst, f"GewSt-VZ {m:02d}/{j}")
+            )
+        # KSt-VZ
+        if m in (3, 6, 9, 12):
+            kst = naechster_werktag(date(j, m, 10), bundesland)
+            ergebnisse.append(
+                TerminVorschlag(TerminTyp.KST.value, kst, f"KSt-VZ {m:02d}/{j}")
+            )
+        j, m = _monat_plus(j, m, 1)
+
+    return sorted(
+        (t for t in ergebnisse if von <= t.datum <= bis),
+        key=lambda t: (t.datum, t.typ),
+    )
+
+
+def _historien_schaetzung(
+    db: Session, mandant: models.Mandant, konto: models.Konto | None, heute: date
+) -> Decimal:
+    """Ø der monatlichen Ist-Auszahlungen der letzten 3 Monate auf dem Konto."""
+    if konto is None:
+        return Decimal("0")
+    von = heute - timedelta(days=92)
+    finanz_nrn = {
+        k.nummer
+        for k in db.scalars(
+            select(models.Konto).where(
+                models.Konto.mandant_id == mandant.id,
+                models.Konto.typ.in_(["BANK", "KASSE"]),
+            )
+        )
+    }
+    buchungen = db.scalars(
+        select(models.Buchung).where(
+            models.Buchung.mandant_id == mandant.id,
+            models.Buchung.datum >= von,
+            models.Buchung.datum < heute,
+        )
+    )
+    summe = Decimal("0")
+    monate: set[tuple[int, int]] = set()
+    for b in buchungen:
+        if b.konto_nr == konto.nummer and b.gegenkonto_nr in finanz_nrn:
+            fluss = -b.betrag if b.sh == "S" else b.betrag
+        elif b.gegenkonto_nr == konto.nummer and b.konto_nr in finanz_nrn:
+            fluss = b.betrag if b.sh == "S" else -b.betrag
+        else:
+            continue
+        if fluss < 0:  # nur Auszahlungen
+            summe += -fluss
+            monate.add((b.datum.year, b.datum.month))
+    if not monate:
+        return Decimal("0")
+    return (summe / len(monate)).quantize(Decimal("0.01"))
+
+
+def generiere_termine(
+    db: Session, mandant: models.Mandant, von: date, bis: date, heute: date | None = None
+) -> dict:
+    """Erzeugt Zahlungstermine gemäß Regeln. Bestehende Termine gleicher Art und
+    gleichen Datums (auch manuell angepasste) werden nicht überschrieben."""
+    heute = heute or date.today()
+    regeln = {
+        r.typ: r
+        for r in db.scalars(
+            select(models.TerminRegel).where(models.TerminRegel.mandant_id == mandant.id)
+        )
+    }
+    vorhanden = {
+        (t.typ, t.datum)
+        for t in db.scalars(
+            select(models.Zahlungstermin).where(
+                models.Zahlungstermin.mandant_id == mandant.id,
+                models.Zahlungstermin.datum >= von,
+                models.Zahlungstermin.datum <= bis,
+            )
+        )
+    }
+    angelegt, uebersprungen = 0, 0
+    for v in steuertermine(von, bis, mandant.bundesland, mandant.ust_zeitraum, mandant.dauerfrist):
+        regel = regeln.get(v.typ)
+        if regel is None or not regel.aktiv:
+            continue
+        if (v.typ, v.datum) in vorhanden:
+            uebersprungen += 1
+            continue
+        if regel.betrag_modus == "HISTORIE":
+            betrag = _historien_schaetzung(db, mandant, regel.konto, heute)
+            if betrag == 0:
+                betrag = regel.betrag_fix or Decimal("0")
+        else:
+            betrag = regel.betrag_fix or Decimal("0")
+        db.add(
+            models.Zahlungstermin(
+                mandant_id=mandant.id,
+                typ=v.typ,
+                datum=v.datum,
+                betrag=betrag,
+                status=TerminStatus.GEPLANT.value,
+                konto_id=regel.konto_id,
+                kommentar=v.beschreibung,
+                generiert=True,
+            )
+        )
+        angelegt += 1
+    db.commit()
+    return {"angelegt": angelegt, "uebersprungen": uebersprungen}
