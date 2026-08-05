@@ -49,26 +49,35 @@ def _betrag(wert: str) -> Decimal:
     w = wert.strip().replace("\xa0", "").replace(" ", "")
     if not w:
         raise InvalidOperation("leer")
-    # deutsches Format: 1.234,56 — englisches Format tolerieren
-    if "," in w:
-        w = w.replace(".", "").replace(",", ".")
+    # deutsches Format 1.234,56 und englisches Format 1,234.56:
+    # das am weitesten rechts stehende Trennzeichen ist das Dezimaltrennzeichen
+    if "," in w and "." in w:
+        if w.rfind(",") > w.rfind("."):
+            w = w.replace(".", "").replace(",", ".")
+        else:
+            w = w.replace(",", "")
+    elif "," in w:
+        w = w.replace(",", ".")
     return Decimal(w)
 
 
 def _datum_flexibel(wert: str) -> date | None:
     w = wert.strip()
-    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$", w)
-    if m:
-        t, mo, j = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        if j < 100:
-            j += 2000
-        return date(j, mo, t)
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", w)
-    if m:
-        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    m = re.match(r"^(\d{4})(\d{2})(\d{2})$", w)
-    if m:
-        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    try:
+        m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$", w)
+        if m:
+            t, mo, j = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if j < 100:
+                j += 2000
+            return date(j, mo, t)
+        m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", w)
+        if m:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        m = re.match(r"^(\d{4})(\d{2})(\d{2})$", w)
+        if m:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
     return None
 
 
@@ -89,7 +98,10 @@ def _datev_belegdatum(wert: str, wj_beginn: date | None, zeitraum_von: date | No
     tag, monat = int(w[:2]), int(w[2:])
     if not (1 <= monat <= 12 and 1 <= tag <= 31):
         return None
-    anker = zeitraum_von or wj_beginn
+    # Jahr aus dem Wirtschaftsjahr (Headerfeld 13): TTMM liegt in [WJ-Beginn, +1 Jahr).
+    # Der Exportzeitraum ist nur Rückfallebene (Monatsstapel enthalten regelmäßig
+    # Belegdaten aus Vormonaten desselben Wirtschaftsjahres).
+    anker = wj_beginn or zeitraum_von
     if anker is None:
         jahr = date.today().year
     elif monat >= anker.month:
@@ -209,11 +221,21 @@ def parse_generisches_csv(daten: bytes) -> ImportErgebnis:
         return erg
     header = [f.strip().lower() for f in zeilen[0]]
     i_datum = _spalten_index(header, "datum", "date")
-    i_konto = _spalten_index(header, "konto", "account")
-    i_gegen = _spalten_index(header, "gegenkonto", "gegen")
+    # "gegenkonto" enthält "konto" – Konto-Spalte gezielt ohne "gegen" suchen,
+    # damit die Spaltenreihenfolge keine Rolle spielt
+    i_konto = next(
+        (i for i, name in enumerate(header)
+         if ("konto" in name or "account" in name) and "gegen" not in name),
+        None,
+    )
+    i_gegen = _spalten_index(header, "gegenkonto")
     i_betrag = _spalten_index(header, "betrag", "umsatz", "amount")
     i_sh = _spalten_index(header, "sh", "s/h", "soll/haben")
-    i_beleg = _spalten_index(header, "beleg")
+    i_beleg = next(
+        (i for i, name in enumerate(header)
+         if "beleg" in name and "datum" not in name),
+        None,
+    )
     i_text = _spalten_index(header, "text", "buchungstext", "verwendung")
     if i_datum is None or i_konto is None or i_betrag is None:
         erg.warnungen.append(
@@ -221,14 +243,6 @@ def parse_generisches_csv(daten: bytes) -> ImportErgebnis:
             "(optional Gegenkonto, SH, Belegfeld, Text)."
         )
         return erg
-    # "gegenkonto" enthält "konto": Kollision auflösen
-    if i_gegen == i_konto:
-        i_gegen = None
-    if i_konto is not None and "gegen" in header[i_konto]:
-        for i, name in enumerate(header):
-            if "konto" in name and "gegen" not in name:
-                i_konto = i
-                break
     for nr, felder in enumerate(zeilen[1:], start=2):
         if len(felder) <= max(i_datum, i_konto, i_betrag):
             continue
@@ -285,11 +299,15 @@ def parse_bwa_csv(daten: bytes) -> ImportErgebnis:
         return erg
     for nr, felder in enumerate(zeilen[1:], start=2):
         try:
+            monat = int(felder[i_monat])
+            jahr = int(felder[i_jahr])
+            if not (1 <= monat <= 12) or not (1990 <= jahr <= 2100):
+                raise ValueError
             erg.bwa_werte.append(
                 {
                     "konto_nr": felder[i_konto].strip(),
-                    "jahr": int(felder[i_jahr]),
-                    "monat": int(felder[i_monat]),
+                    "jahr": jahr,
+                    "monat": monat,
                     "betrag": _betrag(felder[i_betrag]),
                 }
             )

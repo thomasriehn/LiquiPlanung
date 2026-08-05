@@ -38,8 +38,8 @@ async function lade() {
   tb.innerHTML = "";
   for (const b of benutzer) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${b.email}</td><td>${b.name}</td><td>${b.rolle}</td>
-      <td class="klein">${b.rolle === "ADMIN" ? "alle" : b.mandanten_ids.map(id => MANDANTEN[id] || id).join(", ") || "–"}</td>
+    tr.innerHTML = `<td>${esc(b.email)}</td><td>${esc(b.name)}</td><td>${esc(b.rolle)}</td>
+      <td class="klein">${b.rolle === "ADMIN" ? "alle" : esc(b.mandanten_ids.map(id => MANDANTEN[id] || id).join(", ")) || "–"}</td>
       <td>${b.aktiv ? "✓" : "–"}</td>
       <td><button class="sekundaer" data-id="${b.id}" data-aktiv="${b.aktiv}">${b.aktiv ? "sperren" : "entsperren"}</button></td>`;
     tb.appendChild(tr);

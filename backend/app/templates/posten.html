@@ -60,14 +60,14 @@ let konten = [];
 
 function kontoName(id) {
   const k = konten.find(k => k.id === id);
-  return k ? `${k.nummer} ${k.bezeichnung}` : "–";
+  return k ? esc(`${k.nummer} ${k.bezeichnung}`) : "–";
 }
 
 async function ladeKonten() {
   const d = await api("GET", `/api/mandanten/${MANDANT_ID}/konten`);
   konten = d.konten.filter(k => k.aktiv);
   const optionen = `<option value="">–</option>` + konten.map(k =>
-    `<option value="${k.id}">${k.nummer} ${k.bezeichnung}</option>`).join("");
+    `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}</option>`).join("");
   document.querySelectorAll(".konto-auswahl").forEach(sel => sel.innerHTML = optionen);
 }
 
@@ -80,7 +80,7 @@ async function ladeOP() {
     if (p.status !== "OFFEN") tr.style.opacity = ".5";
     tr.innerHTML = `
       <td>${p.art === "KREDITOR" ? "ER" : "FO"}</td>
-      <td>${p.partner}</td><td>${p.belegnr || ""}</td>
+      <td>${esc(p.partner)}</td><td>${esc(p.belegnr)}</td>
       <td>${p.faellig_am}</td><td>${p.zahlung_geplant_am || ""}</td>
       <td class="zahl">${eur(p.betrag_brutto)}</td>
       <td>${kontoName(p.konto_id)}</td><td>${p.status}</td>
@@ -111,7 +111,7 @@ async function ladeDauer() {
     const tr = document.createElement("tr");
     if (!d.aktiv) tr.style.opacity = ".5";
     tr.innerHTML = `
-      <td>${d.name}</td><td>${d.art === "KREDITOR" ? "Ausgabe" : "Einnahme"}</td>
+      <td>${esc(d.name)}</td><td>${d.art === "KREDITOR" ? "Ausgabe" : "Einnahme"}</td>
       <td class="zahl">${eur(d.betrag_brutto)}</td><td>${d.intervall}</td>
       <td>${d.stichtag}</td><td>${d.gueltig_von}${d.gueltig_bis ? " – " + d.gueltig_bis : ""}</td>
       <td>${kontoName(d.konto_id)}</td><td>${d.aktiv ? "✓" : "–"}</td>

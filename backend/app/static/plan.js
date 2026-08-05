@@ -95,8 +95,8 @@ function datenZeile(zeile, sps, cssKlasse, einrueckung = "") {
   const tr = document.createElement("tr");
   if (cssKlasse) tr.className = cssKlasse;
   const kopfText = zeile.nummer
-    ? `${einrueckung}<span class="konto-nr">${zeile.nummer}</span>${zeile.name}`
-    : `${einrueckung}${zeile.name}`;
+    ? `${einrueckung}<span class="konto-nr">${esc(zeile.nummer)}</span>${esc(zeile.name)}`
+    : `${einrueckung}${esc(zeile.name)}`;
   tr.appendChild(td(kopfText, ["zeilkopf"]));
   for (const sp of sps) {
     const z = zellWert(zeile, sp);
@@ -196,7 +196,7 @@ function zeichne() {
   const b = daten.bestaende;
   for (const fk of b.finanzkonten) {
     koerper.appendChild(bestandsZeile(
-      `<span class="konto-nr">${fk.nummer}</span>${fk.name}`,
+      `<span class="konto-nr">${esc(fk.nummer)}</span>${esc(fk.name)}`,
       fk.bestand, sps, "", fk.kreditlinie > 0 ? fk.kreditlinie : null));
   }
   koerper.appendChild(bestandsZeile("Liquidität (Bank + Kasse)", b.liquiditaet, sps, "gesamt"));

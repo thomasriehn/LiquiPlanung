@@ -315,6 +315,9 @@ class Zahlungstermin(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     mandant_id: Mapped[int] = mapped_column(ForeignKey("mandanten.id", ondelete="CASCADE"), index=True)
     typ: Mapped[str] = mapped_column(String(16))
+    # fachliche Periode generierter Termine (z. B. "2026-05", "2026-Q3");
+    # verhindert Duplikate bei Neugenerierung nach manueller Terminverschiebung
+    periode: Mapped[str | None] = mapped_column(String(16), nullable=True)
     datum: Mapped[date] = mapped_column(Date, index=True)
     betrag: Mapped[Decimal] = mapped_column(Numeric(14, 2))  # Auszahlung positiv erfasst
     status: Mapped[str] = mapped_column(String(12), default=TerminStatus.GEPLANT.value)

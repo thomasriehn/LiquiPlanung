@@ -41,9 +41,9 @@ async function lade() {
   let html = `<thead><tr><th>Konto</th><th>Gruppe</th>` +
     MONATE.map(m => `<th class="zahl">${m}</th>`).join("") + `</tr></thead><tbody>`;
   for (const k of konten) {
-    html += `<tr><td><span class="konto-nr">${k.nummer}</span> ${k.bezeichnung}` +
+    html += `<tr><td><span class="konto-nr">${esc(k.nummer)}</span> ${esc(k.bezeichnung)}` +
       (k.ust_satz ? ` <span class="klein">(${k.ust_satz}%)</span>` : "") + `</td>` +
-      `<td class="klein">${gruppenName[k.gruppe_id] || "–"}</td>`;
+      `<td class="klein">${esc(gruppenName[k.gruppe_id]) || "–"}</td>`;
     for (let m = 1; m <= 12; m++) {
       const wert = werte[`${k.id}:${m}`];
       html += `<td class="zahl"><input type="number" step="0.01" min="0" style="width:90px"
@@ -52,11 +52,12 @@ async function lade() {
     html += `</tr>`;
   }
   tabelle.innerHTML = html + "</tbody>";
-  tabelle.addEventListener("change", (e) => {
-    if (!e.target.dataset.konto) return;
-    geaendert.set(`${e.target.dataset.konto}:${e.target.dataset.monat}`, e.target.value);
-  });
 }
+
+document.getElementById("tabelle").addEventListener("change", (e) => {
+  if (!e.target.dataset.konto) return;
+  geaendert.set(`${e.target.dataset.konto}:${e.target.dataset.monat}`, e.target.value);
+});
 
 const speichernKnopf = document.getElementById("speichern");
 if (speichernKnopf) speichernKnopf.addEventListener("click", async () => {

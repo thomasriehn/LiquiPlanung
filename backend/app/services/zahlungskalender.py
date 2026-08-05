@@ -27,6 +27,7 @@ class TerminVorschlag:
     typ: str
     datum: date
     beschreibung: str
+    periode: str  # z. B. "2026-05" oder "2026-Q3"
 
 
 def sv_faelligkeit(jahr: int, monat: int, bundesland: str = "NW") -> date:
@@ -55,16 +56,17 @@ def steuertermine(
 
     j, m = start_j, start_m
     while (j, m) <= (ende_j, ende_m):
+        monat_periode = f"{j}-{m:02d}"
         # SV: drittletzter Bankarbeitstag des Monats
         ergebnisse.append(
             TerminVorschlag(TerminTyp.SV.value, sv_faelligkeit(j, m, bundesland),
-                            f"SV-Beiträge {m:02d}/{j}")
+                            f"SV-Beiträge {m:02d}/{j}", monat_periode)
         )
         # Lohnsteuer: 10. des Folgemonats für Monat m
         fj, fm = _monat_plus(j, m, 1)
         lst = naechster_werktag(date(fj, fm, 10), bundesland)
         ergebnisse.append(
-            TerminVorschlag(TerminTyp.LST.value, lst, f"Lohnsteuer {m:02d}/{j}")
+            TerminVorschlag(TerminTyp.LST.value, lst, f"Lohnsteuer {m:02d}/{j}", monat_periode)
         )
         # USt-VA
         if ust_zeitraum == UStZeitraum.MONAT.value:
@@ -72,7 +74,7 @@ def steuertermine(
             uj, um = _monat_plus(j, m, plus)
             ust = naechster_werktag(date(uj, um, 10), bundesland)
             ergebnisse.append(
-                TerminVorschlag(TerminTyp.UST_VA.value, ust, f"USt-VA {m:02d}/{j}")
+                TerminVorschlag(TerminTyp.UST_VA.value, ust, f"USt-VA {m:02d}/{j}", monat_periode)
             )
         else:
             if m in (3, 6, 9, 12):  # Quartalsende
@@ -81,19 +83,19 @@ def steuertermine(
                 ust = naechster_werktag(date(uj, um, 10), bundesland)
                 q = m // 3
                 ergebnisse.append(
-                    TerminVorschlag(TerminTyp.UST_VA.value, ust, f"USt-VA Q{q}/{j}")
+                    TerminVorschlag(TerminTyp.UST_VA.value, ust, f"USt-VA Q{q}/{j}", f"{j}-Q{q}")
                 )
         # GewSt-VZ
         if m in (2, 5, 8, 11):
             gewst = naechster_werktag(date(j, m, 15), bundesland)
             ergebnisse.append(
-                TerminVorschlag(TerminTyp.GEWST.value, gewst, f"GewSt-VZ {m:02d}/{j}")
+                TerminVorschlag(TerminTyp.GEWST.value, gewst, f"GewSt-VZ {m:02d}/{j}", monat_periode)
             )
         # KSt-VZ
         if m in (3, 6, 9, 12):
             kst = naechster_werktag(date(j, m, 10), bundesland)
             ergebnisse.append(
-                TerminVorschlag(TerminTyp.KST.value, kst, f"KSt-VZ {m:02d}/{j}")
+                TerminVorschlag(TerminTyp.KST.value, kst, f"KSt-VZ {m:02d}/{j}", monat_periode)
             )
         j, m = _monat_plus(j, m, 1)
 
@@ -155,22 +157,23 @@ def generiere_termine(
             select(models.TerminRegel).where(models.TerminRegel.mandant_id == mandant.id)
         )
     }
-    vorhanden = {
-        (t.typ, t.datum)
-        for t in db.scalars(
+    # Dedup über fachliche Periode (überlebt manuelle Terminverschiebungen);
+    # (typ, datum) als Rückfallebene für manuell angelegte Termine ohne Periode
+    alle_termine = list(
+        db.scalars(
             select(models.Zahlungstermin).where(
-                models.Zahlungstermin.mandant_id == mandant.id,
-                models.Zahlungstermin.datum >= von,
-                models.Zahlungstermin.datum <= bis,
+                models.Zahlungstermin.mandant_id == mandant.id
             )
         )
-    }
+    )
+    vorhandene_perioden = {(t.typ, t.periode) for t in alle_termine if t.periode}
+    vorhandene_daten = {(t.typ, t.datum) for t in alle_termine}
     angelegt, uebersprungen = 0, 0
     for v in steuertermine(von, bis, mandant.bundesland, mandant.ust_zeitraum, mandant.dauerfrist):
         regel = regeln.get(v.typ)
         if regel is None or not regel.aktiv:
             continue
-        if (v.typ, v.datum) in vorhanden:
+        if (v.typ, v.periode) in vorhandene_perioden or (v.typ, v.datum) in vorhandene_daten:
             uebersprungen += 1
             continue
         if regel.betrag_modus == "HISTORIE":
@@ -183,6 +186,7 @@ def generiere_termine(
             models.Zahlungstermin(
                 mandant_id=mandant.id,
                 typ=v.typ,
+                periode=v.periode,
                 datum=v.datum,
                 betrag=betrag,
                 status=TerminStatus.GEPLANT.value,

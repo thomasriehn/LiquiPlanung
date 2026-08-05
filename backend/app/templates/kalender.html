@@ -33,13 +33,13 @@ let konten = [];
 
 function kontoName(id) {
   const k = konten.find(k => k.id === id);
-  return k ? `${k.nummer} ${k.bezeichnung}` : "–";
+  return k ? esc(`${k.nummer} ${k.bezeichnung}`) : "–";
 }
 
 async function ladeRegeln() {
   const regeln = await api("GET", `/api/mandanten/${MANDANT_ID}/termin-regeln`);
   const kontoOpt = (wert) => `<option value="">–</option>` + konten.map(k =>
-    `<option value="${k.id}" ${k.id===wert?"selected":""}>${k.nummer} ${k.bezeichnung}</option>`).join("");
+    `<option value="${k.id}" ${k.id===wert?"selected":""}>${esc(k.nummer + " " + k.bezeichnung)}</option>`).join("");
   let html = `<thead><tr><th>Art</th><th>aktiv</th><th>Betragsermittlung</th>
     <th class="zahl">fester Betrag</th><th>Konto (BWA-Zeile)</th></tr></thead><tbody>`;
   for (const r of regeln) {
@@ -81,26 +81,28 @@ async function ladeTermine() {
       <td>${TYP_NAMEN[t.typ] || t.typ}</td>
       <td class="zahl">${LESER ? eur(t.betrag) : `<input type="number" step="0.01" value="${t.betrag}" data-feld="betrag" style="width:110px">`}</td>
       <td>${kontoName(t.konto_id)}</td>
-      <td class="klein">${t.kommentar || ""}</td>
-      <td>${t.status}</td>
+      <td class="klein">${esc(t.kommentar)}</td>
+      <td>${esc(t.status)}</td>
       <td>${LESER ? "" : `<button class="gefahr" data-id="${t.id}">✕</button>`}</td>`;
     tr.dataset.id = t.id;
     tb.appendChild(tr);
   }
-  tb.addEventListener("change", async (e) => {
-    const feld = e.target.dataset.feld;
-    if (!feld) return;
-    const id = e.target.closest("tr").dataset.id;
-    const wert = feld === "betrag" ? parseFloat(e.target.value) : e.target.value;
-    try { await api("PATCH", `/api/termine/${id}`, { [feld]: wert }); }
-    catch (err) { toast(err.message); ladeTermine(); }
-  });
   tb.querySelectorAll("button[data-id]").forEach(btn => btn.addEventListener("click", async () => {
     if (!confirm("Termin löschen?")) return;
     try { await api("DELETE", `/api/termine/${btn.dataset.id}`); ladeTermine(); }
     catch (e) { toast(e.message); }
   }));
 }
+
+// Ein einziger Listener am Tbody – ladeTermine() ersetzt nur die Zeilen
+document.getElementById("termine").addEventListener("change", async (e) => {
+  const feld = e.target.dataset.feld;
+  if (!feld) return;
+  const id = e.target.closest("tr").dataset.id;
+  const wert = feld === "betrag" ? parseFloat(e.target.value) : e.target.value;
+  try { await api("PATCH", `/api/termine/${id}`, { [feld]: wert }); }
+  catch (err) { toast(err.message); ladeTermine(); }
+});
 
 const genKnopf = document.getElementById("generieren");
 if (genKnopf) genKnopf.addEventListener("click", async () => {

@@ -47,6 +47,15 @@ def _datum(wert, feld: str = "datum") -> date:
         raise HTTPException(422, f"Ungültiges Datum für '{feld}' (erwartet JJJJ-MM-TT)")
 
 
+def _enum_pruefen(wert, erlaubt, feld: str):
+    werte = [e.value for e in erlaubt] if hasattr(next(iter(erlaubt)), "value") else list(erlaubt)
+    if wert not in werte:
+        raise HTTPException(422, f"Ungültiger Wert für '{feld}' (erlaubt: {', '.join(werte)})")
+
+
+VERFAHRENSSTATUS = ["REGELMANDAT", "VORLAEUFIG", "EROEFFNET", "EIGENVERWALTUNG"]
+
+
 # ---------------------------------------------------------------- Mandanten
 
 class MandantNeu(BaseModel):
@@ -89,6 +98,8 @@ def mandant_anlegen(
         raise HTTPException(422, "Kontenrahmen muss SKR03, SKR04 oder EIGEN sein")
     if daten.bundesland not in BUNDESLAENDER:
         raise HTTPException(422, "Unbekanntes Bundesland")
+    _enum_pruefen(daten.ust_zeitraum, ["MONAT", "QUARTAL"], "ust_zeitraum")
+    _enum_pruefen(daten.verfahrensstatus, VERFAHRENSSTATUS, "verfahrensstatus")
     if db.scalar(select(models.Mandant.id).where(models.Mandant.kurzname == daten.kurzname)):
         raise HTTPException(409, "Kurzname bereits vergeben")
     mandant = models.Mandant(
@@ -131,6 +142,12 @@ def mandant_aendern(
         if feld == "insolvenz_stichtag":
             mandant.insolvenz_stichtag = _datum(wert, feld) if wert else None
         elif feld in MANDANT_FELDER:
+            if feld == "bundesland" and wert not in BUNDESLAENDER:
+                raise HTTPException(422, "Unbekanntes Bundesland")
+            if feld == "ust_zeitraum":
+                _enum_pruefen(wert, ["MONAT", "QUARTAL"], feld)
+            if feld == "verfahrensstatus":
+                _enum_pruefen(wert, VERFAHRENSSTATUS, feld)
             setattr(mandant, feld, wert)
     audit(db, benutzer, mandant.id, "MANDANT_GEAENDERT", str(sorted(daten.keys())))
     db.commit()
@@ -203,9 +220,12 @@ def konto_anlegen(
     mandant = mandant_oder_403(db, benutzer, mandant_id)
     if daten.typ not in [t.value for t in models.KontoTyp]:
         raise HTTPException(422, "Unbekannter Kontotyp")
+    nummer = daten.nummer.strip()
+    if not nummer:
+        raise HTTPException(422, "Kontonummer fehlt")
     if db.scalar(
         select(models.Konto.id).where(
-            models.Konto.mandant_id == mandant.id, models.Konto.nummer == daten.nummer
+            models.Konto.mandant_id == mandant.id, models.Konto.nummer == nummer
         )
     ):
         raise HTTPException(409, "Kontonummer bereits vorhanden")
@@ -215,7 +235,7 @@ def konto_anlegen(
             raise HTTPException(422, "Ungültige Gruppe")
     konto = models.Konto(
         mandant_id=mandant.id,
-        nummer=daten.nummer.strip(),
+        nummer=nummer,
         bezeichnung=daten.bezeichnung.strip(),
         typ=daten.typ,
         ust_satz=_dec(daten.ust_satz, "ust_satz") if daten.ust_satz is not None else None,
@@ -504,6 +524,10 @@ def posten_aendern(
             _konto_pruefen(db, posten.mandant_id, wert)
             posten.konto_id = wert
         elif feld in POSTEN_FELDER:
+            if feld == "status":
+                _enum_pruefen(wert, models.PostenStatus, feld)
+            if feld == "art":
+                _enum_pruefen(wert, models.PostenArt, feld)
             setattr(posten, feld, wert)
     db.commit()
     return {"ok": True}
@@ -620,6 +644,10 @@ def dauer_aendern(
             _konto_pruefen(db, d.mandant_id, wert)
             d.konto_id = wert
         elif feld in {"name", "art", "intervall", "stichtag", "aktiv"}:
+            if feld == "art":
+                _enum_pruefen(wert, models.PostenArt, feld)
+            if feld == "intervall":
+                _enum_pruefen(wert, models.Intervall, feld)
             setattr(d, feld, wert)
     db.commit()
     return {"ok": True}
@@ -681,6 +709,11 @@ def budget_speichern(
 ):
     nur_schreibend(benutzer)
     mandant = mandant_oder_403(db, benutzer, mandant_id)
+    # doppelte Zellen im Payload: letzte gewinnt (verhindert IntegrityError)
+    eindeutig: dict[tuple[int, int, int], BudgetZelle] = {}
+    for z in zellen:
+        eindeutig[(z.konto_id, z.jahr, z.monat)] = z
+    zellen = list(eindeutig.values())
     for z in zellen:
         if not (1 <= z.monat <= 12):
             raise HTTPException(422, "Monat muss 1..12 sein")
@@ -739,6 +772,7 @@ def termine_liste(
         {
             "id": t.id,
             "typ": t.typ,
+            "periode": t.periode,
             "datum": t.datum.isoformat(),
             "betrag": float(t.betrag),
             "status": t.status,
@@ -827,9 +861,13 @@ def termin_aendern(
         elif feld == "konto_id":
             _konto_pruefen(db, t.mandant_id, wert)
             t.konto_id = wert
-        elif feld in {"kommentar", "status"}:
-            setattr(t, feld, wert)
-    if t.status != models.TerminStatus.ERLEDIGT.value:
+        elif feld == "status":
+            _enum_pruefen(wert, models.TerminStatus, feld)
+            t.status = wert
+        elif feld == "kommentar":
+            t.kommentar = wert
+    # implizite Änderungen als "angepasst" markieren, expliziten Status respektieren
+    if "status" not in daten and t.status == models.TerminStatus.GEPLANT.value:
         t.status = models.TerminStatus.ANGEPASST.value
     db.commit()
     return {"ok": True}
@@ -893,6 +931,8 @@ def regel_aendern(
             _konto_pruefen(db, r.mandant_id, wert)
             r.konto_id = wert
         elif feld in {"aktiv", "betrag_modus"}:
+            if feld == "betrag_modus":
+                _enum_pruefen(wert, ["FIX", "HISTORIE"], feld)
             setattr(r, feld, wert)
     db.commit()
     return {"ok": True}
@@ -1083,10 +1123,11 @@ def benutzer_anlegen(
         raise HTTPException(422, "Unbekannte Rolle")
     if len(daten.passwort) < 8:
         raise HTTPException(422, "Passwort muss mindestens 8 Zeichen haben")
-    if db.scalar(select(models.Benutzer.id).where(models.Benutzer.email == daten.email)):
+    email = daten.email.strip().lower()
+    if db.scalar(select(models.Benutzer.id).where(models.Benutzer.email == email)):
         raise HTTPException(409, "E-Mail bereits vergeben")
     b = models.Benutzer(
-        email=daten.email.strip().lower(),
+        email=email,
         name=daten.name.strip(),
         passwort_hash=hash_passwort(daten.passwort),
         rolle=daten.rolle,

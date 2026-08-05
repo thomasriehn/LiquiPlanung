@@ -12,7 +12,7 @@
   {% if mandant is defined and mandant %}
   <nav class="mandant-nav">
     <span class="mandant-name" title="{{ mandant.verfahrensstatus }}{% if mandant.aktenzeichen %} · {{ mandant.aktenzeichen }}{% endif %}">{{ mandant.name }}</span>
-    <a href="/mandanten/{{ mandant.id }}/plan" class="{% if aktiv_tab == 'plan' %}aktiv{% endif %}">13-Wochen-Plan</a>
+    <a href="/mandanten/{{ mandant.id }}/plan">13-Wochen-Plan</a>
     <a href="/mandanten/{{ mandant.id }}/sollist">Soll/Ist</a>
     <a href="/mandanten/{{ mandant.id }}/posten">Posten</a>
     <a href="/mandanten/{{ mandant.id }}/budget">Budget</a>

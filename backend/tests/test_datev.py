@@ -39,12 +39,24 @@ def test_datev_buchungsstapel():
     assert b2.sh == "H"
 
 
-def test_datev_jahreswechsel_wirtschaftsjahr():
-    # WJ-Beginn 01.01.2026, Zeitraum Dezember: Belegdatum 0501 im Januar -> 2027
-    kopf = EXTF_KOPF.replace("20260701", "20261201").replace("20260731", "20270131")
-    daten = ("\n".join([kopf, SPALTEN, '100,00;"S";;;;;4920;1200;;0501;;;;"Telefon"'])).encode("cp1252")
+def test_datev_jahr_aus_wirtschaftsjahr():
+    # Kalender-WJ 2026, Juli-Stapel: Belegdatum aus Vormonat (März) bleibt im WJ 2026
+    daten = _extf(['100,00;"S";;;;;4920;1200;;1503;;;;"Telefon"'])
     erg = parse_datev(daten)
-    assert erg.buchungen[0].datum == date(2027, 1, 5)
+    assert erg.buchungen[0].datum == date(2026, 3, 15)
+
+
+def test_datev_abweichendes_wirtschaftsjahr():
+    # WJ-Beginn 01.07.2025: September liegt in 2025, März in 2026
+    kopf = EXTF_KOPF.replace("20260101", "20250701")
+    daten = ("\n".join([
+        kopf, SPALTEN,
+        '100,00;"S";;;;;4920;1200;;1509;;;;"Sept"',
+        '100,00;"S";;;;;4920;1200;;1503;;;;"März"',
+    ])).encode("cp1252")
+    erg = parse_datev(daten)
+    assert erg.buchungen[0].datum == date(2025, 9, 15)
+    assert erg.buchungen[1].datum == date(2026, 3, 15)
 
 
 def test_datev_automatische_erkennung():
@@ -66,6 +78,29 @@ def test_generisches_csv():
     # negativer Betrag ohne SH-Spalte -> Haben auf dem Konto
     assert erg.buchungen[1].sh == "H"
     assert erg.buchungen[1].betrag == Decimal("8900.00")
+
+
+def test_generisches_csv_gegenkonto_vor_konto():
+    text = "Datum;Gegenkonto;Konto;Betrag\n15.07.2026;8400;1200;100,00\n"
+    erg = parse_generisches_csv(text.encode("utf-8"))
+    assert erg.buchungen[0].konto_nr == "1200"
+    assert erg.buchungen[0].gegenkonto_nr == "8400"
+
+
+def test_betrag_formate():
+    from app.services.datev import _betrag
+
+    assert _betrag("1.234,56") == Decimal("1234.56")
+    assert _betrag("1,234.56") == Decimal("1234.56")
+    assert _betrag("1234,5") == Decimal("1234.5")
+    assert _betrag("-42,00") == Decimal("-42.00")
+
+
+def test_ungueltiges_kalenderdatum_wird_warnung():
+    text = "Datum;Konto;Betrag\n31.02.2026;4920;100,00\n"
+    erg = parse_generisches_csv(text.encode("utf-8"))
+    assert not erg.buchungen
+    assert any("Datum" in w for w in erg.warnungen)
 
 
 def test_bwa_csv():

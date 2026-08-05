@@ -37,14 +37,14 @@ function typSelect(wert) {
 }
 function gruppeSelect(wert) {
   return `<select data-feld="gruppe_id"><option value="">–</option>` + gruppen.map(g =>
-    `<option value="${g.id}" ${g.id===wert?"selected":""}>${g.name}</option>`).join("") + `</select>`;
+    `<option value="${g.id}" ${g.id===wert?"selected":""}>${esc(g.name)}</option>`).join("") + `</select>`;
 }
 
 async function lade() {
   const d = await api("GET", `/api/mandanten/${MANDANT_ID}/konten`);
   gruppen = d.gruppen;
   const ng = document.getElementById("neu-gruppe");
-  if (ng) ng.innerHTML = `<option value="">–</option>` + gruppen.map(g => `<option value="${g.id}">${g.name}</option>`).join("");
+  if (ng) ng.innerHTML = `<option value="">–</option>` + gruppen.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join("");
   const nt = document.getElementById("neu-typ");
   if (nt) nt.innerHTML = TYPEN.map(t => `<option ${t==="AUFWAND"?"selected":""}>${t}</option>`).join("");
   const tb = document.querySelector("#tabelle tbody");
@@ -54,8 +54,8 @@ async function lade() {
     if (!k.aktiv) tr.style.opacity = ".45";
     tr.dataset.id = k.id;
     tr.innerHTML = `
-      <td>${k.nummer}</td>
-      <td><input data-feld="bezeichnung" value="${k.bezeichnung.replaceAll('"','&quot;')}"></td>
+      <td>${esc(k.nummer)}</td>
+      <td><input data-feld="bezeichnung" value="${esc(k.bezeichnung)}"></td>
       <td>${typSelect(k.typ)}</td>
       <td class="zahl"><input data-feld="ust_satz" type="number" step="0.01" min="0" max="100" style="width:70px" value="${k.ust_satz ?? ""}"></td>
       <td>${gruppeSelect(k.gruppe_id)}</td>

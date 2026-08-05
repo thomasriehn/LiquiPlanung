@@ -17,6 +17,16 @@ from .security import hash_passwort
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     settings = get_settings()
+    if settings.secret_key == "bitte-aendern-unsicherer-entwicklungsschluessel":
+        print(
+            "[LiquiPlanung] WARNUNG: SECRET_KEY ist der unsichere Entwicklungswert – "
+            "für den Betrieb zwingend in .env setzen (openssl rand -hex 32)."
+        )
+    if settings.admin_password == "admin":
+        print(
+            "[LiquiPlanung] WARNUNG: ADMIN_PASSWORD steht auf dem Standardwert 'admin' – "
+            "bitte in .env ändern."
+        )
     with SessionLocal() as db:
         if db.scalar(select(models.Benutzer.id).limit(1)) is None:
             db.add(

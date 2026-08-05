@@ -34,8 +34,9 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
    wenn der Plan zum Zeitpunkt X eingefroren wird. Eine "lebende" Planung würde sich
    nachträglich den Ist-Werten annähern und Abweichungen verschleiern. Daher gibt es
    Plan-Snapshots (manuell oder wöchentlich), gegen die das Ist verglichen wird.
-2. ✔ **Überfällige Posten:** Offene Posten mit Fälligkeit vor dem Planungsbeginn dürfen
-   nicht verschwinden – sie werden in die erste Planwoche gezogen und markiert.
+2. ✔ **Überfällige Posten:** Offene Posten mit Fälligkeit in der Vergangenheit dürfen
+   nicht verschwinden – sie werden auf den nächsten Bankarbeitstag ab heute gerollt
+   ("aktuelle Zahlungserwartung") und mindern die Liquiditätsprojektion.
 3. ✔ **Forderungsseite:** Neben Eingangsrechnungen (Kreditoren) werden auch
    Ausgangsrechnungen/Forderungen (Debitoren) als erwartete Einzahlungen geführt.
 4. ✔ **Doppelzählungs-Vermeidung ("Restbudget-Logik"):** Budget je Konto und Woche wird um
@@ -140,18 +141,22 @@ dadurch entstehen die BWA-Zeilen. Bank-an-Bank = Umbuchung (nur Bestandsverschie
 
 **Plan** je Konto/Tag aus vier Quellen:
 
-1. Offene Posten (geplantes Zahldatum, sonst Fälligkeit; überfällig → erste Planwoche),
-2. Dauerbuchungen (Intervall-Expansion, Verschiebung auf Bankarbeitstag),
-3. Zahlungstermine aus dem Kalender (SV/Steuern),
-4. Budget: Wochenbudget (Override oder Monatsbudget anteilig nach Bankarbeitstagen),
-   **abzüglich** der expliziten Posten desselben Kontos in der Woche (Restbudget ≥ 0),
-   verteilt auf die Bankarbeitstage der Woche. Netto-Budgets werden über den USt-Satz des
-   Kontos auf Brutto-Zahlungswirkung umgerechnet.
+1. Offene Posten (geplantes Zahldatum, sonst Fälligkeit; überfällig → nächster
+   Bankarbeitstag ab heute),
+2. Dauerbuchungen (Intervall-Expansion mit Vorlauf über die Fenstergrenze, Verschiebung
+   auf Bankarbeitstag),
+3. Zahlungstermine aus dem Kalender (SV/Steuern; Deduplizierung über die fachliche
+   Periode, damit manuell verschobene Termine bei Neugenerierung nicht doppeln),
+4. Budget: tagesgenaue Verteilung (Monatsbudget je Bankarbeitstag des Monats bzw.
+   Wochen-Override), wochenweise **gekürzt** um explizite Posten desselben Kontos
+   (Restbudget ≥ 0). Netto-Budgets werden über den USt-Satz des Kontos auf
+   Brutto-Zahlungswirkung umgerechnet.
 
 **Bestände & Liquidität:** Je Finanzkonto Ankerbestand (Stichtag) + Ist-Bewegungen bis
-heute; ab morgen Fortschreibung über den geplanten Netto-Cashflow. Warenbestand wird
-nachrichtlich fortgeschrieben (letzter erfasster Wert). Verfügbare Liquidität = Bestand +
-freie Kreditlinien.
+heute; ab morgen Fortschreibung über den **Restplan** (nur offene Posten, künftige nicht
+erledigte Termine und Dauerraten – bereits Gezahltes steckt im Ist-Bestand und zählt
+nicht doppelt). Warenbestand wird nachrichtlich fortgeschrieben (letzter erfasster
+Wert). Verfügbare Liquidität = Bestand + freie Kreditlinien.
 
 **Soll/Ist:** Für vergangene Tage im Fenster wird das Ist gegen den eingefrorenen Plan
 (neuester Snapshot, dessen Fenster den Tag abdeckt) gestellt; Abweichung = Ist − Plan.

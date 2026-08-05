@@ -72,7 +72,7 @@ document.getElementById("form").addEventListener("submit", async (e) => {
 
 function kontoName(id) {
   const k = konten.find(k => k.id === id);
-  return k ? `${k.nummer} ${k.bezeichnung}` : "–";
+  return k ? esc(`${k.nummer} ${k.bezeichnung}`) : "–";
 }
 
 async function ladeBestaende() {
@@ -113,7 +113,7 @@ function fuelleKonten() {
   if (!sel) return;
   const passend = konten.filter(k => typ === "WAREN" ? false : k.typ === typ);
   sel.innerHTML = typ === "WAREN" ? `<option value="">–</option>`
-    : passend.map(k => `<option value="${k.id}">${k.nummer} ${k.bezeichnung}</option>`).join("");
+    : passend.map(k => `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}</option>`).join("");
 }
 
 api("GET", `/api/mandanten/${MANDANT_ID}/konten`).then(d => {

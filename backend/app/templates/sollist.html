@@ -40,7 +40,7 @@ async function lade() {
     wochen.map(() => `<th>Soll</th><th>Ist</th><th>Δ</th>`).join("") + `</tr></thead><tbody>`;
   const heuteKW = d.heute;
   for (const z of d.zeilen) {
-    html += `<tr><td class="zeilkopf">${z.name}</td>`;
+    html += `<tr><td class="zeilkopf">${esc(z.name)}</td>`;
     for (const w of wochen) {
       const schluessel = `${w.jahr}-${String(w.kw).padStart(2, "0")}`;
       const soll = z.plan[schluessel] || 0;

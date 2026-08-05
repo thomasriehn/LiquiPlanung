@@ -42,8 +42,8 @@ async function ladeBatches() {
   for (const b of batches) {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${new Date(b.erstellt_am).toLocaleString("de-DE")}</td>
-      <td>${b.dateiname}</td><td>${b.format}</td><td class="zahl">${b.anzahl}</td>
-      <td class="klein">${b.warnungen ? b.warnungen.split("\n").slice(0,3).join("<br>") : ""}</td>
+      <td>${esc(b.dateiname)}</td><td>${esc(b.format)}</td><td class="zahl">${b.anzahl}</td>
+      <td class="klein">${b.warnungen ? b.warnungen.split("\n").slice(0,3).map(esc).join("<br>") : ""}</td>
       <td>${LESER ? "" : `<button class="gefahr klein-knopf" data-id="${b.id}">Löschen</button>`}</td>`;
     tb.appendChild(tr);
   }
@@ -64,13 +64,13 @@ if (form) form.addEventListener("submit", async (e) => {
     const erg = await apiDatei(`/api/mandanten/${MANDANT_ID}/import?format=${format}`, fd);
     const box = document.getElementById("ergebnis");
     let html = `<div class="warnung" style="background:#e8f5ec;border-color:#9fd3ae;color:#1e5c38">
-      ${erg.anzahl} Sätze importiert (${erg.format}).</div>`;
+      ${erg.anzahl} Sätze importiert (${esc(erg.format)}).</div>`;
     if (erg.unbekannte_konten.length) {
-      html += `<div class="warnung">Nicht angelegte Konten: ${erg.unbekannte_konten.join(", ")}
+      html += `<div class="warnung">Nicht angelegte Konten: ${esc(erg.unbekannte_konten.join(", "))}
         – bitte unter <a href="/mandanten/${MANDANT_ID}/konten">Konten</a> ergänzen.</div>`;
     }
     if (erg.warnungen.length) {
-      html += `<div class="warnung">${erg.warnungen.slice(0, 10).join("<br>")}</div>`;
+      html += `<div class="warnung">${erg.warnungen.slice(0, 10).map(esc).join("<br>")}</div>`;
     }
     box.innerHTML = html;
     form.reset();

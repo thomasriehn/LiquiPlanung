@@ -4,9 +4,12 @@ Ist:   aus importierten Buchungen – liquiditätswirksam ist ein Satz, wenn gen
        Seite ein Finanzkonto (Bank/Kasse) ist; der Zahlungsfluss wird der Sachkonto-
        Seite zugeordnet (+ Einzahlung / − Auszahlung).
 Plan:  offene Posten, Dauerbuchungen, Zahlungstermine, Budget (Restbudget-Logik).
-       Der Plan wird für das gesamte Fenster berechnet ("Plan zum Fensterbeginn");
-       für vergangene Tage wird – falls vorhanden – der eingefrorene Snapshot als
-       Vergleichsbasis verwendet.
+       Überfällige offene Posten werden auf den nächsten Bankarbeitstag ab heute
+       gerollt ("aktuelle Erwartung"); Snapshots frieren den Plan zum Stichtag ein
+       und dienen als Soll-Basis für vergangene Tage.
+Projektion: Die Bestandsfortschreibung nutzt eine "Restplan"-Sicht (nur offene
+       Posten, nicht erledigte künftige Termine, künftige Dauerraten), damit bereits
+       gezahlte Vorgänge nicht doppelt zählen.
 """
 
 from collections import defaultdict
@@ -42,11 +45,12 @@ def _brutto(netto: Decimal, ust_satz: Decimal | None) -> Decimal:
 
 
 def _lade_konten(db: Session, mandant_id: int) -> list[models.Konto]:
+    """Alle Konten (auch inaktive) – Plandaten können auf deaktivierte Konten zeigen."""
     return list(
         db.scalars(
             select(models.Konto)
             .options(joinedload(models.Konto.gruppe))
-            .where(models.Konto.mandant_id == mandant_id, models.Konto.aktiv.is_(True))
+            .where(models.Konto.mandant_id == mandant_id)
             .order_by(models.Konto.nummer)
         )
     )
@@ -81,6 +85,8 @@ def ist_zahlungsfluesse(
         )
     )
     for b in buchungen:
+        if b.konto_nr == b.gegenkonto_nr:
+            continue  # Saldo Null, keine Aussagekraft
         k_fin = b.konto_nr in finanz_nrn
         g_fin = b.gegenkonto_nr in finanz_nrn
         if k_fin:
@@ -104,17 +110,28 @@ def plan_fluesse(
     mandant: models.Mandant,
     start: date,
     ende: date,
+    heute: date | None = None,
+    nur_offen: bool = False,
 ) -> dict[Key, dict[date, Decimal]]:
-    """Planzahlungen je Konto/Tag für das Fenster [start, ende]."""
+    """Planzahlungen je Konto/Tag für das Fenster [start, ende].
+
+    heute:     überfällige offene Posten werden auf den nächsten Bankarbeitstag ab
+               max(start, heute) gerollt; ohne Angabe gilt start (Snapshot-Sicht).
+    nur_offen: Projektionssicht für die Bestandsfortschreibung – nur noch nicht
+               erfüllte Zahlungen; Vergangenheitstermine gelten als ausgeführt
+               (das Ist bildet sie ab), überfällige offene Posten rollen strikt
+               hinter heute.
+    """
+    heute = heute or start
     bl = mandant.bundesland
     plan: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
     konten = _lade_konten(db, mandant.id)
     konto_by_id = {k.id: k for k in konten}
 
-    def clip(d: date) -> date | None:
-        if d < start:
-            d = naechster_bankarbeitstag(start, bl)
-        return d if d <= ende else None
+    if nur_offen:
+        roll_ziel = naechster_bankarbeitstag(max(start, heute + timedelta(days=1)), bl)
+    else:
+        roll_ziel = naechster_bankarbeitstag(max(start, heute), bl)
 
     # 1) Offene Posten (inkl. im Fenster bezahlter, für die Plan-zum-Start-Sicht)
     posten = db.scalars(
@@ -124,19 +141,24 @@ def plan_fluesse(
         )
     )
     for p in posten:
-        if p.status == PostenStatus.BEZAHLT.value and (
-            p.bezahlt_am is None or p.bezahlt_am < start
-        ):
-            continue
         zahltag = p.zahlung_geplant_am or p.faellig_am
-        d = clip(zahltag)
-        if d is None:
+        if p.status == PostenStatus.BEZAHLT.value:
+            if nur_offen:
+                continue
+            if p.bezahlt_am is None or p.bezahlt_am < start:
+                continue
+            d = zahltag if zahltag >= start else naechster_bankarbeitstag(start, bl)
+        else:  # OFFEN
+            grenze = max(start, heute + timedelta(days=1)) if nur_offen else max(start, heute)
+            d = zahltag if zahltag >= grenze else roll_ziel
+        if d > ende:
             continue
         betrag = p.betrag_brutto if p.art == PostenArt.DEBITOR.value else -p.betrag_brutto
         key: Key = p.konto_id if p.konto_id is not None else f"TERMIN:OP_{p.art}"
         plan[key][d] += betrag
 
-    # 2) Dauerbuchungen
+    # 2) Dauerbuchungen: Raster mit Vorlauf erzeugen, erst verschieben, dann filtern,
+    #    damit Raten nicht an der Fenstergrenze verloren gehen (z. B. 01.11. = Sonntag)
     dauer = db.scalars(
         select(models.Dauerbuchung).where(
             models.Dauerbuchung.mandant_id == mandant.id,
@@ -144,9 +166,11 @@ def plan_fluesse(
         )
     )
     for db_ in dauer:
-        for d in _dauer_termine(db_, start, ende):
-            d = naechster_bankarbeitstag(d, bl)
-            if d > ende:
+        for roh in _dauer_termine(db_, start - timedelta(days=31), ende):
+            d = naechster_bankarbeitstag(roh, bl)
+            if d < start or d > ende:
+                continue
+            if nur_offen and d <= heute:
                 continue
             betrag = db_.betrag_brutto if db_.art == PostenArt.DEBITOR.value else -db_.betrag_brutto
             key = db_.konto_id if db_.konto_id is not None else f"TERMIN:DAUER_{db_.art}"
@@ -161,11 +185,28 @@ def plan_fluesse(
         )
     )
     for t in termine:
+        if nur_offen and (
+            t.datum <= heute or t.status == models.TerminStatus.ERLEDIGT.value
+        ):
+            continue
         key = _termin_key(t.typ, t.konto_id)
         plan[key][t.datum] += -t.betrag
 
     # 4) Budget mit Restbudget-Logik
     _budget_einarbeiten(db, mandant, konto_by_id, plan, start, ende)
+
+    if nur_offen:
+        # Projektionssicht: Finanz-, Info- und nicht liquiditätswirksame Konten raus
+        for key in list(plan.keys()):
+            if isinstance(key, int):
+                k = konto_by_id.get(key)
+                if k is None:
+                    continue
+                if not k.liquiditaetswirksam or k.typ in (
+                    models.KontoTyp.BANK.value,
+                    models.KontoTyp.KASSE.value,
+                ):
+                    del plan[key]
     return plan
 
 
@@ -235,7 +276,7 @@ def _budget_einarbeiten(
 
     for konto_id in konto_ids:
         konto = konto_by_id.get(konto_id)
-        if konto is None or not konto.liquiditaetswirksam:
+        if konto is None or not konto.aktiv or not konto.liquiditaetswirksam:
             continue
         richtung = _konto_richtung(konto)
         if richtung == Richtung.INFO.value:
@@ -317,14 +358,20 @@ def _konto_richtung(konto: models.Konto) -> str:
 def _snapshot_plan(
     db: Session, mandant_id: int, start: date, heute: date
 ) -> tuple[dict[Key, dict[date, Decimal]] | None, models.PlanSnapshot | None]:
-    snap = db.scalars(
+    """Jüngster Snapshot, dessen Fenster das angezeigte Fenster überlappt."""
+    snaps = db.scalars(
         select(models.PlanSnapshot)
         .where(
             models.PlanSnapshot.mandant_id == mandant_id,
             models.PlanSnapshot.stichtag <= heute,
         )
         .order_by(models.PlanSnapshot.stichtag.desc(), models.PlanSnapshot.id.desc())
-    ).first()
+    )
+    snap = None
+    for s in snaps:
+        if s.stichtag + timedelta(days=s.wochen * 7) > start:
+            snap = s
+            break
     if snap is None:
         return None, None
     werte: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
@@ -349,10 +396,10 @@ def berechne_plan(
     konten = _lade_konten(db, mandant.id)
     konto_by_id = {k.id: k for k in konten}
     konto_by_nr = {k.nummer: k for k in konten}
-    finanzkonten = [
-        k for k in konten if k.typ in (models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value)
-    ]
-    finanz_nrn = {k.nummer for k in finanzkonten}
+    finanz_typen = (models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value)
+    # Flusserkennung über alle Bank-/Kassenkonten, Bestandszeilen nur für aktive
+    finanz_nrn = {k.nummer for k in konten if k.typ in finanz_typen}
+    finanzkonten = [k for k in konten if k.typ in finanz_typen and k.aktiv]
 
     # ---- Ist ----
     ist_bis = min(heute, ende)
@@ -369,8 +416,9 @@ def berechne_plan(
         for d, betrag in tageswerte.items():
             ist[key][d] += betrag
 
-    # ---- Plan (zum Fensterbeginn) ----
-    plan = plan_fluesse(db, mandant, start, ende)
+    # ---- Plan (aktuelle Erwartung) und Projektionsplan ----
+    plan = plan_fluesse(db, mandant, start, ende, heute=heute)
+    plan_projektion = plan_fluesse(db, mandant, start, ende, heute=heute, nur_offen=True)
 
     # ---- Vergleichsbasis für vergangene Tage ----
     snap_plan, snap = _snapshot_plan(db, mandant.id, start, heute)
@@ -395,6 +443,8 @@ def berechne_plan(
             return gruppe_by_code.get("A_SV") or gruppe_by_code.get("A_STEUER")
         if key.startswith("TERMIN:OP_DEBITOR") or key.startswith("TERMIN:DAUER_DEBITOR"):
             return gruppe_by_code.get("E_SONST")
+        if key.startswith("TERMIN:OP_") or key.startswith("TERMIN:DAUER_"):
+            return gruppe_by_code.get("A_SONST")
         if key.startswith("TERMIN:"):
             return gruppe_by_code.get("A_STEUER")
         return None
@@ -404,8 +454,10 @@ def berechne_plan(
     for key in alle_keys:
         g = gruppe_fuer_key(key)
         if isinstance(key, int):
-            k = konto_by_id[key]
-            if k.typ in (models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value):
+            k = konto_by_id.get(key)
+            if k is None:
+                continue
+            if k.typ in finanz_typen:
                 continue  # Finanzkonten erscheinen im Bestandsblock
             if not k.liquiditaetswirksam:
                 continue
@@ -414,12 +466,14 @@ def berechne_plan(
     def key_sort(key: Key):
         if isinstance(key, int):
             return (0, konto_by_id[key].nummer)
-        return (1, key)
+        return (1, str(key))
 
     def zeile_fuer_key(key: Key) -> dict:
         if isinstance(key, int):
             k = konto_by_id[key]
             name, nummer, ust = k.bezeichnung, k.nummer, k.ust_satz
+            if not k.aktiv:
+                name += " (inaktiv)"
         elif key.startswith("NR:"):
             nummer, name, ust = key[3:], f"Konto {key[3:]} (nicht angelegt)", None
         else:
@@ -435,7 +489,7 @@ def berechne_plan(
                 "TERMIN:DAUER_KREDITOR": "Dauerbuchungen (ohne Konto)",
                 "TERMIN:DAUER_DEBITOR": "Dauererlöse (ohne Konto)",
             }
-            nummer, name, ust = "", benennung.get(key, key), None
+            nummer, name, ust = "", benennung.get(key, str(key)), None
         return {
             "key": str(key),
             "typ": "konto",
@@ -479,18 +533,18 @@ def berechne_plan(
     def summe_je_tag(quelle: dict[Key, dict[date, Decimal]], nur: str | None) -> dict[str, float]:
         s: dict[date, Decimal] = defaultdict(Decimal)
         for key, tageswerte in quelle.items():
-            g = gruppe_fuer_key(key)
-            richtung = g.richtung if g else (
-                _konto_richtung(konto_by_id[key]) if isinstance(key, int) else Richtung.AUS.value
-            )
+            if isinstance(key, int):
+                k = konto_by_id.get(key)
+                if k is None:
+                    continue
+                if k.typ in finanz_typen or not k.liquiditaetswirksam:
+                    continue
+                richtung = _konto_richtung(k)
+            else:
+                g = gruppe_fuer_key(key)
+                richtung = g.richtung if g else Richtung.AUS.value
             if richtung == Richtung.INFO.value:
                 continue
-            if isinstance(key, int):
-                k = konto_by_id[key]
-                if k.typ in (models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value):
-                    continue
-                if not k.liquiditaetswirksam:
-                    continue
             for d, v in tageswerte.items():
                 if nur == "EIN" and v <= 0:
                     continue
@@ -509,7 +563,7 @@ def berechne_plan(
     }
 
     # ---- Bestände ----
-    bestaende = _bestaende(db, mandant, finanzkonten, finanz_nrn, tage, heute, plan)
+    bestaende = _bestaende(db, mandant, finanzkonten, finanz_nrn, tage, heute, plan_projektion)
 
     return {
         "mandant_id": mandant.id,
@@ -556,7 +610,7 @@ def _bestaende(
     finanz_nrn: set[str],
     tage: list[date],
     heute: date,
-    plan: dict[Key, dict[date, Decimal]],
+    plan_projektion: dict[Key, dict[date, Decimal]],
 ) -> dict:
     start, ende = tage[0], tage[-1]
     anker: dict[int, tuple[date, Decimal]] = {}
@@ -573,32 +627,34 @@ def _bestaende(
         # Bestand.wert = Kontostand zum Ende des Tages `datum`
         anker[k.id] = (b.datum, b.wert) if b else (start - timedelta(days=1), Decimal("0"))
 
-    # Bewegungen ab frühestem Anker bis heute
+    # Bewegungen ab frühestem Anker bis heute (deckt auch Anker nach Fensterende ab)
     frueh = min([a[0] for a in anker.values()] + [start]) + timedelta(days=1)
-    _, bank_bewegungen = ist_zahlungsfluesse(db, mandant.id, finanz_nrn, frueh, min(heute, ende))
+    _, bank_bewegungen = ist_zahlungsfluesse(db, mandant.id, finanz_nrn, frueh, heute)
 
     konto_bestaende: list[dict] = []
     summe_je_tag: dict[date, Decimal] = defaultdict(Decimal)
+    basis_heute = Decimal("0")
     linien = Decimal("0")
     for k in finanzkonten:
         a_datum, a_wert = anker[k.id]
         bew = bank_bewegungen.get(k.nummer, {})
         werte: dict[str, float | None] = {}
-        # vorwärts vom Anker
-        stand = a_wert
         laufend: dict[date, Decimal] = {a_datum: a_wert}
+        # vorwärts vom Anker bis heute (unabhängig vom Fenster)
+        stand = a_wert
         d = a_datum + timedelta(days=1)
-        while d <= min(heute, ende):
+        while d <= heute:
             stand += bew.get(d, Decimal("0"))
             laufend[d] = stand
             d += timedelta(days=1)
-        # rückwärts vom Anker (falls Anker im Fenster liegt)
+        # rückwärts vom Anker bis zum Fensterbeginn (falls Anker nach start liegt)
         stand = a_wert
         d = a_datum
         while d > start:
             stand -= bew.get(d, Decimal("0"))
             d -= timedelta(days=1)
             laufend[d] = stand
+        basis_heute += laufend.get(heute, a_wert)
         for d in tage:
             if d <= heute and d in laufend:
                 werte[d.isoformat()] = _f(laufend[d])
@@ -618,28 +674,25 @@ def _bestaende(
             }
         )
 
-    # Gesamtliquidität: Ist bis heute, danach Fortschreibung über Plan-Netto
+    # Gesamtliquidität: Ist bis heute, danach Fortschreibung über den Restplan
     plan_netto: dict[date, Decimal] = defaultdict(Decimal)
-    for tageswerte in plan.values():
+    for tageswerte in plan_projektion.values():
         for d, v in tageswerte.items():
             plan_netto[d] += v
 
     liquiditaet: dict[str, float] = {}
     verfuegbar: dict[str, float] = {}
-    letzter_ist = None
+    letzter = None
     for d in tage:
         if d <= heute:
-            wert = summe_je_tag.get(d)
-            if wert is None:
-                wert = Decimal("0")
-            letzter_ist = wert
-            liquiditaet[d.isoformat()] = _f(wert)
+            wert = summe_je_tag.get(d, Decimal("0"))
+            letzter = wert
         else:
-            basiswert = letzter_ist if letzter_ist is not None else Decimal("0")
-            basiswert += plan_netto.get(d, Decimal("0"))
-            letzter_ist = basiswert
-            liquiditaet[d.isoformat()] = _f(basiswert)
-        verfuegbar[d.isoformat()] = _f(Decimal(str(liquiditaet[d.isoformat()])) + linien)
+            if letzter is None:
+                letzter = basis_heute  # Fenster liegt komplett in der Zukunft
+            letzter = letzter + plan_netto.get(d, Decimal("0"))
+        liquiditaet[d.isoformat()] = _f(letzter)
+        verfuegbar[d.isoformat()] = _f(letzter + linien)
 
     # Warenbestand nachrichtlich
     waren_anker = list(
@@ -682,7 +735,7 @@ def erstelle_snapshot(
     heute = heute or date.today()
     start = wochen_start(start or heute)
     ende = start + timedelta(days=wochen * 7 - 1)
-    plan = plan_fluesse(db, mandant, start, ende)
+    plan = plan_fluesse(db, mandant, start, ende, heute=start)
     snap = models.PlanSnapshot(
         mandant_id=mandant.id, stichtag=start, wochen=wochen, kommentar=kommentar
     )

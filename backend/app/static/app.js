@@ -27,6 +27,14 @@ async function apiDatei(url, formData) {
   return json;
 }
 
+// HTML-Escaping für alle nutzerkontrollierten Werte in Template-Literalen (XSS-Schutz)
+function esc(text) {
+  if (text === null || text === undefined) return "";
+  return String(text).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
 const eurFormat = new Intl.NumberFormat("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 function eur(wert) {
   if (wert === null || wert === undefined) return "";
