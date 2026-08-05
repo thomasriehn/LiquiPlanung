@@ -22,6 +22,12 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
 - **Insolvenzspezifisch**: Forderungsklassen je Posten (§ 38 / § 55 InsO, Aus-/Absonderung)
   mit Zahlungssperre für Insolvenzforderungen und automatischer Vorbelegung anhand des
   Insolvenz-Stichtags; gesperrte Summen werden nachrichtlich ausgewiesen.
+- **Insolvenzgeld-Assistent**: Zeitraum je Mandant (Vorschlag: 3 Monate vor erwarteter
+  Eröffnung); unterdrückt Personal-/SV-Zahlungen und kürzt SV-/LSt-Termine anteilig
+  (§§ 165 ff., 175 SGB III), mit Entlastungsvorschau je Position.
+- **Szenarien (Best/Base/Worst)**: Faktoren auf Einzahlungen und variable Auszahlungen,
+  Debitorenverzögerung; umschaltbar auf der Plan-Seite, im Export vermerkt; Soll/Ist
+  bleibt auf dem Basisplan.
 - **Export**: 13-Wochen-Plan als Excel-Arbeitsmappe (Tage, Wochen mit Plan/Ist/Δ,
   Soll-Ist) und als PDF-Bericht für Gericht, Sachwalter, Gläubigerausschuss.
 - **Mehrbenutzerbetrieb**: Rollen Admin/Bearbeiter/Leser, Mandantenzuordnung, Audit-Log.

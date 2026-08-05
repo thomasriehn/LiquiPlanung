@@ -32,6 +32,54 @@
     {% if not leser %}<button type="submit">Speichern</button>{% endif %}
   </form>
 
+  <h2>Insolvenzgeld-Assistent</h2>
+  <p class="hinweis">
+    Im Insolvenzgeldzeitraum (i. d. R. die letzten 3 Monate vor dem Insolvenzereignis,
+    §§ 165 ff. SGB III) entfallen beim Schuldner Nettolöhne (Insolvenzgeld bzw.
+    Vorfinanzierung nach § 170 Abs. 4 SGB III), SV-Beiträge (§ 175 SGB III) und
+    Lohnsteuer. Bei Aktivierung unterdrückt die Planung im Zeitraum Personal-Budgets und
+    -Dauerbuchungen und kürzt SV-/LSt-Kalendertermine anteilig nach Beitragsmonat.
+    Offene Lohn-Altposten bitte als Insolvenzforderung klassifizieren.
+  </p>
+  <form id="igeld-form" class="formular-zeilen">
+    <label class="cb"><input type="checkbox" name="insolvenzgeld_aktiv"
+      {% if mandant.insolvenzgeld_aktiv %}checked{% endif %}> Assistent aktiv</label>
+    <label>Zeitraum von<input type="date" name="insolvenzgeld_von"
+      value="{{ mandant.insolvenzgeld_von or '' }}"></label>
+    <label>Zeitraum bis<input type="date" name="insolvenzgeld_bis"
+      value="{{ mandant.insolvenzgeld_bis or '' }}"></label>
+    <label>Erwartete Eröffnung (für Vorschlag)<input type="date" id="igeld-eroeffnung"></label>
+    {% if not leser %}
+    <button type="button" id="igeld-vorschlag" class="sekundaer">Zeitraum vorschlagen</button>
+    <button type="submit">Speichern</button>
+    {% endif %}
+    <button type="button" id="igeld-vorschau-knopf" class="sekundaer">Entlastung anzeigen</button>
+  </form>
+  <div id="igeld-vorschau"></div>
+
+  <h2>Szenarien (Best/Base/Worst)</h2>
+  <p class="hinweis">
+    Faktoren wirken auf geplante Einzahlungen bzw. budgetbasierte (variable) Auszahlungen;
+    vertraglich fixe Posten, Dauerbuchungen und Steuer-/SV-Termine bleiben unverändert.
+    Die Debitorenverzögerung verschiebt erwartete Kundenzahlungen. Auswahl des Szenarios
+    auf der Plan-Seite; Snapshots und Soll/Ist beziehen sich immer auf den Basisplan.
+  </p>
+  {% if not leser %}
+  <form id="szenario-form" class="formular-zeilen">
+    <label>Name<input name="name" required></label>
+    <label>Einzahlungen %<input type="number" step="1" min="0" max="500" name="ein_faktor" value="100"></label>
+    <label>Var. Auszahlungen %<input type="number" step="1" min="0" max="500" name="aus_faktor" value="100"></label>
+    <label>Debitoren +Tage<input type="number" step="1" min="0" max="180" name="debitoren_verzoegerung_tage" value="0"></label>
+    <label>Kommentar<input name="kommentar"></label>
+    <button type="submit">Anlegen</button>
+  </form>
+  {% endif %}
+  <table class="liste">
+    <thead><tr><th>Name</th><th class="zahl">Einzahlungen %</th><th class="zahl">Var. Auszahlungen %</th>
+      <th class="zahl">Debitoren +Tage</th><th>Kommentar</th><th></th></tr></thead>
+    <tbody id="szenarien"></tbody>
+  </table>
+
   <h2>Bestände (Anker für die Fortschreibung)</h2>
   <p class="hinweis">Der jüngste Bestand je Bank-/Kassenkonto ist der Startpunkt der
     Bestandsfortschreibung (Wert = Kontostand zum Tagesende). Warenbestände werden
@@ -74,6 +122,110 @@ function kontoName(id) {
   const k = konten.find(k => k.id === id);
   return k ? esc(`${k.nummer} ${k.bezeichnung}`) : "–";
 }
+
+// ---- Insolvenzgeld-Assistent ----
+const igeldForm = document.getElementById("igeld-form");
+const igeldVorschlag = document.getElementById("igeld-vorschlag");
+if (igeldVorschlag) igeldVorschlag.addEventListener("click", () => {
+  const eroeffnung = document.getElementById("igeld-eroeffnung").value;
+  if (!eroeffnung) { toast("Bitte erwartete Eröffnung angeben."); return; }
+  const e = new Date(eroeffnung + "T12:00:00");
+  const von = new Date(e); von.setMonth(von.getMonth() - 3);
+  const bis = new Date(e); bis.setDate(bis.getDate() - 1);
+  igeldForm.elements.insolvenzgeld_von.value = von.toISOString().slice(0, 10);
+  igeldForm.elements.insolvenzgeld_bis.value = bis.toISOString().slice(0, 10);
+});
+
+igeldForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(igeldForm);
+  try {
+    await api("PATCH", `/api/mandanten/${MANDANT_ID}`, {
+      insolvenzgeld_aktiv: f.get("insolvenzgeld_aktiv") === "on",
+      insolvenzgeld_von: f.get("insolvenzgeld_von") || null,
+      insolvenzgeld_bis: f.get("insolvenzgeld_bis") || null,
+    });
+    toast("Insolvenzgeld-Einstellungen gespeichert.", false);
+    ladeIgeldVorschau();
+  } catch (err) { toast(err.message); }
+});
+
+async function ladeIgeldVorschau() {
+  const von = igeldForm.elements.insolvenzgeld_von.value;
+  const bis = igeldForm.elements.insolvenzgeld_bis.value;
+  const box = document.getElementById("igeld-vorschau");
+  if (!von || !bis) { box.innerHTML = `<p class="hinweis">Zeitraum angeben, um die Entlastung zu sehen.</p>`; return; }
+  try {
+    const v = await api("GET",
+      `/api/mandanten/${MANDANT_ID}/insolvenzgeld/vorschau?von=${von}&bis=${bis}`);
+    const s = v.summen;
+    let html = `<div class="warnung gruen">Entlastung im 13-Wochen-Fenster:
+      <strong>${eur(s.gesamt)} €</strong>
+      (Personal-Budget ${eur(s.personal_budget)} · Lohnläufe ${eur(s.personal_dauer)} ·
+      SV ${eur(s.sv)} · LSt ${eur(s.lst)})</div>`;
+    if (v.positionen.length) {
+      html += `<table class="liste"><thead><tr><th>Datum</th><th>Position</th>
+        <th class="zahl">Betrag</th><th class="zahl">Entlastung</th></tr></thead><tbody>` +
+        v.positionen.map(p => `<tr><td>${p.datum}</td><td>${esc(p.text)}</td>
+          <td class="zahl">${eur(p.betrag)}</td><td class="zahl">${eur(p.entlastung)}</td></tr>`).join("") +
+        `</tbody></table>`;
+    }
+    box.innerHTML = html;
+  } catch (err) { toast(err.message); }
+}
+document.getElementById("igeld-vorschau-knopf").addEventListener("click", ladeIgeldVorschau);
+
+// ---- Szenarien ----
+async function ladeSzenarien() {
+  const szenarien = await api("GET", `/api/mandanten/${MANDANT_ID}/szenarien`);
+  const tb = document.getElementById("szenarien");
+  tb.innerHTML = "";
+  for (const s of szenarien) {
+    const tr = document.createElement("tr");
+    tr.dataset.id = s.id;
+    tr.innerHTML = `
+      <td><input data-feld="name" value="${esc(s.name)}" ${LESER ? "disabled" : ""}></td>
+      <td class="zahl"><input data-feld="ein_faktor" type="number" step="1" min="0" max="500" style="width:80px" value="${s.ein_faktor}" ${LESER ? "disabled" : ""}></td>
+      <td class="zahl"><input data-feld="aus_faktor" type="number" step="1" min="0" max="500" style="width:80px" value="${s.aus_faktor}" ${LESER ? "disabled" : ""}></td>
+      <td class="zahl"><input data-feld="debitoren_verzoegerung_tage" type="number" step="1" min="0" max="180" style="width:70px" value="${s.debitoren_verzoegerung_tage}" ${LESER ? "disabled" : ""}></td>
+      <td><input data-feld="kommentar" value="${esc(s.kommentar)}" ${LESER ? "disabled" : ""}></td>
+      <td>${LESER ? "" : `<button class="gefahr" data-id="${s.id}">✕</button>`}</td>`;
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll("button[data-id]").forEach(btn => btn.addEventListener("click", async () => {
+    if (!confirm("Szenario löschen?")) return;
+    try { await api("DELETE", `/api/szenarien/${btn.dataset.id}`); ladeSzenarien(); }
+    catch (e) { toast(e.message); }
+  }));
+}
+
+document.getElementById("szenarien").addEventListener("change", async (e) => {
+  const feld = e.target.dataset.feld;
+  if (!feld) return;
+  const id = e.target.closest("tr").dataset.id;
+  let wert = e.target.value;
+  if (feld !== "name" && feld !== "kommentar") wert = parseFloat(wert);
+  try { await api("PATCH", `/api/szenarien/${id}`, { [feld]: wert }); }
+  catch (err) { toast(err.message); ladeSzenarien(); }
+});
+
+const szenarioForm = document.getElementById("szenario-form");
+if (szenarioForm) szenarioForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(szenarioForm);
+  try {
+    await api("POST", `/api/mandanten/${MANDANT_ID}/szenarien`, {
+      name: f.get("name"),
+      kommentar: f.get("kommentar") || null,
+      ein_faktor: parseFloat(f.get("ein_faktor")),
+      aus_faktor: parseFloat(f.get("aus_faktor")),
+      debitoren_verzoegerung_tage: parseInt(f.get("debitoren_verzoegerung_tage")),
+    });
+    szenarioForm.reset();
+    ladeSzenarien();
+  } catch (err) { toast(err.message); }
+});
+ladeSzenarien();
 
 async function ladeBestaende() {
   const bestaende = await api("GET", `/api/mandanten/${MANDANT_ID}/bestaende`);

@@ -82,6 +82,26 @@ def _de(wert: float | None) -> str:
     return f"{wert:,.2f}".replace(",", " ").replace(".", ",").replace(" ", ".")
 
 
+def _szenario_text(plan: dict) -> str | None:
+    s = plan.get("szenario")
+    if not s:
+        return None
+    teile = [f"Einzahlungen {s['ein_faktor']:.0f} %", f"variable Auszahlungen {s['aus_faktor']:.0f} %"]
+    if s["debitoren_verzoegerung_tage"]:
+        teile.append(f"Debitoren +{s['debitoren_verzoegerung_tage']} Tage")
+    return f"{s['name']} ({', '.join(teile)})"
+
+
+def _igeld_text(plan: dict) -> str | None:
+    ig = plan.get("insolvenzgeld")
+    if not ig:
+        return None
+    return (
+        f"Zeitraum {_datum_de(ig['von'])} – {_datum_de(ig['bis'])}, "
+        f"Entlastung im Fenster {_de(ig['entlastung_fenster'])} €"
+    )
+
+
 # --------------------------------------------------------------------- Excel
 
 _FETT = Font(bold=True)
@@ -126,6 +146,8 @@ def plan_xlsx(plan: dict, sollist: dict | None, mandant: models.Mandant) -> byte
         ("Stand (heute)", _datum_de(heute)),
         ("Soll-Basis", "eingefrorener Plan vom " + _datum_de(plan["snapshot"]["stichtag"])
          if plan["vergleichsbasis"] == "SNAPSHOT" else "aktueller Plan (kein Snapshot)"),
+        ("Szenario", _szenario_text(plan) or "Basisplan"),
+        ("Insolvenzgeld", _igeld_text(plan) or "nicht aktiv"),
         ("Gesperrte Insolvenzforderungen (§ 38 InsO)", plan["gesperrte_insolvenzforderungen"]),
         ("Werte", "Ist bis heute, Plan ab morgen (Blatt 'Tage'); Plan/Ist/Δ je Woche (Blatt 'Wochen')"),
     ]
@@ -329,6 +351,12 @@ def plan_pdf(plan: dict, mandant: models.Mandant) -> bytes:
            if plan["vergleichsbasis"] == "SNAPSHOT" else " · Soll-Basis: aktueller Plan")
     )
     elemente.append(Paragraph(meta, meta_stil))
+    szenario_text = _szenario_text(plan)
+    if szenario_text:
+        elemente.append(Paragraph(f"<b>Szenario:</b> {szenario_text}", meta_stil))
+    igeld_text = _igeld_text(plan)
+    if igeld_text:
+        elemente.append(Paragraph(f"Insolvenzgeld: {igeld_text}", meta_stil))
     if plan["gesperrte_insolvenzforderungen"]:
         elemente.append(Paragraph(
             f"Zahlungsgesperrte Insolvenzforderungen (§ 38 InsO), nicht im Plan: "

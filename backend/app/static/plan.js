@@ -3,20 +3,39 @@
 let daten = null;
 const zu = new Set(); // eingeklappte Gruppen
 
+async function ladeSzenarien() {
+  try {
+    const szenarien = await api("GET", `/api/mandanten/${MANDANT_ID}/szenarien`);
+    const sel = document.getElementById("szenario");
+    sel.innerHTML = `<option value="">Basisplan</option>` + szenarien.map(s =>
+      `<option value="${s.id}">${esc(s.name)}</option>`).join("");
+  } catch (e) { /* Szenarien sind optional */ }
+}
+
 async function lade() {
   const start = document.getElementById("start").value;
   const wochen = document.getElementById("wochen").value || 13;
+  const szenarioId = document.getElementById("szenario").value;
   let url = `/api/mandanten/${MANDANT_ID}/plan?wochen=${wochen}`;
   if (start) url += `&start=${start}`;
+  if (szenarioId) url += `&szenario_id=${szenarioId}`;
   try {
     daten = await api("GET", url);
   } catch (e) { toast(e.message); return; }
   if (!document.getElementById("start").value) document.getElementById("start").value = daten.start;
   const info = document.getElementById("basis-info");
-  info.textContent = daten.vergleichsbasis === "SNAPSHOT"
+  let infoText = daten.vergleichsbasis === "SNAPSHOT"
     ? `Soll-Basis: eingefrorener Plan vom ${datumVoll(daten.snapshot.stichtag)}`
     : "Soll-Basis: aktueller Plan (noch kein Snapshot eingefroren)";
-  const q = `?wochen=${wochen}` + (document.getElementById("start").value ? `&start=${document.getElementById("start").value}` : "");
+  if (daten.szenario) {
+    const s = daten.szenario;
+    const teile = [`Einzahlungen ${s.ein_faktor} %`, `variable Auszahlungen ${s.aus_faktor} %`];
+    if (s.debitoren_verzoegerung_tage) teile.push(`Debitoren +${s.debitoren_verzoegerung_tage} Tage`);
+    infoText = `Szenario „${s.name}“ (${teile.join(", ")}) · ` + infoText;
+  }
+  info.textContent = infoText;
+  let q = `?wochen=${wochen}` + (document.getElementById("start").value ? `&start=${document.getElementById("start").value}` : "");
+  if (szenarioId) q += `&szenario_id=${szenarioId}`;
   document.getElementById("export-xlsx").href = `/api/mandanten/${MANDANT_ID}/export/plan.xlsx${q}`;
   document.getElementById("export-pdf").href = `/api/mandanten/${MANDANT_ID}/export/plan.pdf${q}`;
   const warnBox = document.getElementById("warnungen");
@@ -33,6 +52,14 @@ async function lade() {
     div.className = "warnung";
     div.textContent = "Zahlungsgesperrte Insolvenzforderungen (§ 38 InsO), nicht im Plan enthalten: " +
       eur(daten.gesperrte_insolvenzforderungen) + " €";
+    warnBox.appendChild(div);
+  }
+  if (daten.insolvenzgeld) {
+    const ig = daten.insolvenzgeld;
+    const div = document.createElement("div");
+    div.className = "warnung gruen";
+    div.textContent = `Insolvenzgeldzeitraum ${datumVoll(ig.von)} – ${datumVoll(ig.bis)}: ` +
+      `Personal-, SV- und LSt-Zahlungen entlastet (im Fenster: ${eur(ig.entlastung_fenster)} €).`;
     warnBox.appendChild(div);
   }
   zeichne();
@@ -221,6 +248,7 @@ function zeichne() {
 document.getElementById("laden").addEventListener("click", lade);
 document.getElementById("ansicht").addEventListener("change", zeichne);
 document.getElementById("metrik").addEventListener("change", zeichne);
+document.getElementById("szenario").addEventListener("change", lade);
 const einfrierenKnopf = document.getElementById("einfrieren");
 if (einfrierenKnopf) {
   einfrierenKnopf.addEventListener("click", async () => {
@@ -232,4 +260,4 @@ if (einfrierenKnopf) {
     } catch (e) { toast(e.message); }
   });
 }
-lade();
+ladeSzenarien().then(lade);

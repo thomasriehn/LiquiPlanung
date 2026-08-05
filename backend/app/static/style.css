@@ -84,6 +84,7 @@ table.liste input, table.liste select { padding: 3px 5px; }
 .hinweis { color: var(--grau); font-size: 12px; }
 .warnung { color: #8a5a00; background: #fff6e0; border: 1px solid #e8c56b;
   padding: 8px 10px; border-radius: 6px; margin: 8px 0; }
+.warnung.gruen { color: #1e5c38; background: #e8f5ec; border-color: #9fd3ae; }
 
 /* ---- Plan-Matrix ---- */
 .matrix-huelle {

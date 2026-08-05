@@ -171,6 +171,77 @@ def test_export_xlsx_und_pdf(client):
     assert antwort.headers["content-type"] == "application/pdf"
     assert antwort.content.startswith(b"%PDF")
 
+    # Export im Szenario: läuft durch und Kopfzeilen-Helfer liefern den Vermerk
+    szenarien = client.get(f"/api/mandanten/{mandant_id}/szenarien").json()
+    worst = next(s for s in szenarien if s["name"] == "Worst Case")
+    antwort = client.get(
+        f"/api/mandanten/{mandant_id}/export/plan.pdf?szenario_id={worst['id']}"
+    )
+    assert antwort.status_code == 200
+    plan = client.get(
+        f"/api/mandanten/{mandant_id}/plan?szenario_id={worst['id']}"
+    ).json()
+    from app.services.export import _szenario_text
+
+    assert "Worst Case" in _szenario_text(plan)
+    assert "Debitoren +14 Tage" in _szenario_text(plan)
+
+
+def test_szenarien_crud_und_plan(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Szenario GmbH", "kurzname": "szen"}
+    ).json()["id"]
+
+    # Standard-Vorlagen wurden angelegt
+    szenarien = client.get(f"/api/mandanten/{mandant_id}/szenarien").json()
+    namen = {s["name"] for s in szenarien}
+    assert {"Best Case", "Worst Case"} <= namen
+    worst = next(s for s in szenarien if s["name"] == "Worst Case")
+
+    plan = client.get(
+        f"/api/mandanten/{mandant_id}/plan?szenario_id={worst['id']}"
+    ).json()
+    assert plan["szenario"]["name"] == "Worst Case"
+
+    # CRUD + Validierung
+    neu = client.post(
+        f"/api/mandanten/{mandant_id}/szenarien",
+        json={"name": "Stress", "ein_faktor": 60, "aus_faktor": 100,
+              "debitoren_verzoegerung_tage": 30},
+    )
+    assert neu.status_code == 201
+    assert client.patch(
+        f"/api/szenarien/{neu.json()['id']}", json={"ein_faktor": 9999}
+    ).status_code == 422
+    assert client.delete(f"/api/szenarien/{neu.json()['id']}").json()["ok"] is True
+    # fremdes/unbekanntes Szenario
+    assert client.get(
+        f"/api/mandanten/{mandant_id}/plan?szenario_id=99999"
+    ).status_code == 404
+
+
+def test_insolvenzgeld_einstellungen_und_vorschau(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten",
+        json={"name": "IG GmbH", "kurzname": "ig", "verfahrensstatus": "VORLAEUFIG",
+              "insolvenz_stichtag": "2026-07-15"},
+    ).json()["id"]
+    antwort = client.patch(
+        f"/api/mandanten/{mandant_id}",
+        json={"insolvenzgeld_aktiv": True, "insolvenzgeld_von": "2026-06-10",
+              "insolvenzgeld_bis": "2026-09-09"},
+    )
+    assert antwort.status_code == 200
+    vorschau = client.get(
+        f"/api/mandanten/{mandant_id}/insolvenzgeld/vorschau"
+    ).json()
+    assert vorschau["aktiv"] is True
+    assert vorschau["von"] == "2026-06-10"
+    plan = client.get(f"/api/mandanten/{mandant_id}/plan").json()
+    assert plan["insolvenzgeld"]["aktiv"] is True
+
 
 def test_leser_darf_nicht_schreiben(client):
     _login(client)

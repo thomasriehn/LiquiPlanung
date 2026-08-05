@@ -20,9 +20,9 @@ from ..security import (
     nur_schreibend,
     sichere_mandanten_liste,
 )
-from ..services import datev, export
+from ..services import datev, export, insolvenzgeld
 from ..services.feiertage import BUNDESLAENDER
-from ..services.kontenrahmen import lege_kontenrahmen_an
+from ..services.kontenrahmen import lege_kontenrahmen_an, lege_standard_szenarien_an
 from ..services.liquiditaet import (
     berechne_plan,
     erstelle_snapshot,
@@ -119,6 +119,7 @@ def mandant_anlegen(
     db.add(mandant)
     db.flush()
     lege_kontenrahmen_an(db, mandant)
+    lege_standard_szenarien_an(db, mandant)
     audit(db, benutzer, mandant.id, "MANDANT_ANGELEGT", mandant.name)
     db.commit()
     return {"id": mandant.id}
@@ -126,7 +127,7 @@ def mandant_anlegen(
 
 MANDANT_FELDER = {
     "name", "bundesland", "ust_zeitraum", "dauerfrist", "verfahrensstatus",
-    "aktenzeichen", "aktiv",
+    "aktenzeichen", "aktiv", "insolvenzgeld_aktiv",
 }
 
 
@@ -140,8 +141,8 @@ def mandant_aendern(
     nur_schreibend(benutzer)
     mandant = mandant_oder_403(db, benutzer, mandant_id)
     for feld, wert in daten.items():
-        if feld == "insolvenz_stichtag":
-            mandant.insolvenz_stichtag = _datum(wert, feld) if wert else None
+        if feld in ("insolvenz_stichtag", "insolvenzgeld_von", "insolvenzgeld_bis"):
+            setattr(mandant, feld, _datum(wert, feld) if wert else None)
         elif feld in MANDANT_FELDER:
             if feld == "bundesland" and wert not in BUNDESLAENDER:
                 raise HTTPException(422, "Unbekanntes Bundesland")
@@ -1036,11 +1037,132 @@ def bestand_loeschen(
     return {"ok": True}
 
 
-# ---------------------------------------------------------------- Planung
+# ---------------------------------------------------------------- Szenarien
 
-@router.get("/mandanten/{mandant_id}/plan")
-def plan_abrufen(
+def _szenario_oder_none(
+    db: Session, mandant_id: int, szenario_id: int | None
+) -> models.Szenario | None:
+    if szenario_id is None:
+        return None
+    szenario = db.get(models.Szenario, szenario_id)
+    if szenario is None or szenario.mandant_id != mandant_id:
+        raise HTTPException(404, "Szenario nicht gefunden")
+    return szenario
+
+
+@router.get("/mandanten/{mandant_id}/szenarien")
+def szenarien_liste(
     mandant_id: int,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    szenarien = db.scalars(
+        select(models.Szenario)
+        .where(models.Szenario.mandant_id == mandant.id)
+        .order_by(models.Szenario.name)
+    )
+    return [
+        {
+            "id": s.id,
+            "name": s.name,
+            "kommentar": s.kommentar,
+            "ein_faktor": float(s.ein_faktor),
+            "aus_faktor": float(s.aus_faktor),
+            "debitoren_verzoegerung_tage": s.debitoren_verzoegerung_tage,
+        }
+        for s in szenarien
+    ]
+
+
+class SzenarioNeu(BaseModel):
+    name: str
+    kommentar: str | None = None
+    ein_faktor: float = 100
+    aus_faktor: float = 100
+    debitoren_verzoegerung_tage: int = 0
+
+
+def _szenario_werte_pruefen(ein: float, aus: float, tage: int) -> None:
+    if not (0 <= ein <= 500 and 0 <= aus <= 500):
+        raise HTTPException(422, "Faktoren müssen zwischen 0 und 500 Prozent liegen")
+    if not (0 <= tage <= 180):
+        raise HTTPException(422, "Verzögerung muss zwischen 0 und 180 Tagen liegen")
+
+
+@router.post("/mandanten/{mandant_id}/szenarien", status_code=201)
+def szenario_anlegen(
+    mandant_id: int,
+    daten: SzenarioNeu,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    _szenario_werte_pruefen(daten.ein_faktor, daten.aus_faktor, daten.debitoren_verzoegerung_tage)
+    s = models.Szenario(
+        mandant_id=mandant.id,
+        name=daten.name.strip(),
+        kommentar=daten.kommentar,
+        ein_faktor=_dec(daten.ein_faktor, "ein_faktor"),
+        aus_faktor=_dec(daten.aus_faktor, "aus_faktor"),
+        debitoren_verzoegerung_tage=daten.debitoren_verzoegerung_tage,
+    )
+    db.add(s)
+    audit(db, benutzer, mandant.id, "SZENARIO_ANGELEGT", daten.name)
+    db.commit()
+    return {"id": s.id}
+
+
+@router.patch("/szenarien/{szenario_id}")
+def szenario_aendern(
+    szenario_id: int,
+    daten: dict,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    nur_schreibend(benutzer)
+    s = db.get(models.Szenario, szenario_id)
+    if s is None:
+        raise HTTPException(404, "Szenario nicht gefunden")
+    mandant_oder_403(db, benutzer, s.mandant_id)
+    for feld, wert in daten.items():
+        if feld in ("ein_faktor", "aus_faktor"):
+            setattr(s, feld, _dec(wert, feld))
+        elif feld == "debitoren_verzoegerung_tage":
+            s.debitoren_verzoegerung_tage = int(wert)
+        elif feld in {"name", "kommentar"}:
+            setattr(s, feld, wert)
+    _szenario_werte_pruefen(
+        float(s.ein_faktor), float(s.aus_faktor), s.debitoren_verzoegerung_tage
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/szenarien/{szenario_id}")
+def szenario_loeschen(
+    szenario_id: int,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    nur_schreibend(benutzer)
+    s = db.get(models.Szenario, szenario_id)
+    if s is None:
+        raise HTTPException(404, "Szenario nicht gefunden")
+    mandant_oder_403(db, benutzer, s.mandant_id)
+    db.delete(s)
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- Insolvenzgeld
+
+@router.get("/mandanten/{mandant_id}/insolvenzgeld/vorschau")
+def insolvenzgeld_vorschau(
+    mandant_id: int,
+    von: str | None = None,
+    bis: str | None = None,
     start: str | None = None,
     wochen: int = 13,
     benutzer=Depends(aktueller_benutzer),
@@ -1049,8 +1171,36 @@ def plan_abrufen(
     mandant = mandant_oder_403(db, benutzer, mandant_id)
     if not (1 <= wochen <= 26):
         raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    fenster_start = wochen_start(_datum(start, "start") if start else date.today())
+    fenster_ende = fenster_start + timedelta(days=wochen * 7 - 1)
+    return insolvenzgeld.vorschau(
+        db,
+        mandant,
+        fenster_start,
+        fenster_ende,
+        von=_datum(von, "von") if von else None,
+        bis=_datum(bis, "bis") if bis else None,
+    )
+
+
+# ---------------------------------------------------------------- Planung
+
+@router.get("/mandanten/{mandant_id}/plan")
+def plan_abrufen(
+    mandant_id: int,
+    start: str | None = None,
+    wochen: int = 13,
+    szenario_id: int | None = None,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    if not (1 <= wochen <= 26):
+        raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    szenario = _szenario_oder_none(db, mandant.id, szenario_id)
     return berechne_plan(
-        db, mandant, start=_datum(start, "start") if start else None, wochen=wochen
+        db, mandant, start=_datum(start, "start") if start else None, wochen=wochen,
+        szenario=szenario,
     )
 
 
@@ -1102,6 +1252,7 @@ def export_plan_xlsx(
     mandant_id: int,
     start: str | None = None,
     wochen: int = 13,
+    szenario_id: int | None = None,
     benutzer=Depends(aktueller_benutzer),
     db: Session = Depends(get_db),
 ):
@@ -1109,7 +1260,8 @@ def export_plan_xlsx(
     if not (1 <= wochen <= 26):
         raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
     plan = berechne_plan(
-        db, mandant, start=_datum(start, "start") if start else None, wochen=wochen
+        db, mandant, start=_datum(start, "start") if start else None, wochen=wochen,
+        szenario=_szenario_oder_none(db, mandant.id, szenario_id),
     )
     sollist = soll_ist_vergleich(db, mandant)
     daten = export.plan_xlsx(plan, sollist if sollist.get("snapshot") else None, mandant)
@@ -1130,6 +1282,7 @@ def export_plan_pdf(
     mandant_id: int,
     start: str | None = None,
     wochen: int = 13,
+    szenario_id: int | None = None,
     benutzer=Depends(aktueller_benutzer),
     db: Session = Depends(get_db),
 ):
@@ -1137,7 +1290,8 @@ def export_plan_pdf(
     if not (1 <= wochen <= 26):
         raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
     plan = berechne_plan(
-        db, mandant, start=_datum(start, "start") if start else None, wochen=wochen
+        db, mandant, start=_datum(start, "start") if start else None, wochen=wochen,
+        szenario=_szenario_oder_none(db, mandant.id, szenario_id),
     )
     daten = export.plan_pdf(plan, mandant)
     audit(db, benutzer, mandant.id, "EXPORT_PDF", plan["start"])

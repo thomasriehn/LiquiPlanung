@@ -153,6 +153,31 @@ REGEL_KONTEN = {
 }
 
 
+def lege_standard_szenarien_an(db: Session, mandant: models.Mandant) -> None:
+    """Best-/Worst-Case-Vorlagen (editier- und löschbar); Basisplan = kein Szenario."""
+    vorhanden = db.scalar(
+        select(models.Szenario.id).where(models.Szenario.mandant_id == mandant.id).limit(1)
+    )
+    if vorhanden:
+        return
+    db.add(
+        models.Szenario(
+            mandant_id=mandant.id, name="Best Case",
+            kommentar="Einzahlungen +10 %",
+            ein_faktor=Decimal("110"), aus_faktor=Decimal("100"),
+            debitoren_verzoegerung_tage=0,
+        )
+    )
+    db.add(
+        models.Szenario(
+            mandant_id=mandant.id, name="Worst Case",
+            kommentar="Einzahlungen −20 %, Debitoren +14 Tage, variable Kosten +5 %",
+            ein_faktor=Decimal("80"), aus_faktor=Decimal("105"),
+            debitoren_verzoegerung_tage=14,
+        )
+    )
+
+
 def lege_kontenrahmen_an(db: Session, mandant: models.Mandant) -> None:
     """Erzeugt Gruppen, Konten und Terminregeln für einen neuen Mandanten."""
     vorhanden = db.scalar(

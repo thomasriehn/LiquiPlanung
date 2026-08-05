@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..models import BestandTyp, Intervall, PostenArt
-from .kontenrahmen import lege_kontenrahmen_an
+from .kontenrahmen import lege_kontenrahmen_an, lege_standard_szenarien_an
 from .liquiditaet import wochen_start
 from .zahlungskalender import generiere_termine
 
@@ -19,6 +19,9 @@ def lege_demo_mandant_an(db: Session, heute: date | None = None) -> models.Manda
     heute = heute or date.today()
     start = wochen_start(heute)
 
+    # erwartete Eröffnung ca. 5 Wochen nach Planungsbeginn; Insolvenzgeldzeitraum =
+    # die 3 Monate davor -> die ersten Planwochen sind bei Personal/SV/LSt entlastet
+    erwartete_eroeffnung = start + timedelta(days=35)
     mandant = models.Mandant(
         name="Muster GmbH (Demo)",
         kurzname="demo",
@@ -29,10 +32,14 @@ def lege_demo_mandant_an(db: Session, heute: date | None = None) -> models.Manda
         verfahrensstatus="VORLAEUFIG",
         aktenzeichen="70 IN 123/26",
         insolvenz_stichtag=start - timedelta(days=21),
+        insolvenzgeld_aktiv=True,
+        insolvenzgeld_von=erwartete_eroeffnung - timedelta(days=91),
+        insolvenzgeld_bis=erwartete_eroeffnung - timedelta(days=1),
     )
     db.add(mandant)
     db.flush()
     lege_kontenrahmen_an(db, mandant)
+    lege_standard_szenarien_an(db, mandant)
 
     konto = {
         k.nummer: k

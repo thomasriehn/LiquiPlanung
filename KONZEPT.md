@@ -51,10 +51,19 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
    Postenliste und Berichten nachrichtlich ausgewiesen. Eingangsrechnungen mit
    Rechnungsdatum vor dem Insolvenz-Stichtag werden automatisch als Insolvenzforderung
    vorbelegt (übersteuerbar).
-7. → **Insolvenzgeld:** Im Insolvenzgeldzeitraum (bis 3 Monate) entfallen Lohnauszahlungen
-   beim Schuldner; Vorfinanzierung wirkt als Einzahlung. Abbildbar über Budget/Posten,
-   später als eigener Assistent.
-8. → **Szenarien (Best/Base/Worst):** Mehrere Planvarianten je Mandant.
+7. ✔ **Insolvenzgeld-Assistent:** Je Mandant ist ein Insolvenzgeldzeitraum hinterlegbar
+   (Vorschlag: 3 Monate vor erwarteter Eröffnung, §§ 165 ff. SGB III). Im Zeitraum
+   unterdrückt die Planung Personal-/SV-Budgets und -Dauerbuchungen (Nettolöhne über
+   Insolvenzgeld bzw. Vorfinanzierung nach § 170 Abs. 4 SGB III, SV-Beiträge nach
+   § 175 SGB III von der BA getragen) und kürzt SV-/LSt-Kalendertermine anteilig nach
+   Beitrags-/Lohnmonat. Eine Vorschau zeigt die Entlastung je Position vor dem
+   Aktivieren; Plan und Berichte weisen den Zeitraum und die Entlastung aus.
+8. ✔ **Szenarien (Best/Base/Worst):** Je Mandant definierbare Planvarianten mit
+   Faktoren auf geplante Einzahlungen und budgetbasierte (variable) Auszahlungen sowie
+   Debitorenverzögerung in Tagen; vertraglich fixe Posten und Steuer-/SV-Termine
+   bleiben unverändert. Auswahl auf der Plan-Seite (inkl. Export-Vermerk); Snapshots
+   und Soll/Ist beziehen sich stets auf den Basisplan. Best-/Worst-Vorlagen werden je
+   Mandant angelegt.
 9. → **Bankdatenimport (MT940 / CAMT.053):** Kontoauszüge als zusätzliche, tagesaktuelle
    Ist-Quelle unabhängig vom Buchhaltungsexport.
 
@@ -208,11 +217,12 @@ Vorbelegungen (USt-Sätze, Gruppenzuordnung) sind Vorschlagswerte und je Mandant
 - Session-Cookies signiert (`SECRET_KEY` zwingend setzen), Passwort-Hashing PBKDF2.
 - Betrieb hinter Reverse Proxy mit TLS empfohlen (siehe Deployment-Doku).
 
-## 10. Roadmap (bewusst noch nicht in der Erstversion)
+## 10. Roadmap (bewusst noch nicht enthalten)
 
-1. Insolvenzgeld-Assistent (Insolvenzgeldzeitraum, Vorfinanzierung als Einzahlung).
-2. Szenarien (Best/Base/Worst) je Mandant.
-3. MT940/CAMT.053-Bankimport; automatischer OP-Ausgleich.
-4. Alembic-Migrationen, integrierte Backups, 2-Faktor-Login.
-5. USt-Zahllast-Vorschau aus Budget (Erlöse × Satz − Vorsteuer) statt Historienschätzung.
-6. Feingranulare Verteilungsprofile für Budgets (z. B. Zahllauf freitags).
+1. MT940/CAMT.053-Bankimport; automatischer OP-Ausgleich.
+2. Alembic-Migrationen (der Erststand zieht additive Spalten beim Start automatisch
+   nach), integrierte Backups, 2-Faktor-Login.
+3. USt-Zahllast-Vorschau aus Budget (Erlöse × Satz − Vorsteuer) statt Historienschätzung.
+4. Feingranulare Verteilungsprofile für Budgets (z. B. Zahllauf freitags).
+5. Szenario-Vergleichsansicht (Base/Best/Worst nebeneinander) und Szenario-Detailregeln
+   je Konto.

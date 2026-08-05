@@ -345,6 +345,123 @@ def test_termine_regeneration_ohne_duplikate(db):
     assert erg["angelegt"] == 0
 
 
+def test_insolvenzgeld_unterdrueckt_personal_sv_lst(db):
+    m = _mandant(db)
+    m.insolvenzgeld_aktiv = True
+    m.insolvenzgeld_von = date(2026, 8, 1)
+    m.insolvenzgeld_bis = date(2026, 8, 31)
+    lohn = _konto(db, m, "4110")
+    sv_konto = _konto(db, m, "1742")
+    ust_konto = _konto(db, m, "1780")
+    # Personal-Budget August und September
+    for monat in (8, 9):
+        db.add(models.Budget(mandant_id=m.id, konto_id=lohn.id, jahr=2026, monat=monat,
+                             betrag_netto=Decimal("10000")))
+    # Lohnlauf als Dauerbuchung am 25.
+    db.add(models.Dauerbuchung(mandant_id=m.id, name="Lohnlauf", art="KREDITOR",
+                               konto_id=lohn.id, betrag_brutto=Decimal("7000"),
+                               intervall="MONATLICH", stichtag=25,
+                               gueltig_von=date(2026, 1, 1)))
+    # SV-Termine August (im Zeitraum) und September (außerhalb); USt bleibt immer
+    db.add(models.Zahlungstermin(mandant_id=m.id, typ="SV", periode="2026-08",
+                                 datum=date(2026, 8, 27), betrag=Decimal("9000"),
+                                 konto_id=sv_konto.id))
+    db.add(models.Zahlungstermin(mandant_id=m.id, typ="SV", periode="2026-09",
+                                 datum=date(2026, 9, 28), betrag=Decimal("9000"),
+                                 konto_id=sv_konto.id))
+    db.add(models.Zahlungstermin(mandant_id=m.id, typ="LST", periode="2026-08",
+                                 datum=date(2026, 9, 10), betrag=Decimal("4000"),
+                                 konto_id=_konto(db, m, "1741").id))
+    db.add(models.Zahlungstermin(mandant_id=m.id, typ="UST_VA", periode="2026-08",
+                                 datum=date(2026, 9, 10), betrag=Decimal("5000"),
+                                 konto_id=ust_konto.id))
+    db.commit()
+
+    plan = berechne_plan(db, m, start=START, heute=HEUTE)
+    pers = next(g for g in plan["zeilen"] if g["code"] == "A_PERS")
+    zeile_lohn = next(k for k in pers["kinder"] if k["nummer"] == "4110")
+    august = sum(v for t, v in zeile_lohn["plan"].items() if t.startswith("2026-08"))
+    september = sum(v for t, v in zeile_lohn["plan"].items() if t.startswith("2026-09"))
+    assert august == 0.0                      # Budget + Lohnlauf im Zeitraum entfallen
+    assert september < -14000                 # ab September wieder Lohn + Restbudget
+    sv = next(g for g in plan["zeilen"] if g["code"] == "A_SV")
+    zeile_sv = next(k for k in sv["kinder"] if k["nummer"] == "1742")
+    assert "2026-08-27" not in zeile_sv["plan"]          # August-SV entfällt komplett
+    assert zeile_sv["plan"]["2026-09-28"] == -9000.0     # September-SV bleibt
+    steuern = next(g for g in plan["zeilen"] if g["code"] == "A_STEUER")
+    # LSt für August entfällt komplett -> Zeile 1741 taucht gar nicht erst auf
+    zeile_lst = next((k for k in steuern["kinder"] if k["nummer"] == "1741"), None)
+    assert zeile_lst is None or "2026-09-10" not in zeile_lst["plan"]
+    zeile_ust = next(k for k in steuern["kinder"] if k["nummer"] == "1780")
+    assert zeile_ust["plan"]["2026-09-10"] == -5000.0    # USt unberührt
+    assert plan["insolvenzgeld"]["aktiv"] is True
+    assert plan["insolvenzgeld"]["entlastung_fenster"] > 20000
+
+
+def test_insolvenzgeld_teilmonat_kuerzt_anteilig(db):
+    m = _mandant(db)
+    m.insolvenzgeld_aktiv = True
+    m.insolvenzgeld_von = date(2026, 8, 1)
+    m.insolvenzgeld_bis = date(2026, 9, 15)  # halber September
+    sv_konto = _konto(db, m, "1742")
+    db.add(models.Zahlungstermin(mandant_id=m.id, typ="SV", periode="2026-09",
+                                 datum=date(2026, 9, 28), betrag=Decimal("9000"),
+                                 konto_id=sv_konto.id))
+    db.commit()
+    plan = berechne_plan(db, m, start=START, heute=HEUTE)
+    sv = next(g for g in plan["zeilen"] if g["code"] == "A_SV")
+    zeile = next(k for k in sv["kinder"] if k["nummer"] == "1742")
+    # 15 von 30 Septembertagen im Zeitraum -> Kürzung 50 %
+    assert zeile["plan"]["2026-09-28"] == -4500.0
+
+
+def test_szenario_faktoren_und_verzoegerung(db):
+    m = _mandant(db)
+    erloes = _konto(db, m, "8400")
+    material = _konto(db, m, "3400")
+    szenario = models.Szenario(mandant_id=m.id, name="Worst", ein_faktor=Decimal("80"),
+                               aus_faktor=Decimal("110"), debitoren_verzoegerung_tage=14)
+    db.add(szenario)
+    db.add(models.Budget(mandant_id=m.id, konto_id=erloes.id, jahr=2026, monat=8,
+                         betrag_netto=Decimal("10000")))
+    db.add(models.Budget(mandant_id=m.id, konto_id=material.id, jahr=2026, monat=8,
+                         betrag_netto=Decimal("1000")))
+    # Forderung fällig Do 13.08. -> mit +14 Tagen am Do 27.08.; Kreditor unverändert
+    db.add(models.OffenerPosten(mandant_id=m.id, art="DEBITOR", partner="Kunde",
+                                faellig_am=date(2026, 8, 13),
+                                betrag_brutto=Decimal("1000"), konto_id=erloes.id))
+    db.add(models.OffenerPosten(mandant_id=m.id, art="KREDITOR", partner="Lieferant",
+                                faellig_am=date(2026, 8, 13),
+                                betrag_brutto=Decimal("500"), konto_id=material.id))
+    db.commit()
+
+    basis = berechne_plan(db, m, start=START, heute=HEUTE)
+    worst = berechne_plan(db, m, start=START, heute=HEUTE, szenario=szenario)
+
+    def august_summe(plan, code, nummer):
+        gruppe = next(g for g in plan["zeilen"] if g["code"] == code)
+        zeile = next(k for k in gruppe["kinder"] if k["nummer"] == nummer)
+        return sum(v for t, v in zeile["plan"].items() if t.startswith("2026-08")), zeile
+
+    basis_ein, _ = august_summe(basis, "E_UMSATZ", "8400")
+    worst_ein, worst_zeile = august_summe(worst, "E_UMSATZ", "8400")
+    # Einzahlungen (Budget + Forderung) auf 80 % skaliert
+    assert abs(worst_ein - basis_ein * 0.8) < 0.1
+    # Forderung um 14 Tage verschoben
+    assert "2026-08-13" not in worst_zeile["plan"] or worst_zeile["plan"]["2026-08-13"] < 801
+    assert worst_zeile["plan"]["2026-08-27"] >= 800.0
+    # Kreditor-OP unverändert, Budget-Auszahlung mit Faktor 110
+    _, mat_zeile = august_summe(worst, "A_MAT", "3400")
+    assert mat_zeile["plan"]["2026-08-13"] == -500.0
+    basis_aus, _ = august_summe(basis, "A_MAT", "3400")
+    worst_aus, _ = august_summe(worst, "A_MAT", "3400")
+    # Budgetanteil: Basis = -500 (OP) + Restbudget; Worst skaliert nur den Budgetanteil
+    basis_budget = basis_aus + 500
+    worst_budget = worst_aus + 500
+    assert abs(worst_budget - basis_budget * 1.1) < 26  # Restbudget-Wechselwirkung toleriert
+    assert worst["szenario"]["name"] == "Worst"
+
+
 def test_unbekanntes_konto_wird_gemeldet(db):
     m = _mandant(db)
     db.add(models.Buchung(mandant_id=m.id, datum=START, konto_nr="1200",

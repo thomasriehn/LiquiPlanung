@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import models
@@ -14,8 +14,38 @@ from .routers import api, auth, pages
 from .security import hash_passwort
 
 
+def ensure_schema() -> None:
+    """Ergänzt fehlende Spalten bestehender Tabellen (additiv, ohne Alembic).
+
+    `create_all` legt nur fehlende Tabellen an; neue Spalten auf bestehenden
+    Tabellen werden hier per ALTER TABLE nachgezogen (nullable, anschließend
+    mit dem Modell-Default befüllt).
+    """
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for tabelle in Base.metadata.sorted_tables:
+            if not inspector.has_table(tabelle.name):
+                continue
+            vorhanden = {c["name"] for c in inspector.get_columns(tabelle.name)}
+            for spalte in tabelle.columns:
+                if spalte.name in vorhanden:
+                    continue
+                typ = spalte.type.compile(engine.dialect)
+                conn.execute(
+                    text(f'ALTER TABLE {tabelle.name} ADD COLUMN {spalte.name} {typ}')
+                )
+                if spalte.default is not None and getattr(spalte.default, "is_scalar", False):
+                    conn.execute(
+                        tabelle.update()
+                        .where(spalte.is_(None))
+                        .values({spalte: spalte.default.arg})
+                    )
+                print(f"[LiquiPlanung] Schema ergänzt: {tabelle.name}.{spalte.name}")
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+    ensure_schema()
     settings = get_settings()
     if settings.secret_key == "bitte-aendern-unsicherer-entwicklungsschluessel":
         print(

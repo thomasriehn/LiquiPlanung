@@ -112,6 +112,7 @@ def plan_fluesse(
     ende: date,
     heute: date | None = None,
     nur_offen: bool = False,
+    szenario: models.Szenario | None = None,
 ) -> dict[Key, dict[date, Decimal]]:
     """Planzahlungen je Konto/Tag für das Fenster [start, ende].
 
@@ -121,12 +122,20 @@ def plan_fluesse(
                erfüllte Zahlungen; Vergangenheitstermine gelten als ausgeführt
                (das Ist bildet sie ab), überfällige offene Posten rollen strikt
                hinter heute.
+    szenario:  Was-wäre-wenn-Faktoren (Einzahlungen, budgetbasierte Auszahlungen,
+               Debitorenverzögerung); None = Basisplan.
     """
     heute = heute or start
     bl = mandant.bundesland
     plan: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
     konten = _lade_konten(db, mandant.id)
     konto_by_id = {k.id: k for k in konten}
+
+    from .insolvenzgeld import igeld_fenster, termin_entlastung
+
+    igeld = igeld_fenster(mandant)
+    ein_f = (szenario.ein_faktor / Decimal("100")) if szenario else Decimal("1")
+    verzoegerung = szenario.debitoren_verzoegerung_tage if szenario else 0
 
     if nur_offen:
         roll_ziel = naechster_bankarbeitstag(max(start, heute + timedelta(days=1)), bl)
@@ -148,6 +157,8 @@ def plan_fluesse(
         ):
             continue
         zahltag = p.zahlung_geplant_am or p.faellig_am
+        if p.art == PostenArt.DEBITOR.value and verzoegerung:
+            zahltag = zahltag + timedelta(days=verzoegerung)
         if p.status == PostenStatus.BEZAHLT.value:
             if nur_offen:
                 continue
@@ -159,7 +170,10 @@ def plan_fluesse(
             d = zahltag if zahltag >= grenze else roll_ziel
         if d > ende:
             continue
-        betrag = p.betrag_brutto if p.art == PostenArt.DEBITOR.value else -p.betrag_brutto
+        if p.art == PostenArt.DEBITOR.value:
+            betrag = (p.betrag_brutto * ein_f).quantize(CENT)
+        else:
+            betrag = -p.betrag_brutto
         key: Key = p.konto_id if p.konto_id is not None else f"TERMIN:OP_{p.art}"
         plan[key][d] += betrag
 
@@ -172,13 +186,27 @@ def plan_fluesse(
         )
     )
     for db_ in dauer:
+        d_konto = konto_by_id.get(db_.konto_id) if db_.konto_id else None
         for roh in _dauer_termine(db_, start - timedelta(days=31), ende):
             d = naechster_bankarbeitstag(roh, bl)
             if d < start or d > ende:
                 continue
             if nur_offen and d <= heute:
                 continue
-            betrag = db_.betrag_brutto if db_.art == PostenArt.DEBITOR.value else -db_.betrag_brutto
+            # Insolvenzgeld: Personal-/SV-Dauerbuchungen im Zeitraum entfallen
+            # (Nettolöhne über Igeld/Vorfinanzierung, SV-Beiträge nach § 175 SGB III)
+            if (
+                igeld
+                and db_.art == PostenArt.KREDITOR.value
+                and d_konto is not None
+                and d_konto.typ in (models.KontoTyp.PERSONAL.value, models.KontoTyp.SV.value)
+                and igeld[0] <= d <= igeld[1]
+            ):
+                continue
+            if db_.art == PostenArt.DEBITOR.value:
+                betrag = (db_.betrag_brutto * ein_f).quantize(CENT)
+            else:
+                betrag = -db_.betrag_brutto
             key = db_.konto_id if db_.konto_id is not None else f"TERMIN:DAUER_{db_.art}"
             plan[key][d] += betrag
 
@@ -195,11 +223,16 @@ def plan_fluesse(
             t.datum <= heute or t.status == models.TerminStatus.ERLEDIGT.value
         ):
             continue
+        betrag = t.betrag
+        if igeld:
+            betrag = betrag - termin_entlastung(t, igeld)
+            if betrag <= 0:
+                continue
         key = _termin_key(t.typ, t.konto_id)
-        plan[key][t.datum] += -t.betrag
+        plan[key][t.datum] += -betrag
 
     # 4) Budget mit Restbudget-Logik
-    _budget_einarbeiten(db, mandant, konto_by_id, plan, start, ende)
+    _budget_einarbeiten(db, mandant, konto_by_id, plan, start, ende, szenario, igeld)
 
     if nur_offen:
         # Projektionssicht: Finanz-, Info- und nicht liquiditätswirksame Konten raus
@@ -257,6 +290,8 @@ def _budget_einarbeiten(
     plan: dict[Key, dict[date, Decimal]],
     start: date,
     ende: date,
+    szenario: models.Szenario | None = None,
+    igeld: tuple[date, date] | None = None,
 ) -> None:
     bl = mandant.bundesland
     budgets = list(
@@ -280,6 +315,9 @@ def _budget_einarbeiten(
         wochen.append((w, min(w + timedelta(days=6), ende)))
         w += timedelta(days=7)
 
+    ein_f = (szenario.ein_faktor / Decimal("100")) if szenario else Decimal("1")
+    aus_f = (szenario.aus_faktor / Decimal("100")) if szenario else Decimal("1")
+
     for konto_id in konto_ids:
         konto = konto_by_id.get(konto_id)
         if konto is None or not konto.aktiv or not konto.liquiditaetswirksam:
@@ -288,6 +326,14 @@ def _budget_einarbeiten(
         if richtung == Richtung.INFO.value:
             continue
         vorzeichen = Decimal("1") if richtung == Richtung.EIN.value else Decimal("-1")
+        faktor = ein_f if richtung == Richtung.EIN.value else aus_f
+        # Insolvenzgeld: Personal-/SV-Budgets im Zeitraum entfallen (tagesgenau)
+        igeld_konto = (
+            igeld
+            if igeld
+            and konto.typ in (models.KontoTyp.PERSONAL.value, models.KontoTyp.SV.value)
+            else None
+        )
         for w_von, w_bis in wochen:
             iso = w_von.isocalendar()
             banktage = [
@@ -304,7 +350,7 @@ def _budget_einarbeiten(
             if (konto_id, iso.year, iso.week) in overrides:
                 netto = abs(overrides[(konto_id, iso.year, iso.week)])
                 if netto:
-                    anteil = _brutto(netto, konto.ust_satz) / len(banktage)
+                    anteil = _brutto(netto, konto.ust_satz) * faktor / len(banktage)
                     for d in banktage:
                         basis[d] = anteil
             else:
@@ -314,7 +360,11 @@ def _budget_einarbeiten(
                         continue
                     bt = bankarbeitstage_anzahl(d.year, d.month, bl)
                     if bt:
-                        basis[d] = _brutto(abs(mb), konto.ust_satz) / bt
+                        basis[d] = _brutto(abs(mb), konto.ust_satz) * faktor / bt
+            if igeld_konto:
+                for d in list(basis):
+                    if igeld_konto[0] <= d <= igeld_konto[1]:
+                        del basis[d]
             gesamt = sum(basis.values(), Decimal("0"))
             if gesamt <= 0:
                 continue
@@ -327,14 +377,14 @@ def _budget_einarbeiten(
             rest = max(Decimal("0"), gesamt - explizit).quantize(CENT)
             if rest == 0:
                 continue
-            faktor = rest / gesamt
+            skalierung = rest / gesamt
             tage_sortiert = sorted(basis)
             verteilt = Decimal("0")
             for i, d in enumerate(tage_sortiert):
                 if i == len(tage_sortiert) - 1:
                     betrag = rest - verteilt
                 else:
-                    betrag = (basis[d] * faktor).quantize(CENT)
+                    betrag = (basis[d] * skalierung).quantize(CENT)
                     verteilt += betrag
                 plan[konto_id][d] += vorzeichen * betrag
 
@@ -393,6 +443,7 @@ def berechne_plan(
     start: date | None = None,
     wochen: int = 13,
     heute: date | None = None,
+    szenario: models.Szenario | None = None,
 ) -> dict:
     heute = heute or date.today()
     start = wochen_start(start or heute)
@@ -423,8 +474,10 @@ def berechne_plan(
             ist[key][d] += betrag
 
     # ---- Plan (aktuelle Erwartung) und Projektionsplan ----
-    plan = plan_fluesse(db, mandant, start, ende, heute=heute)
-    plan_projektion = plan_fluesse(db, mandant, start, ende, heute=heute, nur_offen=True)
+    plan = plan_fluesse(db, mandant, start, ende, heute=heute, szenario=szenario)
+    plan_projektion = plan_fluesse(
+        db, mandant, start, ende, heute=heute, nur_offen=True, szenario=szenario
+    )
 
     # ---- Vergleichsbasis für vergangene Tage ----
     snap_plan, snap = _snapshot_plan(db, mandant.id, start, heute)
@@ -584,8 +637,32 @@ def berechne_plan(
     ):
         gesperrt += p.betrag_brutto
 
+    # ---- Insolvenzgeld-Entlastung im Fenster (nachrichtlich) ----
+    from .insolvenzgeld import igeld_fenster, vorschau as igeld_vorschau
+
+    insolvenzgeld_info = None
+    if igeld_fenster(mandant) is not None:
+        v = igeld_vorschau(db, mandant, start, ende)
+        insolvenzgeld_info = {
+            "aktiv": True,
+            "von": v["von"],
+            "bis": v["bis"],
+            "entlastung_fenster": v["summen"]["gesamt"],
+        }
+
     return {
         "gesperrte_insolvenzforderungen": _f(gesperrt),
+        "szenario": (
+            {
+                "id": szenario.id,
+                "name": szenario.name,
+                "ein_faktor": _f(szenario.ein_faktor),
+                "aus_faktor": _f(szenario.aus_faktor),
+                "debitoren_verzoegerung_tage": szenario.debitoren_verzoegerung_tage,
+            }
+            if szenario else None
+        ),
+        "insolvenzgeld": insolvenzgeld_info,
         "mandant_id": mandant.id,
         "start": start.isoformat(),
         "ende": ende.isoformat(),

@@ -146,6 +146,11 @@ class Mandant(Base):
     # REGELMANDAT / VORLAEUFIG / EROEFFNET / EIGENVERWALTUNG
     aktenzeichen: Mapped[str | None] = mapped_column(String(64), nullable=True)
     insolvenz_stichtag: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Insolvenzgeld-Assistent: im Zeitraum entfallen Nettolöhne (Vorfinanzierung/BA),
+    # SV-Beiträge (§ 175 SGB III) und Lohnsteuer beim Schuldner
+    insolvenzgeld_aktiv: Mapped[bool] = mapped_column(Boolean, default=False)
+    insolvenzgeld_von: Mapped[date | None] = mapped_column(Date, nullable=True)
+    insolvenzgeld_bis: Mapped[date | None] = mapped_column(Date, nullable=True)
     aktiv: Mapped[bool] = mapped_column(Boolean, default=True)
     erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -385,6 +390,26 @@ class PlanSnapshotWert(Base):
     betrag: Mapped[Decimal] = mapped_column(Numeric(14, 2))
 
     snapshot: Mapped[PlanSnapshot] = relationship(back_populates="werte")
+
+
+class Szenario(Base):
+    """Was-wäre-wenn-Sicht auf den Plan (Best/Base/Worst).
+
+    Faktoren wirken auf geplante Einzahlungen (Budget, Debitoren-Posten und
+    -Dauerbuchungen) bzw. auf budgetbasierte Auszahlungen; vertraglich fixe
+    Auszahlungen (offene Posten, Dauerbuchungen, Steuern/SV-Termine) bleiben
+    unverändert. Snapshots/Soll-Ist beziehen sich stets auf den Basisplan.
+    """
+
+    __tablename__ = "szenarien"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mandant_id: Mapped[int] = mapped_column(ForeignKey("mandanten.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    kommentar: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ein_faktor: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("100"))
+    aus_faktor: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("100"))
+    debitoren_verzoegerung_tage: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class AuditLog(Base):

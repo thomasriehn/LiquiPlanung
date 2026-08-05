@@ -19,6 +19,9 @@
         <option value="delta">Abweichung (Ist − Soll)</option>
       </select>
     </label>
+    <label>Szenario
+      <select id="szenario"><option value="">Basisplan</option></select>
+    </label>
     <button id="laden" class="sekundaer">Aktualisieren</button>
     {% if not leser %}<button id="einfrieren" title="Aktuellen Plan als Soll-Vorgabe einfrieren">Plan einfrieren</button>{% endif %}
     <a id="export-xlsx" class="knopf" href="#" title="13-Wochen-Plan als Excel-Datei">Excel ↓</a>
