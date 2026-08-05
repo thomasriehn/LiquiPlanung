@@ -283,6 +283,31 @@ def test_snapshot_und_sollist(db):
     assert plan["vergleichsbasis"] == "SNAPSHOT"
 
 
+def test_insolvenzforderung_zahlungssperre(db):
+    # Insolvenzforderungen (§ 38) dürfen weder im Plan noch in der Projektion auftauchen
+    m = _mandant(db)
+    material = _konto(db, m, "3400")
+    bank = _konto(db, m, "1200")
+    db.add(models.Bestand(mandant_id=m.id, typ="BANK", konto_id=bank.id,
+                          datum=START - timedelta(days=1), wert=Decimal("10000")))
+    db.add(models.OffenerPosten(mandant_id=m.id, art="KREDITOR", partner="Altlieferant",
+                                faellig_am=START + timedelta(days=5),
+                                betrag_brutto=Decimal("8000"), konto_id=material.id,
+                                forderungsklasse="INSOLVENZFORDERUNG"))
+    db.add(models.OffenerPosten(mandant_id=m.id, art="KREDITOR", partner="Neulieferant",
+                                faellig_am=START + timedelta(days=5),
+                                betrag_brutto=Decimal("1200"), konto_id=material.id,
+                                forderungsklasse="MASSE"))
+    db.commit()
+    plan = berechne_plan(db, m, start=START, heute=HEUTE)
+    mat = next(g for g in plan["zeilen"] if g["code"] == "A_MAT")
+    zeile = next(k for k in mat["kinder"] if k["nummer"] == "3400")
+    faellig = (START + timedelta(days=5)).isoformat()
+    assert zeile["plan"][faellig] == -1200.0  # nur die Masseverbindlichkeit
+    assert plan["gesperrte_insolvenzforderungen"] == 8000.0
+    assert plan["bestaende"]["liquiditaet"][plan["ende"]] == 8800.0  # nur -1200
+
+
 def test_snapshot_ohne_fensterueberlappung_wird_ignoriert(db):
     m = _mandant(db)
     # Snapshot 04.05.2026, 13 Wochen -> Fenster endet 02.08.2026

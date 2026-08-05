@@ -16,6 +16,9 @@ async function lade() {
   info.textContent = daten.vergleichsbasis === "SNAPSHOT"
     ? `Soll-Basis: eingefrorener Plan vom ${datumVoll(daten.snapshot.stichtag)}`
     : "Soll-Basis: aktueller Plan (noch kein Snapshot eingefroren)";
+  const q = `?wochen=${wochen}` + (document.getElementById("start").value ? `&start=${document.getElementById("start").value}` : "");
+  document.getElementById("export-xlsx").href = `/api/mandanten/${MANDANT_ID}/export/plan.xlsx${q}`;
+  document.getElementById("export-pdf").href = `/api/mandanten/${MANDANT_ID}/export/plan.pdf${q}`;
   const warnBox = document.getElementById("warnungen");
   warnBox.innerHTML = "";
   if (daten.unbekannte_konten.length) {
@@ -23,6 +26,13 @@ async function lade() {
     div.className = "warnung";
     div.textContent = "Buchungen auf nicht angelegten Konten: " +
       daten.unbekannte_konten.join(", ") + " – bitte unter „Konten“ anlegen.";
+    warnBox.appendChild(div);
+  }
+  if (daten.gesperrte_insolvenzforderungen > 0) {
+    const div = document.createElement("div");
+    div.className = "warnung";
+    div.textContent = "Zahlungsgesperrte Insolvenzforderungen (§ 38 InsO), nicht im Plan enthalten: " +
+      eur(daten.gesperrte_insolvenzforderungen) + " €";
     warnBox.appendChild(div);
   }
   zeichne();

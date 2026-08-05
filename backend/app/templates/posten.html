@@ -9,21 +9,42 @@
   </div>
 
   <div id="bereich-op">
+    {% if mandant.verfahrensstatus != "REGELMANDAT" %}
+    <p class="hinweis">
+      Forderungsklasse: <strong>Insolvenzforderungen (§ 38 InsO)</strong> unterliegen der
+      Zahlungssperre und werden <strong>nicht</strong> als Auszahlung geplant;
+      Masseverbindlichkeiten (§ 55), Aus- und Absonderung sind zahlungsrelevant.
+      Eingangsrechnungen mit Rechnungsdatum vor dem Stichtag
+      {% if mandant.insolvenz_stichtag %}({{ mandant.insolvenz_stichtag }}){% endif %}
+      werden automatisch als Insolvenzforderung vorbelegt.
+    </p>
+    <div id="gesperrt-info"></div>
+    {% endif %}
     {% if not leser %}
     <form id="op-form" class="formular-zeilen">
       <label>Art<select name="art"><option value="KREDITOR">Eingangsrechnung</option><option value="DEBITOR">Forderung</option></select></label>
       <label>Partner<input name="partner" required></label>
       <label>Beleg-Nr.<input name="belegnr"></label>
+      <label>Rechnungsdatum<input type="date" name="rechnungsdatum"></label>
       <label>Fällig am<input type="date" name="faellig_am" required></label>
       <label>Zahlung geplant<input type="date" name="zahlung_geplant_am"></label>
       <label>Betrag brutto<input type="number" step="0.01" name="betrag_brutto" required></label>
       <label>Konto<select name="konto_id" class="konto-auswahl"></select></label>
+      <label>Forderungsklasse
+        <select name="forderungsklasse">
+          <option value="">automatisch / –</option>
+          <option value="MASSE">Masse (§ 55)</option>
+          <option value="INSOLVENZFORDERUNG">Insolvenzforderung (§ 38)</option>
+          <option value="AUSSONDERUNG">Aussonderung (§ 47)</option>
+          <option value="ABSONDERUNG">Absonderung (§§ 49 ff.)</option>
+        </select>
+      </label>
       <button type="submit">Anlegen</button>
     </form>
     {% endif %}
     <table class="liste">
-      <thead><tr><th>Art</th><th>Partner</th><th>Beleg</th><th>Fällig</th><th>Geplant</th>
-        <th class="zahl">Betrag</th><th>Konto</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>Art</th><th>Partner</th><th>Beleg</th><th>Rechnung</th><th>Fällig</th><th>Geplant</th>
+        <th class="zahl">Betrag</th><th>Konto</th><th>Klasse</th><th>Status</th><th></th></tr></thead>
       <tbody id="op-tabelle"></tbody>
     </table>
   </div>
@@ -71,23 +92,55 @@ async function ladeKonten() {
   document.querySelectorAll(".konto-auswahl").forEach(sel => sel.innerHTML = optionen);
 }
 
+const KLASSEN = {
+  MASSE: "Masse", INSOLVENZFORDERUNG: "InsO-Ford.",
+  AUSSONDERUNG: "Aussond.", ABSONDERUNG: "Absond.",
+};
+
+function klasseSelect(p) {
+  if (LESER) {
+    if (!p.forderungsklasse) return "–";
+    return p.forderungsklasse === "INSOLVENZFORDERUNG"
+      ? `<span class="badge-gesperrt">§ 38 gesperrt</span>` : KLASSEN[p.forderungsklasse];
+  }
+  const optionen = `<option value="">–</option>` + Object.entries(KLASSEN).map(([wert, name]) =>
+    `<option value="${wert}" ${p.forderungsklasse === wert ? "selected" : ""}>${name}</option>`).join("");
+  const badge = p.forderungsklasse === "INSOLVENZFORDERUNG"
+    ? ` <span class="badge-gesperrt">gesperrt</span>` : "";
+  return `<select data-feld="forderungsklasse" style="width:110px">${optionen}</select>${badge}`;
+}
+
 async function ladeOP() {
   const posten = await api("GET", `/api/mandanten/${MANDANT_ID}/posten`);
   const tb = document.getElementById("op-tabelle");
   tb.innerHTML = "";
+  let gesperrt = 0;
   for (const p of posten) {
+    if (p.status === "OFFEN" && p.art === "KREDITOR" && p.forderungsklasse === "INSOLVENZFORDERUNG") {
+      gesperrt += p.betrag_brutto;
+    }
     const tr = document.createElement("tr");
+    tr.dataset.id = p.id;
     if (p.status !== "OFFEN") tr.style.opacity = ".5";
     tr.innerHTML = `
       <td>${p.art === "KREDITOR" ? "ER" : "FO"}</td>
       <td>${esc(p.partner)}</td><td>${esc(p.belegnr)}</td>
+      <td>${p.rechnungsdatum || ""}</td>
       <td>${p.faellig_am}</td><td>${p.zahlung_geplant_am || ""}</td>
       <td class="zahl">${eur(p.betrag_brutto)}</td>
-      <td>${kontoName(p.konto_id)}</td><td>${p.status}</td>
+      <td>${kontoName(p.konto_id)}</td>
+      <td>${klasseSelect(p)}</td>
+      <td>${p.status}</td>
       <td>${LESER ? "" : `
         ${p.status === "OFFEN" ? `<button class="sekundaer" data-aktion="bezahlt" data-id="${p.id}">bezahlt</button>` : ""}
         <button class="gefahr" data-aktion="loeschen" data-id="${p.id}">✕</button>`}</td>`;
     tb.appendChild(tr);
+  }
+  const info = document.getElementById("gesperrt-info");
+  if (info) {
+    info.innerHTML = gesperrt > 0
+      ? `<div class="warnung">Zahlungsgesperrte Insolvenzforderungen (offen, nicht im Plan): <strong>${eur(gesperrt)} €</strong></div>`
+      : "";
   }
   tb.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
     try {
@@ -102,6 +155,16 @@ async function ladeOP() {
     } catch (e) { toast(e.message); }
   }));
 }
+
+// Ein Listener am Tbody für Inline-Änderungen (Forderungsklasse)
+document.getElementById("op-tabelle").addEventListener("change", async (e) => {
+  const feld = e.target.dataset.feld;
+  if (!feld) return;
+  const id = e.target.closest("tr").dataset.id;
+  const wert = e.target.value === "" ? null : e.target.value;
+  try { await api("PATCH", `/api/posten/${id}`, { [feld]: wert }); ladeOP(); }
+  catch (err) { toast(err.message); ladeOP(); }
+});
 
 async function ladeDauer() {
   const dauer = await api("GET", `/api/mandanten/${MANDANT_ID}/dauerbuchungen`);
@@ -140,8 +203,16 @@ if (opForm) opForm.addEventListener("submit", async (e) => {
   const daten = Object.fromEntries(f.entries());
   daten.betrag_brutto = parseFloat(daten.betrag_brutto);
   daten.konto_id = daten.konto_id ? parseInt(daten.konto_id) : null;
-  for (const feld of ["belegnr", "zahlung_geplant_am"]) if (!daten[feld]) daten[feld] = null;
-  try { await api("POST", `/api/mandanten/${MANDANT_ID}/posten`, daten); opForm.reset(); ladeOP(); }
+  for (const feld of ["belegnr", "rechnungsdatum", "zahlung_geplant_am", "forderungsklasse"]) {
+    if (!daten[feld]) daten[feld] = null;
+  }
+  try {
+    const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/posten`, daten);
+    if (erg.forderungsklasse === "INSOLVENZFORDERUNG" && !f.get("forderungsklasse")) {
+      toast("Automatisch als Insolvenzforderung (§ 38) eingestuft – Zahlungssperre aktiv.", false);
+    }
+    opForm.reset(); ladeOP();
+  }
   catch (err) { toast(err.message); }
 });
 

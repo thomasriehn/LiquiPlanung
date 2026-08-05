@@ -141,6 +141,12 @@ def plan_fluesse(
         )
     )
     for p in posten:
+        # Zahlungssperre: Insolvenzforderungen (§ 38 InsO) werden nicht bedient
+        if (
+            p.art == PostenArt.KREDITOR.value
+            and p.forderungsklasse == models.Forderungsklasse.INSOLVENZFORDERUNG.value
+        ):
+            continue
         zahltag = p.zahlung_geplant_am or p.faellig_am
         if p.status == PostenStatus.BEZAHLT.value:
             if nur_offen:
@@ -565,7 +571,21 @@ def berechne_plan(
     # ---- Bestände ----
     bestaende = _bestaende(db, mandant, finanzkonten, finanz_nrn, tage, heute, plan_projektion)
 
+    # ---- Zahlungsgesperrte Insolvenzforderungen (nachrichtlich) ----
+    gesperrt = Decimal("0")
+    for p in db.scalars(
+        select(models.OffenerPosten).where(
+            models.OffenerPosten.mandant_id == mandant.id,
+            models.OffenerPosten.status == PostenStatus.OFFEN.value,
+            models.OffenerPosten.art == PostenArt.KREDITOR.value,
+            models.OffenerPosten.forderungsklasse
+            == models.Forderungsklasse.INSOLVENZFORDERUNG.value,
+        )
+    ):
+        gesperrt += p.betrag_brutto
+
     return {
+        "gesperrte_insolvenzforderungen": _f(gesperrt),
         "mandant_id": mandant.id,
         "start": start.isoformat(),
         "ende": ende.isoformat(),

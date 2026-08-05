@@ -44,11 +44,13 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
    gekürzt (Untergrenze 0). Sonst würde z. B. die Miete doppelt geplant (Dauerbuchung + Budget).
 5. ✔ **Kontokorrent-/Kreditlinien:** Verfügbare Liquidität = Bestand + freie Linie.
    Je Bankkonto ist eine Kreditlinie hinterlegbar; die Darstellung weist beides aus.
-6. → **Masseverbindlichkeiten vs. Insolvenzforderungen (§ 38 / § 55 InsO):** Im eröffneten
-   Verfahren dürfen Altverbindlichkeiten nicht bedient werden. Vorgesehen: Kennzeichen je
-   offenem Posten (Insolvenzforderung / Masseverbindlichkeit / Aus-/Absonderung) mit
-   Zahlungssperre für Insolvenzforderungen ab Stichtag. Der Verfahrensstatus und Stichtag
-   sind je Mandant bereits erfasst.
+6. ✔ **Masseverbindlichkeiten vs. Insolvenzforderungen (§ 38 / § 55 InsO):** Je offenem
+   Posten ist eine Forderungsklasse erfasst (Masse, Insolvenzforderung, Aus-/Absonderung).
+   Insolvenzforderungen unterliegen der **Zahlungssperre**: Sie werden nicht als
+   Auszahlung geplant und mindern die Projektion nicht; ihre offene Summe wird in Plan,
+   Postenliste und Berichten nachrichtlich ausgewiesen. Eingangsrechnungen mit
+   Rechnungsdatum vor dem Insolvenz-Stichtag werden automatisch als Insolvenzforderung
+   vorbelegt (übersteuerbar).
 7. → **Insolvenzgeld:** Im Insolvenzgeldzeitraum (bis 3 Monate) entfallen Lohnauszahlungen
    beim Schuldner; Vorfinanzierung wirkt als Einzahlung. Abbildbar über Budget/Posten,
    später als eigener Assistent.
@@ -82,7 +84,9 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
     werden kann.
 18. ✔ **Demo-Mandant:** Auf Wunsch wird ein Beispielmandant mit Daten angelegt, damit die
     Darstellung sofort prüfbar ist.
-19. → **Export (PDF/Excel):** Berichte für Gericht, Sachwalter, Gläubigerausschuss.
+19. ✔ **Export (PDF/Excel):** 13-Wochen-Plan als Excel-Arbeitsmappe (Blätter Info,
+    Tage, Wochen mit Plan/Ist/Δ, Soll-Ist) und als PDF-Bericht (Querformat, Wochenspalten)
+    für Gericht, Sachwalter, Gläubigerausschuss.
 20. → **Datensicherung:** pg_dump-Cron im LXC (Anleitung in `deploy/PROXMOX_LXC.md`),
     später integrierte Sicherung.
 21. → **DSGVO:** Personenbezogene Daten (Kreditoren-/Debitorennamen) – Löschkonzept nach
@@ -206,10 +210,9 @@ Vorbelegungen (USt-Sätze, Gruppenzuordnung) sind Vorschlagswerte und je Mandant
 
 ## 10. Roadmap (bewusst noch nicht in der Erstversion)
 
-1. Masse-/Insolvenzforderungs-Kennzeichen mit Zahlungssperre; Insolvenzgeld-Assistent.
+1. Insolvenzgeld-Assistent (Insolvenzgeldzeitraum, Vorfinanzierung als Einzahlung).
 2. Szenarien (Best/Base/Worst) je Mandant.
 3. MT940/CAMT.053-Bankimport; automatischer OP-Ausgleich.
-4. PDF-/Excel-Export der 13-Wochen-Übersicht und des Soll-/Ist-Berichts.
-5. Alembic-Migrationen, integrierte Backups, 2-Faktor-Login.
-6. USt-Zahllast-Vorschau aus Budget (Erlöse × Satz − Vorsteuer) statt Historienschätzung.
-7. Feingranulare Verteilungsprofile für Budgets (z. B. Zahllauf freitags).
+4. Alembic-Migrationen, integrierte Backups, 2-Faktor-Login.
+5. USt-Zahllast-Vorschau aus Budget (Erlöse × Satz − Vorsteuer) statt Historienschätzung.
+6. Feingranulare Verteilungsprofile für Budgets (z. B. Zahllauf freitags).

@@ -17,7 +17,8 @@ h2 { font-size: 16px; margin: 24px 0 8px; }
 }
 .kopf a { color: #dce7f5; padding: 4px 6px; border-radius: 4px; }
 .kopf a:hover, .kopf a.aktiv { background: rgba(255,255,255,.15); color: #fff; }
-.marke { font-weight: 700; font-size: 16px; }
+.marke { font-weight: 700; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+.marke svg { color: #fff; flex-shrink: 0; }
 .mandant-nav { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
 .mandant-name { font-weight: 600; margin-right: 8px; color: #fff; }
 .kopf-rechts { margin-left: auto; display: flex; align-items: center; gap: 8px; }
@@ -127,6 +128,17 @@ table.matrix { border-collapse: separate; border-spacing: 0; font-size: 12px; }
   box-shadow: 0 4px 12px rgba(0,0,0,.25); max-width: 420px;
 }
 #toast .meldung.fehler { background: var(--rot); }
+
+a.knopf {
+  display: inline-block; padding: 7px 14px; border-radius: 4px; background: #fff;
+  color: var(--blau); border: 1px solid var(--blau);
+}
+a.knopf:hover { background: var(--blau-hell); }
+
+.badge-gesperrt {
+  background: #fbe9e7; color: var(--rot); border: 1px solid #e6b3ad;
+  border-radius: 4px; padding: 1px 6px; font-size: 11px; white-space: nowrap;
+}
 
 .tab-leiste { display: flex; gap: 4px; margin-bottom: 12px; }
 .tab-leiste button { background: #fff; color: var(--text); border: 1px solid var(--rand); }

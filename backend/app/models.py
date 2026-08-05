@@ -60,6 +60,20 @@ class PostenStatus(str, enum.Enum):
     STORNIERT = "STORNIERT"
 
 
+class Forderungsklasse(str, enum.Enum):
+    """Insolvenzrechtliche Einordnung von Verbindlichkeiten.
+
+    INSOLVENZFORDERUNG (§ 38 InsO) unterliegt der Zahlungssperre und wird nicht
+    als Auszahlung geplant; MASSE (§ 55 InsO), AUS- und ABSONDERUNG sind
+    zahlungsrelevant.
+    """
+
+    MASSE = "MASSE"
+    INSOLVENZFORDERUNG = "INSOLVENZFORDERUNG"
+    AUSSONDERUNG = "AUSSONDERUNG"
+    ABSONDERUNG = "ABSONDERUNG"
+
+
 class Intervall(str, enum.Enum):
     WOECHENTLICH = "WOECHENTLICH"
     MONATLICH = "MONATLICH"

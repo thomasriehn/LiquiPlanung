@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -19,7 +20,7 @@ from ..security import (
     nur_schreibend,
     sichere_mandanten_liste,
 )
-from ..services import datev
+from ..services import datev, export
 from ..services.feiertage import BUNDESLAENDER
 from ..services.kontenrahmen import lege_kontenrahmen_an
 from ..services.liquiditaet import (
@@ -478,24 +479,43 @@ def posten_anlegen(
     if daten.art not in ("KREDITOR", "DEBITOR"):
         raise HTTPException(422, "Art muss KREDITOR oder DEBITOR sein")
     _konto_pruefen(db, mandant.id, daten.konto_id)
+    rechnungsdatum = (
+        _datum(daten.rechnungsdatum, "rechnungsdatum") if daten.rechnungsdatum else None
+    )
+    klasse = daten.forderungsklasse
+    if klasse:
+        _enum_pruefen(klasse, models.Forderungsklasse, "forderungsklasse")
+    elif (
+        daten.art == "KREDITOR"
+        and mandant.insolvenz_stichtag is not None
+        and mandant.verfahrensstatus != "REGELMANDAT"
+        and rechnungsdatum is not None
+    ):
+        # Vorklassifizierung: vor dem Stichtag begründet -> Insolvenzforderung (§ 38),
+        # danach -> Masseverbindlichkeit (§ 55). Manuell übersteuerbar.
+        klasse = (
+            models.Forderungsklasse.INSOLVENZFORDERUNG.value
+            if rechnungsdatum < mandant.insolvenz_stichtag
+            else models.Forderungsklasse.MASSE.value
+        )
     posten = models.OffenerPosten(
         mandant_id=mandant.id,
         art=daten.art,
         partner=daten.partner.strip(),
         belegnr=daten.belegnr,
-        rechnungsdatum=_datum(daten.rechnungsdatum, "rechnungsdatum") if daten.rechnungsdatum else None,
+        rechnungsdatum=rechnungsdatum,
         faellig_am=_datum(daten.faellig_am, "faellig_am"),
         zahlung_geplant_am=_datum(daten.zahlung_geplant_am, "zahlung_geplant_am")
         if daten.zahlung_geplant_am
         else None,
         betrag_brutto=_dec(daten.betrag_brutto),
         konto_id=daten.konto_id,
-        forderungsklasse=daten.forderungsklasse,
+        forderungsklasse=klasse,
         notiz=daten.notiz,
     )
     db.add(posten)
     db.commit()
-    return {"id": posten.id}
+    return {"id": posten.id, "forderungsklasse": posten.forderungsklasse}
 
 
 POSTEN_FELDER = {"partner", "belegnr", "status", "forderungsklasse", "notiz", "art"}
@@ -528,6 +548,8 @@ def posten_aendern(
                 _enum_pruefen(wert, models.PostenStatus, feld)
             if feld == "art":
                 _enum_pruefen(wert, models.PostenArt, feld)
+            if feld == "forderungsklasse" and wert is not None:
+                _enum_pruefen(wert, models.Forderungsklasse, feld)
             setattr(posten, feld, wert)
     db.commit()
     return {"ok": True}
@@ -1073,6 +1095,61 @@ def snapshot_liste(
         }
         for s in snaps
     ]
+
+
+@router.get("/mandanten/{mandant_id}/export/plan.xlsx")
+def export_plan_xlsx(
+    mandant_id: int,
+    start: str | None = None,
+    wochen: int = 13,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    if not (1 <= wochen <= 26):
+        raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    plan = berechne_plan(
+        db, mandant, start=_datum(start, "start") if start else None, wochen=wochen
+    )
+    sollist = soll_ist_vergleich(db, mandant)
+    daten = export.plan_xlsx(plan, sollist if sollist.get("snapshot") else None, mandant)
+    audit(db, benutzer, mandant.id, "EXPORT_XLSX", plan["start"])
+    db.commit()
+    return Response(
+        content=daten,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="liquiplan_{mandant.kurzname}_{plan["start"]}.xlsx"'
+        },
+    )
+
+
+@router.get("/mandanten/{mandant_id}/export/plan.pdf")
+def export_plan_pdf(
+    mandant_id: int,
+    start: str | None = None,
+    wochen: int = 13,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    if not (1 <= wochen <= 26):
+        raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    plan = berechne_plan(
+        db, mandant, start=_datum(start, "start") if start else None, wochen=wochen
+    )
+    daten = export.plan_pdf(plan, mandant)
+    audit(db, benutzer, mandant.id, "EXPORT_PDF", plan["start"])
+    db.commit()
+    return Response(
+        content=daten,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition":
+                f'inline; filename="liquiplan_{mandant.kurzname}_{plan["start"]}.pdf"'
+        },
+    )
 
 
 @router.get("/mandanten/{mandant_id}/sollist")

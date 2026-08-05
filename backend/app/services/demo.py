@@ -76,6 +76,21 @@ def lege_demo_mandant_an(db: Session, heute: date | None = None) -> models.Manda
             )
         )
 
+    # Altverbindlichkeit vor dem Stichtag: Insolvenzforderung mit Zahlungssperre
+    db.add(
+        models.OffenerPosten(
+            mandant_id=mandant.id,
+            art=PostenArt.KREDITOR.value,
+            partner="Altlieferant Steinmann GmbH",
+            rechnungsdatum=mandant.insolvenz_stichtag - timedelta(days=14),
+            faellig_am=mandant.insolvenz_stichtag + timedelta(days=16),
+            betrag_brutto=Decimal("46200.00"),
+            konto_id=konto["3400"].id,
+            forderungsklasse=models.Forderungsklasse.INSOLVENZFORDERUNG.value,
+            notiz="Altverbindlichkeit vor Antragstellung – Zahlungssperre § 38 InsO",
+        )
+    )
+
     # Dauerbuchungen
     dauer = [
         ("Miete Halle + Büro", "4210", 1, "8900.00"),

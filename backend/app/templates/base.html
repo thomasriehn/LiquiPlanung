@@ -5,10 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block titel %}LiquiPlanung{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
 <body>
 <header class="kopf">
-  <a class="marke" href="/">💧 LiquiPlanung</a>
+  <a class="marke" href="/">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="1.5" y="1.5" width="21" height="21" rx="5.5" stroke="currentColor" stroke-width="2"/>
+      <path d="M6 15.8 L10 11.8 L13.4 14.2 L18 8.6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="18" cy="8.6" r="1.7" fill="currentColor"/>
+    </svg>
+    LiquiPlanung</a>
   {% if mandant is defined and mandant %}
   <nav class="mandant-nav">
     <span class="mandant-name" title="{{ mandant.verfahrensstatus }}{% if mandant.aktenzeichen %} · {{ mandant.aktenzeichen }}{% endif %}">{{ mandant.name }}</span>

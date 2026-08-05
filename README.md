@@ -19,6 +19,11 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
 - **Zahlungskalender**: SV-Beiträge (drittletzter Bankarbeitstag, Feiertage je
   Bundesland), USt-VA (Monat/Quartal, Dauerfrist), LSt, GewSt, KSt – Beträge fest oder
   aus Historie geschätzt, Termine einzeln anpassbar.
+- **Insolvenzspezifisch**: Forderungsklassen je Posten (§ 38 / § 55 InsO, Aus-/Absonderung)
+  mit Zahlungssperre für Insolvenzforderungen und automatischer Vorbelegung anhand des
+  Insolvenz-Stichtags; gesperrte Summen werden nachrichtlich ausgewiesen.
+- **Export**: 13-Wochen-Plan als Excel-Arbeitsmappe (Tage, Wochen mit Plan/Ist/Δ,
+  Soll-Ist) und als PDF-Bericht für Gericht, Sachwalter, Gläubigerausschuss.
 - **Mehrbenutzerbetrieb**: Rollen Admin/Bearbeiter/Leser, Mandantenzuordnung, Audit-Log.
 
 ## Schnellstart (Docker)

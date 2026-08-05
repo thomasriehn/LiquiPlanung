@@ -113,6 +113,65 @@ def test_mandantentrennung(client):
     assert client.get("/api/benutzer").status_code == 403
 
 
+def test_forderungsklasse_automatik(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten",
+        json={"name": "InsO GmbH", "kurzname": "inso", "verfahrensstatus": "VORLAEUFIG",
+              "insolvenz_stichtag": "2026-07-15"},
+    ).json()["id"]
+
+    # Rechnungsdatum vor dem Stichtag -> Insolvenzforderung
+    alt = client.post(
+        f"/api/mandanten/{mandant_id}/posten",
+        json={"art": "KREDITOR", "partner": "Alt", "rechnungsdatum": "2026-07-01",
+              "faellig_am": "2026-08-20", "betrag_brutto": 5000},
+    ).json()
+    assert alt["forderungsklasse"] == "INSOLVENZFORDERUNG"
+    # nach dem Stichtag -> Masse
+    neu = client.post(
+        f"/api/mandanten/{mandant_id}/posten",
+        json={"art": "KREDITOR", "partner": "Neu", "rechnungsdatum": "2026-07-20",
+              "faellig_am": "2026-08-20", "betrag_brutto": 700},
+    ).json()
+    assert neu["forderungsklasse"] == "MASSE"
+    # explizite Angabe hat Vorrang; ungültige Klasse wird abgelehnt
+    antwort = client.post(
+        f"/api/mandanten/{mandant_id}/posten",
+        json={"art": "KREDITOR", "partner": "X", "rechnungsdatum": "2026-07-01",
+              "faellig_am": "2026-08-20", "betrag_brutto": 1,
+              "forderungsklasse": "QUATSCH"},
+    )
+    assert antwort.status_code == 422
+    # gesperrte Forderung erscheint nicht im Plan, aber im Sperr-Ausweis
+    plan = client.get(f"/api/mandanten/{mandant_id}/plan").json()
+    assert plan["gesperrte_insolvenzforderungen"] == 5000.0
+
+
+def test_export_xlsx_und_pdf(client):
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Export AG", "kurzname": "export-ag"}
+    ).json()["id"]
+    client.post(f"/api/mandanten/{mandant_id}/plan/snapshot", json={})
+
+    antwort = client.get(f"/api/mandanten/{mandant_id}/export/plan.xlsx")
+    assert antwort.status_code == 200
+    assert "spreadsheetml" in antwort.headers["content-type"]
+    wb = load_workbook(BytesIO(antwort.content))
+    assert {"Info", "Tage", "Wochen", "Soll-Ist"} <= set(wb.sheetnames)
+    assert wb["Info"]["B2"].value == "Export AG"
+
+    antwort = client.get(f"/api/mandanten/{mandant_id}/export/plan.pdf")
+    assert antwort.status_code == 200
+    assert antwort.headers["content-type"] == "application/pdf"
+    assert antwort.content.startswith(b"%PDF")
+
+
 def test_leser_darf_nicht_schreiben(client):
     _login(client)
     m1 = client.post("/api/mandanten", json={"name": "C", "kurzname": "c"}).json()["id"]
