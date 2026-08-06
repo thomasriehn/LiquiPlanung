@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+  <BkToCstmrStmt>
+    <GrpHdr><MsgId>NORDLICHT-20260806</MsgId></GrpHdr>
+    <Stmt>
+      <Id>NORDLICHT-20260806-1</Id>
+      <ElctrncSeqNb>32</ElctrncSeqNb>
+      <Acct><Id><IBAN>DE02120300000000202051</IBAN></Id></Acct>
+      <Bal><Tp><CdOrPrtry><Cd>OPBD</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">38945.50</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-08-05</Dt></Dt></Bal>
+      <Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">45925.50</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-08-06</Dt></Dt></Bal>
+      <Ntry>
+        <Amt Ccy="EUR">8330.00</Amt>
+        <CdtDbtInd>CRDT</CdtDbtInd>
+        <Sts>BOOK</Sts>
+        <BookgDt><Dt>2026-08-06</Dt></BookgDt>
+        <ValDt><Dt>2026-08-06</Dt></ValDt>
+        <NtryDtls><TxDtls>
+          <RltdPties><Dbtr><Nm>Küchenstudio Lund</Nm></Dbtr></RltdPties>
+          <RmtInf><Ustrd>RE-2026-1043 Fronten und Arbeitsplatten</Ustrd></RmtInf>
+        </TxDtls></NtryDtls>
+      </Ntry>
+      <Ntry>
+        <Amt Ccy="EUR">1350.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <Sts>BOOK</Sts>
+        <BookgDt><Dt>2026-08-06</Dt></BookgDt>
+        <ValDt><Dt>2026-08-06</Dt></ValDt>
+        <NtryDtls><TxDtls>
+          <RltdPties><Cdtr><Nm>Stadtwerke Flensburg</Nm></Cdtr></RltdPties>
+          <RmtInf><Ustrd>Abschlag August Strom Gas</Ustrd></RmtInf>
+        </TxDtls></NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>

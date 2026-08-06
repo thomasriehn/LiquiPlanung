@@ -63,6 +63,16 @@ docker compose up -d --build
 Beim ersten Start wird ein Demo-Mandant „Muster GmbH (Demo)“ angelegt (abschaltbar über
 `DEMO_DATEN=false`).
 
+## Testdaten
+
+Unter [`testdaten/`](testdaten/ANLEITUNG.md) liegt ein vollständiger, in sich
+konsistenter Datensatz zum Einspielen bei einem neuen Mandanten („Nordlicht
+Möbelwerk GmbH“): drei Monate DATEV-Buchungsstapel auf allen SKR03-Konten,
+BWA-Historie, OP-Liste (mit automatischer § 38-Einstufung), Kontoauszüge
+MT940/CAMT.053 mit Zahlungen passend zu den offenen Posten (exakt, Teilzahlung,
+Sammelüberweisung, Skonto). `testdaten/erzeuge_testdaten.py --stichtag …`
+erzeugt den Satz für ein beliebiges Datum neu, inklusive Ergebnis-Übersicht.
+
 ## Entwicklung
 
 ```bash

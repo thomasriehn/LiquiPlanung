@@ -1,0 +1,21 @@
+Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz
+ER;Holz Petersen GmbH;RE-P-77812;23.07.2026;20.08.2026;4165,00;3400;Eiche Massivholz Lieferung KW 30
+ER;Holz Petersen GmbH;RE-P-77903;28.07.2026;27.08.2026;3570,00;3400;Beschläge und Leimholz
+ER;Callsen IT-Service;RE-IT-2201;25.07.2026;14.08.2026;3000,00;4805;Wartungsvertrag Q3 – 3 % Skonto bei Zahlung binnen 10 Tagen
+ER;Stadtwerke Flensburg;A-2026-08;31.07.2026;12.08.2026;1350,00;4240;Abschlag August Strom/Gas
+ER;Spedition Voss KG;RE-V-5531;29.07.2026;16.08.2026;1240,00;4900;Frachten KW 30/31
+ER;Kanzlei Dr. Feddersen;RE-2026-0712;02.08.2026;24.08.2026;4800,00;4950;Sanierungsberatung Juli
+ER;Lackierwerk Brandt GmbH;RE-L-4418;02.07.2026;01.08.2026;12680,00;3400;Lackierung Serie Polaris – Altverbindlichkeit
+ER;Maschinenfabrik Otte KG;RE-M-2288;18.06.2026;27.07.2026;7140,00;4800;Reparatur Kantenanleimer – Altverbindlichkeit
+ER;Reinigung Blitz GmbH;RE-BL-889;30.07.2026;18.08.2026;620,00;4250;Unterhaltsreinigung Juli
+ER;TeleNord GmbH;R-88123401;01.08.2026;15.08.2026;410,00;4920;Telefon und Internet Juli
+ER;Autohaus Clausen;RE-AC-3315;27.07.2026;22.08.2026;760,00;4530;Inspektion Transporter
+ER;Büro Boie;RE-BB-190;03.08.2026;17.08.2026;290,00;4930;Druckerpapier und Toner
+FO;Möbelhaus Kern GmbH;RE-2026-1041;20.07.2026;03.08.2026;11900,00;8400;Küchenserie Polaris
+FO;Objekt Living AG;RE-2026-1042;22.07.2026;11.08.2026;12495,00;8400;Objektausstattung Hotelprojekt
+FO;Küchenstudio Lund;RE-2026-1043;26.07.2026;15.08.2026;8330,00;8400;Fronten und Arbeitsplatten
+FO;Hotel Seeblick GmbH;RE-2026-1044;28.07.2026;22.08.2026;21420,00;8400;Zimmereinrichtung Bauabschnitt 2
+FO;Ferienpark Ostsee GmbH;RE-2026-1045;31.07.2026;29.08.2026;9520,00;8400;Apartmentmöbel Serie Düne
+FO;Tischlerei Matz;RE-2026-1046;02.08.2026;05.09.2026;2140,00;8300;Zuschnitt und Furnier
+FO;Møbler Aalborg ApS;RE-2026-1047;04.08.2026;02.09.2026;6500,00;8120;Export Dänemark – steuerfrei § 4 Nr. 1a
+FO;Wohnwelt Harms;RE-2026-0988;07.06.2026;07.07.2026;5950,00;8400;Ausstellungsstücke – überfällig, mahnen

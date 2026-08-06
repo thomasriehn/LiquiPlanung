@@ -33,6 +33,7 @@ class ImportErgebnis:
     format: str
     buchungen: list[ImportBuchung] = field(default_factory=list)
     bwa_werte: list[dict] = field(default_factory=list)
+    posten: list[dict] = field(default_factory=list)
     warnungen: list[str] = field(default_factory=list)
 
 
@@ -313,6 +314,94 @@ def parse_bwa_csv(daten: bytes) -> ImportErgebnis:
             )
         except (ValueError, InvalidOperation, IndexError):
             erg.warnungen.append(f"Zeile {nr}: nicht lesbar.")
+    return erg
+
+
+_OP_ARTEN = {
+    "ER": "KREDITOR", "KREDITOR": "KREDITOR", "EINGANGSRECHNUNG": "KREDITOR",
+    "FO": "DEBITOR", "DEBITOR": "DEBITOR", "FORDERUNG": "DEBITOR",
+    "AUSGANGSRECHNUNG": "DEBITOR",
+}
+
+
+def parse_op_csv(daten: bytes) -> ImportErgebnis:
+    """OP-Liste: Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz.
+
+    Art: ER/Kreditor/Eingangsrechnung bzw. FO/Debitor/Forderung. Datumsformate
+    TT.MM.JJJJ oder JJJJ-MM-TT; Beträge mit Dezimalkomma oder -punkt.
+    """
+    text = _dekodiere(daten)
+    erg = ImportErgebnis(format="OP")
+    delimiter = ";" if text.count(";") >= text.count(",") else ","
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter, quotechar='"')
+    zeilen = [z for z in reader if any(f.strip() for f in z)]
+    if not zeilen:
+        erg.warnungen.append("Leere Datei.")
+        return erg
+    header = [f.strip().lower() for f in zeilen[0]]
+    i_art = _spalten_index(header, "art", "typ")
+    i_partner = _spalten_index(header, "partner", "name", "lieferant", "kunde")
+    i_beleg = next(
+        (i for i, name in enumerate(header)
+         if "beleg" in name and "datum" not in name),
+        None,
+    )
+    i_rechnung = _spalten_index(header, "rechnungsdatum", "belegdatum")
+    i_faellig = _spalten_index(header, "faellig", "fällig")
+    i_betrag = _spalten_index(header, "betrag", "brutto")
+    i_konto = next(
+        (i for i, name in enumerate(header)
+         if "konto" in name and "gegen" not in name),
+        None,
+    )
+    i_notiz = _spalten_index(header, "notiz", "bemerkung", "kommentar")
+    if None in (i_art, i_partner, i_faellig, i_betrag):
+        erg.warnungen.append(
+            "Kopfzeile nicht erkannt – benötigt mindestens: Art, Partner, Faellig, "
+            "Betrag (optional Belegnummer, Rechnungsdatum, Konto, Notiz)."
+        )
+        return erg
+    for nr, felder in enumerate(zeilen[1:], start=2):
+        if len(felder) <= max(i_art, i_partner, i_faellig, i_betrag):
+            erg.warnungen.append(f"Zeile {nr}: zu wenige Spalten.")
+            continue
+        art = _OP_ARTEN.get(felder[i_art].strip().upper())
+        if art is None:
+            erg.warnungen.append(f"Zeile {nr}: Art '{felder[i_art]}' unbekannt (ER/FO).")
+            continue
+        partner = felder[i_partner].strip()
+        if not partner:
+            erg.warnungen.append(f"Zeile {nr}: Partner fehlt.")
+            continue
+        faellig = _datum_flexibel(felder[i_faellig])
+        if faellig is None:
+            erg.warnungen.append(f"Zeile {nr}: Fälligkeit nicht lesbar.")
+            continue
+        try:
+            betrag = abs(_betrag(felder[i_betrag]))
+        except InvalidOperation:
+            erg.warnungen.append(f"Zeile {nr}: Betrag nicht lesbar.")
+            continue
+        rechnungsdatum = None
+        if i_rechnung is not None and len(felder) > i_rechnung and felder[i_rechnung].strip():
+            rechnungsdatum = _datum_flexibel(felder[i_rechnung])
+            if rechnungsdatum is None:
+                erg.warnungen.append(f"Zeile {nr}: Rechnungsdatum nicht lesbar – ignoriert.")
+        erg.posten.append(
+            {
+                "art": art,
+                "partner": partner,
+                "belegnr": (felder[i_beleg].strip() or None)
+                if (i_beleg is not None and len(felder) > i_beleg) else None,
+                "rechnungsdatum": rechnungsdatum,
+                "faellig_am": faellig,
+                "betrag_brutto": betrag,
+                "konto_nr": (felder[i_konto].strip() or None)
+                if (i_konto is not None and len(felder) > i_konto) else None,
+                "notiz": (felder[i_notiz].strip() or None)
+                if (i_notiz is not None and len(felder) > i_notiz) else None,
+            }
+        )
     return erg
 
 

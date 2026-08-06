@@ -109,3 +109,42 @@ def test_bwa_csv():
     assert len(erg.bwa_werte) == 2
     assert erg.bwa_werte[0]["betrag"] == Decimal("98500.00")
     assert erg.bwa_werte[1]["betrag"] == Decimal("-27300.50")
+
+
+def test_op_csv():
+    from app.services.datev import parse_op_csv
+
+    text = (
+        "Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz\n"
+        "ER;Holz Petersen GmbH;RE-P-77812;10.07.2026;20.08.2026;4165,00;3400;Wareneinkauf\n"
+        "FO;Möbelhaus Kern;RE-2026-1041;2026-07-20;2026-08-19;11900,00;8400;\n"
+        "Kreditor;Stadtwerke;;;01.09.2026;-1200,50;4240;ohne Beleg\n"
+        "XX;Falsch;;;01.09.2026;10,00;;\n"
+        ";;;;01.09.2026;10,00;;\n"
+    )
+    erg = parse_op_csv(text.encode("utf-8"))
+    assert len(erg.posten) == 3
+    er = erg.posten[0]
+    assert er["art"] == "KREDITOR"
+    assert er["partner"] == "Holz Petersen GmbH"
+    assert er["belegnr"] == "RE-P-77812"
+    assert er["rechnungsdatum"] == date(2026, 7, 10)
+    assert er["faellig_am"] == date(2026, 8, 20)
+    assert er["betrag_brutto"] == Decimal("4165.00")
+    assert er["konto_nr"] == "3400"
+    fo = erg.posten[1]
+    assert fo["art"] == "DEBITOR"
+    assert fo["rechnungsdatum"] == date(2026, 7, 20)
+    # Betrag wird als Absolutwert übernommen, fehlende Fälligkeit fällt durch
+    assert erg.posten[2]["betrag_brutto"] == Decimal("1200.50")
+    assert erg.posten[2]["belegnr"] is None
+    assert len(erg.warnungen) == 2
+    assert any("Art" in w for w in erg.warnungen)
+
+
+def test_op_csv_kopfzeile_fehlt():
+    from app.services.datev import parse_op_csv
+
+    erg = parse_op_csv(b"Datum;Konto;Betrag\n01.01.2026;4920;5,00\n")
+    assert not erg.posten
+    assert any("Kopfzeile" in w for w in erg.warnungen)

@@ -476,3 +476,46 @@ def test_leser_darf_nicht_schreiben(client):
               "betrag_brutto": 100},
     )
     assert antwort.status_code == 403
+
+
+def test_op_import(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten",
+        json={"name": "OP Import GmbH", "kurzname": "op-import",
+              "verfahrensstatus": "VORLAEUFIG", "insolvenz_stichtag": "2026-07-15"},
+    ).json()["id"]
+
+    csv_daten = (
+        "Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz\n"
+        "ER;Altlieferant Nord;RE-ALT-1;01.06.2026;01.09.2026;4000,00;3400;vor Stichtag\n"
+        "ER;Neulieferant Sued;RE-NEU-1;01.08.2026;01.09.2026;2000,00;3400;nach Stichtag\n"
+        "FO;Kunde West;RE-2026-9;20.07.2026;19.08.2026;11900,00;8400;\n"
+        "ER;Unbekanntes Konto AG;RE-U-1;;15.09.2026;500,00;9999;\n"
+    ).encode("utf-8")
+    antwort = client.post(
+        f"/api/mandanten/{mandant_id}/posten/import",
+        files={"datei": ("op-liste.csv", csv_daten, "text/csv")},
+    )
+    assert antwort.status_code == 200, antwort.text
+    erg = antwort.json()
+    assert erg["angelegt"] == 4
+    assert erg["uebersprungen"] == 0
+    assert erg["insolvenzforderungen"] == 1
+    assert any("9999" in w for w in erg["warnungen"])
+
+    posten = client.get(f"/api/mandanten/{mandant_id}/posten").json()
+    nach_beleg = {p["belegnr"]: p for p in posten}
+    assert nach_beleg["RE-ALT-1"]["forderungsklasse"] == "INSOLVENZFORDERUNG"
+    assert nach_beleg["RE-NEU-1"]["forderungsklasse"] == "MASSE"
+    assert nach_beleg["RE-2026-9"]["forderungsklasse"] is None
+    assert nach_beleg["RE-U-1"]["konto_id"] is None
+
+    # erneuter Import: alles Duplikate
+    antwort = client.post(
+        f"/api/mandanten/{mandant_id}/posten/import",
+        files={"datei": ("op-liste.csv", csv_daten, "text/csv")},
+    )
+    erg = antwort.json()
+    assert erg["angelegt"] == 0
+    assert erg["uebersprungen"] == 4

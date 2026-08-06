@@ -748,6 +748,23 @@ def _konto_pruefen(db: Session, mandant_id: int, konto_id: int | None):
         raise HTTPException(422, "Ungültiges Konto")
 
 
+def _forderungsklasse_automatisch(
+    mandant: models.Mandant, art: str, rechnungsdatum: date | None
+) -> str | None:
+    """Vorklassifizierung: vor dem Stichtag begründet -> Insolvenzforderung (§ 38),
+    danach -> Masseverbindlichkeit (§ 55). Nur für Kreditoren im Verfahren."""
+    if (
+        art != "KREDITOR"
+        or mandant.insolvenz_stichtag is None
+        or mandant.verfahrensstatus == "REGELMANDAT"
+        or rechnungsdatum is None
+    ):
+        return None
+    if rechnungsdatum < mandant.insolvenz_stichtag:
+        return models.Forderungsklasse.INSOLVENZFORDERUNG.value
+    return models.Forderungsklasse.MASSE.value
+
+
 @router.post("/mandanten/{mandant_id}/posten", status_code=201)
 def posten_anlegen(
     mandant_id: int,
@@ -766,19 +783,8 @@ def posten_anlegen(
     klasse = daten.forderungsklasse
     if klasse:
         _enum_pruefen(klasse, models.Forderungsklasse, "forderungsklasse")
-    elif (
-        daten.art == "KREDITOR"
-        and mandant.insolvenz_stichtag is not None
-        and mandant.verfahrensstatus != "REGELMANDAT"
-        and rechnungsdatum is not None
-    ):
-        # Vorklassifizierung: vor dem Stichtag begründet -> Insolvenzforderung (§ 38),
-        # danach -> Masseverbindlichkeit (§ 55). Manuell übersteuerbar.
-        klasse = (
-            models.Forderungsklasse.INSOLVENZFORDERUNG.value
-            if rechnungsdatum < mandant.insolvenz_stichtag
-            else models.Forderungsklasse.MASSE.value
-        )
+    else:
+        klasse = _forderungsklasse_automatisch(mandant, daten.art, rechnungsdatum)
     posten = models.OffenerPosten(
         mandant_id=mandant.id,
         art=daten.art,
@@ -797,6 +803,81 @@ def posten_anlegen(
     db.add(posten)
     db.commit()
     return {"id": posten.id, "forderungsklasse": posten.forderungsklasse}
+
+
+@router.post("/mandanten/{mandant_id}/posten/import")
+async def posten_import(
+    mandant_id: int,
+    datei: UploadFile,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """OP-Listen-Import (CSV): Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz.
+
+    Konten werden über die Kontonummer aufgelöst; die Forderungsklasse wird wie
+    bei der Einzelanlage automatisch vorbelegt. Bereits vorhandene Posten
+    (gleicher Partner, Belegnummer und Betrag) werden übersprungen."""
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    erg = datev.parse_op_csv(await datei.read())
+    konten_nach_nr = {
+        k.nummer: k
+        for k in db.scalars(
+            select(models.Konto).where(models.Konto.mandant_id == mandant.id)
+        )
+    }
+    vorhandene = {
+        ((p.partner or "").strip().lower(), p.belegnr or "", p.betrag_brutto)
+        for p in db.scalars(
+            select(models.OffenerPosten).where(
+                models.OffenerPosten.mandant_id == mandant.id
+            )
+        )
+    }
+    warnungen = list(erg.warnungen)
+    unbekannte_konten: set[str] = set()
+    angelegt, uebersprungen, gesperrt = 0, 0, 0
+    for p in erg.posten:
+        schluessel = (p["partner"].strip().lower(), p["belegnr"] or "", p["betrag_brutto"])
+        if schluessel in vorhandene:
+            uebersprungen += 1
+            continue
+        vorhandene.add(schluessel)
+        konto = konten_nach_nr.get(p["konto_nr"]) if p["konto_nr"] else None
+        if p["konto_nr"] and konto is None:
+            unbekannte_konten.add(p["konto_nr"])
+        klasse = _forderungsklasse_automatisch(mandant, p["art"], p["rechnungsdatum"])
+        if klasse == models.Forderungsklasse.INSOLVENZFORDERUNG.value:
+            gesperrt += 1
+        db.add(
+            models.OffenerPosten(
+                mandant_id=mandant.id,
+                art=p["art"],
+                partner=p["partner"],
+                belegnr=p["belegnr"],
+                rechnungsdatum=p["rechnungsdatum"],
+                faellig_am=p["faellig_am"],
+                betrag_brutto=p["betrag_brutto"],
+                konto_id=konto.id if konto else None,
+                forderungsklasse=klasse,
+                notiz=p["notiz"],
+            )
+        )
+        angelegt += 1
+    if unbekannte_konten:
+        warnungen.append(
+            "Konten nicht angelegt (Posten ohne Kontozuordnung übernommen): "
+            + ", ".join(sorted(unbekannte_konten))
+        )
+    audit(db, benutzer, mandant.id, "OP_IMPORT",
+          f"{datei.filename} ({angelegt} angelegt, {uebersprungen} übersprungen)")
+    db.commit()
+    return {
+        "angelegt": angelegt,
+        "uebersprungen": uebersprungen,
+        "insolvenzforderungen": gesperrt,
+        "warnungen": warnungen[:50],
+    }
 
 
 POSTEN_FELDER = {"partner", "belegnr", "status", "forderungsklasse", "notiz", "art"}

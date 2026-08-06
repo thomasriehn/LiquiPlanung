@@ -42,6 +42,12 @@
       </label>
       <button type="submit">Anlegen</button>
     </form>
+    <form id="op-import-form" class="formular-zeilen">
+      <label>OP-Liste importieren (CSV: Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz)
+        <input type="file" name="datei" accept=".csv,.txt" required></label>
+      <button type="submit" class="sekundaer">OP-Liste importieren</button>
+    </form>
+    <div id="op-import-ergebnis"></div>
     {% endif %}
     <table class="liste">
       <thead><tr><th>Art</th><th>Partner</th><th>Beleg</th><th>Rechnung</th><th>Fällig</th><th>Geplant</th>
@@ -249,6 +255,27 @@ if (opForm) opForm.addEventListener("submit", async (e) => {
     opForm.reset(); ladeOP();
   }
   catch (err) { toast(err.message); }
+});
+
+const opImportForm = document.getElementById("op-import-form");
+if (opImportForm) opImportForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData(opImportForm);
+  try {
+    const erg = await apiDatei(`/api/mandanten/${MANDANT_ID}/posten/import`, fd);
+    const box = document.getElementById("op-import-ergebnis");
+    let html = `<div class="warnung" style="background:#e8f5ec;border-color:#9fd3ae;color:#1e5c38">
+      ${erg.angelegt} Posten angelegt${erg.uebersprungen ? `, ${erg.uebersprungen} bereits vorhanden (übersprungen)` : ""}.</div>`;
+    if (erg.insolvenzforderungen) {
+      html += `<div class="warnung">${erg.insolvenzforderungen} Posten automatisch als
+        Insolvenzforderung (§ 38) eingestuft – Zahlungssperre aktiv.</div>`;
+    }
+    if (erg.warnungen.length) {
+      html += `<div class="warnung">${erg.warnungen.map(esc).join("<br>")}</div>`;
+    }
+    box.innerHTML = html;
+    opImportForm.reset(); ladeOP();
+  } catch (err) { toast(err.message); }
 });
 
 const dauerForm = document.getElementById("dauer-form");
