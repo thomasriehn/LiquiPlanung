@@ -20,7 +20,12 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   offener Posten (Betrag/Skonto, Belegnummer, Partner, Datumsnähe); Übernahme setzt
   Posten auf „bezahlt“ und verknüpft den Umsatz, jederzeit aufhebbar. Teilzahlungen
   (nur bei starkem Signal, nie vorausgewählt) lassen den Posten mit Restbetrag offen –
-  die Planung rechnet automatisch mit dem Rest.
+  die Planung rechnet automatisch mit dem Rest. Sammelüberweisungen (1:n) werden
+  erkannt, wenn eine Postenkombination die Zahlung exakt ergibt.
+- **Integrierte Sicherungen**: automatische Voll-Backups (Intervall/Aufbewahrung
+  konfigurierbar, Docker-Volume), manuelle Sicherung, Download und geführte
+  Wiederherstellung in der Admin-Oberfläche – datenbankunabhängig (PostgreSQL/SQLite),
+  an die Schema-Revision gebunden, mit automatischer Vorab-Sicherung.
 - **Kontenrahmen** SKR03/SKR04 als editierbare Vorlage je Mandant, USt-Satz je Konto.
 - **Planbasis**: offene Eingangsrechnungen/Forderungen, Dauerverbindlichkeiten,
   Budget je Konto/Monat (Restbudget-Logik, Netto→Brutto über USt-Satz).

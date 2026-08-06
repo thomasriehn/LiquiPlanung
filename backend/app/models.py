@@ -254,13 +254,35 @@ class BankTransaktion(Base):
     partner: Mapped[str | None] = mapped_column(String(255), nullable=True)
     verwendungszweck: Mapped[str | None] = mapped_column(Text, nullable=True)
     referenz: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # OP-Ausgleich: verknüpfter offener Posten (None = nicht abgeglichen)
-    posten_id: Mapped[int | None] = mapped_column(
-        ForeignKey("offene_posten.id", ondelete="SET NULL"), nullable=True, index=True
-    )
 
     konto: Mapped[Konto] = relationship()
-    posten: Mapped["OffenerPosten | None"] = relationship()
+    zuordnungen: Mapped[list["AusgleichZuordnung"]] = relationship(
+        back_populates="transaktion", cascade="all, delete-orphan"
+    )
+
+
+class AusgleichZuordnung(Base):
+    """Zuordnung Bankumsatz ↔ offener Posten (n:m für Sammelüberweisungen).
+
+    `betrag` ist der Anteil des Umsatzes, der auf den Posten entfällt; bei
+    Sammelüberweisungen entstehen mehrere Zuordnungen je Umsatz.
+    """
+
+    __tablename__ = "ausgleich_zuordnungen"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mandant_id: Mapped[int] = mapped_column(ForeignKey("mandanten.id", ondelete="CASCADE"), index=True)
+    transaktion_id: Mapped[int] = mapped_column(
+        ForeignKey("bank_transaktionen.id", ondelete="CASCADE"), index=True
+    )
+    posten_id: Mapped[int] = mapped_column(
+        ForeignKey("offene_posten.id", ondelete="CASCADE"), index=True
+    )
+    betrag: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    transaktion: Mapped[BankTransaktion] = relationship(back_populates="zuordnungen")
+    posten: Mapped["OffenerPosten"] = relationship()
 
 
 class BWAWert(Base):

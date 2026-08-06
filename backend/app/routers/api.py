@@ -2,14 +2,15 @@
 
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from .. import models
+from .. import database, models
 from ..database import get_db
 from ..security import (
     aktueller_benutzer,
@@ -20,7 +21,8 @@ from ..security import (
     nur_schreibend,
     sichere_mandanten_liste,
 )
-from ..services import ausgleich, bank, datev, export, insolvenzgeld
+from ..config import get_settings
+from ..services import ausgleich, backup, bank, datev, export, insolvenzgeld
 from ..services.feiertage import BUNDESLAENDER
 from ..services.kontenrahmen import lege_kontenrahmen_an, lege_standard_szenarien_an
 from ..services.liquiditaet import (
@@ -598,7 +600,10 @@ def bank_umsaetze(
             "partner": u.partner,
             "verwendungszweck": u.verwendungszweck,
             "referenz": u.referenz,
-            "posten_id": u.posten_id,
+            "zuordnungen": [
+                {"posten_id": z.posten_id, "betrag": float(z.betrag)}
+                for z in u.zuordnungen
+            ],
         }
         for u in umsaetze
     ]
@@ -618,7 +623,15 @@ def ausgleich_vorschlaege(
 
 class AusgleichPaar(BaseModel):
     transaktion_id: int
-    posten_id: int
+    posten_id: int | None = None          # 1:1 (abwärtskompatibel)
+    posten_ids: list[int] | None = None   # Sammelüberweisung (1:n)
+
+    def alle_posten(self) -> list[int]:
+        if self.posten_ids:
+            return self.posten_ids
+        if self.posten_id is not None:
+            return [self.posten_id]
+        return []
 
 
 class AusgleichUebernahme(BaseModel):
@@ -638,7 +651,7 @@ def ausgleich_uebernehmen(
         raise HTTPException(422, "Keine Zuordnungen übergeben")
     try:
         anzahl = ausgleich.gleiche_aus(
-            db, mandant, [(p.transaktion_id, p.posten_id) for p in daten.paare]
+            db, mandant, [(p.transaktion_id, p.alle_posten()) for p in daten.paare]
         )
     except ValueError as e:
         db.rollback()
@@ -1595,6 +1608,88 @@ def sollist_abrufen(
         return soll_ist_vergleich(db, mandant, snapshot_id=snapshot_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
+
+
+# ---------------------------------------------------------------- Sicherungen (Admin)
+
+@router.get("/backups")
+def backups_liste(admin=Depends(nur_admin)):
+    einstellungen = get_settings()
+    return {
+        "verzeichnis": str(einstellungen.backup_verzeichnis),
+        "intervall_stunden": einstellungen.backup_intervall_stunden,
+        "aufbewahrung_tage": einstellungen.backup_aufbewahrung_tage,
+        "dateien": backup.liste(einstellungen.backup_verzeichnis),
+    }
+
+
+@router.post("/backups", status_code=201)
+def backup_erstellen(admin=Depends(nur_admin), db: Session = Depends(get_db)):
+    einstellungen = get_settings()
+    try:
+        pfad = backup.erstelle_backup(einstellungen.backup_verzeichnis)
+    except OSError as e:
+        raise HTTPException(500, f"Sicherung fehlgeschlagen: {e}")
+    backup.raeume_auf(einstellungen.backup_verzeichnis, einstellungen.backup_aufbewahrung_tage)
+    audit(db, admin, None, "BACKUP_ERSTELLT", pfad.name)
+    db.commit()
+    return {"name": pfad.name, "groesse": pfad.stat().st_size}
+
+
+def _backup_pfad(name: str):
+    if not backup.NAME_MUSTER.match(name):
+        raise HTTPException(422, "Ungültiger Sicherungsname")
+    pfad = Path(get_settings().backup_verzeichnis) / name
+    if not pfad.is_file():
+        raise HTTPException(404, "Sicherung nicht gefunden")
+    return pfad
+
+
+@router.get("/backups/{name}")
+def backup_herunterladen(name: str, admin=Depends(nur_admin)):
+    pfad = _backup_pfad(name)
+    return Response(
+        content=pfad.read_bytes(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{pfad.name}"'},
+    )
+
+
+@router.delete("/backups/{name}")
+def backup_loeschen(name: str, admin=Depends(nur_admin), db: Session = Depends(get_db)):
+    pfad = _backup_pfad(name)
+    pfad.unlink()
+    audit(db, admin, None, "BACKUP_GELOESCHT", name)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/backups/wiederherstellen")
+async def backup_wiederherstellen(
+    datei: UploadFile,
+    bestaetigung: str = Form(""),
+    admin=Depends(nur_admin),
+):
+    """Ersetzt den KOMPLETTEN Datenbestand durch die hochgeladene Sicherung."""
+    if bestaetigung != "WIEDERHERSTELLEN":
+        raise HTTPException(
+            422, "Bestätigung fehlt: bitte WIEDERHERSTELLEN eingeben"
+        )
+    daten = await datei.read()
+    # Sicherheitsnetz: vor dem Ersetzen automatisch den Ist-Zustand sichern
+    try:
+        vorher = backup.erstelle_backup(get_settings().backup_verzeichnis)
+    except OSError as e:
+        raise HTTPException(500, f"Vorab-Sicherung fehlgeschlagen: {e}")
+    try:
+        ergebnis = backup.stelle_wieder_her(daten)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    with database.SessionLocal() as audit_db:
+        audit(audit_db, None, None, "BACKUP_WIEDERHERGESTELLT",
+              f"{datei.filename} (Vorab-Sicherung: {vorher.name})")
+        audit_db.commit()
+    return {"ok": True, "vorab_sicherung": vorher.name, **ergebnis}
 
 
 # ---------------------------------------------------------------- Benutzer (Admin)

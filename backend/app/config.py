@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     # Legt beim Start einen Beispielmandanten mit Daten an
     demo_daten: bool = True
 
+    # Integrierte Sicherungen: Zielverzeichnis, Intervall (0 = aus), Aufbewahrung
+    backup_verzeichnis: str = "backups"
+    backup_intervall_stunden: int = 24
+    backup_aufbewahrung_tage: int = 30
+
 
 @lru_cache
 def get_settings() -> Settings:

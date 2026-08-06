@@ -97,7 +97,7 @@ def test_teilzahlung_mit_belegnummer(db):
     assert v[0]["konfidenz"] == "MOEGLICH"  # Teilzahlungen nie vorausgewählt
     assert v[0]["posten"]["rest_nach_zahlung"] == 600.0
 
-    gleiche_aus(db, m, [(u1.id, p.id)])
+    gleiche_aus(db, m, [(u1.id, [p.id])])
     db.commit()
     assert p.status == "OFFEN"              # Teilzahlung: Posten bleibt offen
     assert p.bezahlt_betrag == Decimal("400.00")
@@ -107,7 +107,7 @@ def test_teilzahlung_mit_belegnummer(db):
     db.commit()
     v = vorschlaege(db, m)
     assert len(v) == 1 and v[0]["art"] == "VOLL" and v[0]["konfidenz"] == "SICHER"
-    gleiche_aus(db, m, [(u2.id, p.id)])
+    gleiche_aus(db, m, [(u2.id, [p.id])])
     db.commit()
     assert p.status == "BEZAHLT"
     assert p.bezahlt_betrag == Decimal("1000.00")
@@ -134,7 +134,7 @@ def test_ueberzahlung_wird_abgelehnt(db):
     db.commit()
     assert bewerte(u, p) is None
     try:
-        gleiche_aus(db, m, [(u.id, p.id)])
+        gleiche_aus(db, m, [(u.id, [p.id])])
         raise AssertionError("erwartete ValueError")
     except ValueError as e:
         assert "übersteigt" in str(e)
@@ -146,15 +146,15 @@ def test_ausgleich_und_aufhebung(db):
     p = _posten(db, m, "DEBITOR", "Kunde B", "250.00")
     u = _umsatz(db, m, "250.00", partner="Kunde B")
     db.commit()
-    anzahl = gleiche_aus(db, m, [(u.id, p.id)])
+    anzahl = gleiche_aus(db, m, [(u.id, [p.id])])
     db.commit()
     assert anzahl == 1
     assert p.status == "BEZAHLT"
     assert p.bezahlt_am == u.buchungstag
-    assert u.posten_id == p.id
+    assert [z.posten_id for z in u.zuordnungen] == [p.id]
     # doppelter Ausgleich wird abgelehnt
     try:
-        gleiche_aus(db, m, [(u.id, p.id)])
+        gleiche_aus(db, m, [(u.id, [p.id])])
         raise AssertionError("erwartete ValueError")
     except ValueError:
         db.rollback()
@@ -162,4 +162,58 @@ def test_ausgleich_und_aufhebung(db):
     db.commit()
     assert p.status == "OFFEN"
     assert p.bezahlt_am is None
-    assert u.posten_id is None
+    assert u.zuordnungen == []
+
+
+def test_sammelueberweisung_vorschlag_und_uebernahme(db):
+    m = _mandant(db)
+    p1 = _posten(db, m, "KREDITOR", "Spedition Weber", "2140.00", belegnr="FR-2026-11")
+    p2 = _posten(db, m, "KREDITOR", "Spedition Weber", "1860.00", belegnr="FR-2026-12")
+    # Störer: passt nicht in die Summe
+    _posten(db, m, "KREDITOR", "Spedition Weber", "999.00")
+    u = _umsatz(db, m, "-4000.00", partner="Spedition Weber",
+                zweck="Sammelueberweisung FR-2026-11 FR-2026-12")
+    db.commit()
+    v = vorschlaege(db, m)
+    sammel = [x for x in v if x["art"] == "SAMMEL"]
+    assert len(sammel) == 1
+    s = sammel[0]
+    assert s["konfidenz"] == "SICHER"  # beide Belegnummern im Verwendungszweck
+    assert sorted(p["id"] for p in s["posten_liste"]) == sorted([p1.id, p2.id])
+
+    gleiche_aus(db, m, [(u.id, [p1.id, p2.id])])
+    db.commit()
+    assert p1.status == "BEZAHLT" and p2.status == "BEZAHLT"
+    assert p1.bezahlt_betrag == Decimal("2140.00")
+    assert p2.bezahlt_betrag == Decimal("1860.00")
+    assert len(u.zuordnungen) == 2
+
+    hebe_auf(db, m, u.id)
+    db.commit()
+    assert p1.status == "OFFEN" and p2.status == "OFFEN"
+    assert p1.bezahlt_betrag == Decimal("0.00")
+
+
+def test_sammelueberweisung_summe_muss_passen(db):
+    m = _mandant(db)
+    p1 = _posten(db, m, "KREDITOR", "Spedition Weber", "2140.00")
+    p2 = _posten(db, m, "KREDITOR", "Spedition Weber", "1860.00")
+    u = _umsatz(db, m, "-3500.00", partner="Spedition Weber")
+    db.commit()
+    assert [x for x in vorschlaege(db, m) if x["art"] == "SAMMEL"] == []
+    try:
+        gleiche_aus(db, m, [(u.id, [p1.id, p2.id])])
+        raise AssertionError("erwartete ValueError")
+    except ValueError as e:
+        assert "ergeben nicht die Zahlung" in str(e)
+        db.rollback()
+
+
+def test_sammelueberweisung_nur_mit_signal(db):
+    m = _mandant(db)
+    _posten(db, m, "KREDITOR", "Alpha GmbH", "2140.00")
+    _posten(db, m, "KREDITOR", "Beta GmbH", "1860.00")
+    # Umsatz ohne Partner-/Belegbezug zu den Posten -> kein Sammel-Vorschlag
+    _umsatz(db, m, "-4000.00", partner="Unbekannt", zweck="Zahlung")
+    db.commit()
+    assert vorschlaege(db, m) == []

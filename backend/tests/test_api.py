@@ -1,31 +1,3 @@
-import pytest
-from fastapi.testclient import TestClient
-
-import app.main as hauptmodul
-from app.database import Base
-import app.database as db_modul
-
-
-@pytest.fixture()
-def client(tmp_path, monkeypatch):
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    engine = create_engine(
-        f"sqlite:///{tmp_path}/test.db", connect_args={"check_same_thread": False}
-    )
-    Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    monkeypatch.setattr(db_modul, "engine", engine)
-    monkeypatch.setattr(db_modul, "SessionLocal", Session)
-    monkeypatch.setattr(hauptmodul, "engine", engine)
-    monkeypatch.setattr(hauptmodul, "SessionLocal", Session)
-    Base.metadata.create_all(engine)
-
-    with TestClient(hauptmodul.app) as c:
-        yield c
-    engine.dispose()
-
-
 def _login(client):
     antwort = client.post(
         "/login", data={"email": "admin@example.com", "passwort": "admin"},

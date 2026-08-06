@@ -26,8 +26,14 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD in .env setzen}
       DEMO_DATEN: ${DEMO_DATEN:-true}
+      BACKUP_VERZEICHNIS: /srv/liquiplanung/backups
+      BACKUP_INTERVALL_STUNDEN: ${BACKUP_INTERVALL_STUNDEN:-24}
+      BACKUP_AUFBEWAHRUNG_TAGE: ${BACKUP_AUFBEWAHRUNG_TAGE:-30}
+    volumes:
+      - backups:/srv/liquiplanung/backups
     ports:
       - "${APP_PORT:-8000}:8000"
 
 volumes:
   pgdata:
+  backups:

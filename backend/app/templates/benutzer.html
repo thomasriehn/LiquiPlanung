@@ -26,6 +26,29 @@
     <thead><tr><th>E-Mail</th><th>Name</th><th>Rolle</th><th>Mandanten</th><th>aktiv</th><th></th></tr></thead>
     <tbody id="tabelle"></tbody>
   </table>
+
+  <h2>Sicherungen</h2>
+  <p class="hinweis" id="backup-info"></p>
+  <div class="werkzeuge">
+    <button id="backup-erstellen">Jetzt sichern</button>
+  </div>
+  <table class="liste">
+    <thead><tr><th>Datei</th><th class="zahl">Größe</th><th>Erstellt</th><th></th></tr></thead>
+    <tbody id="backup-liste"></tbody>
+  </table>
+  <h2>Wiederherstellung</h2>
+  <div class="warnung">
+    Die Wiederherstellung <strong>ersetzt den kompletten Datenbestand aller Mandanten</strong>
+    durch die hochgeladene Sicherung. Vorher wird automatisch eine Vorab-Sicherung des
+    aktuellen Stands erstellt. Die Sicherung muss vom gleichen Schemastand
+    (Anwendungsversion) stammen.
+  </div>
+  <form id="restore-form" class="formular-zeilen">
+    <label>Sicherungsdatei (.zip)<input type="file" name="datei" accept=".zip" required></label>
+    <label>Zur Bestätigung „WIEDERHERSTELLEN“ eingeben
+      <input name="bestaetigung" placeholder="WIEDERHERSTELLEN" required></label>
+    <button type="submit" class="gefahr">Wiederherstellen</button>
+  </form>
 </div>
 {% endblock %}
 {% block skripte %}
@@ -61,6 +84,59 @@ document.getElementById("neu-form").addEventListener("submit", async (e) => {
   try { await api("POST", "/api/benutzer", daten); e.target.reset(); lade(); }
   catch (err) { toast(err.message); }
 });
+
+// ---- Sicherungen ----
+function groesse(bytes) {
+  if (bytes > 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+  return Math.max(1, Math.round(bytes / 1024)) + " kB";
+}
+
+async function ladeBackups() {
+  const d = await api("GET", "/api/backups");
+  document.getElementById("backup-info").textContent =
+    `Verzeichnis: ${d.verzeichnis} · automatisch ` +
+    (d.intervall_stunden > 0 ? `alle ${d.intervall_stunden} h` : "deaktiviert") +
+    ` · Aufbewahrung ${d.aufbewahrung_tage} Tage. Sicherungen enthalten alle Mandanten.`;
+  const tb = document.getElementById("backup-liste");
+  tb.innerHTML = "";
+  for (const f of d.dateien) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><a href="/api/backups/${encodeURIComponent(f.name)}">${esc(f.name)}</a></td>
+      <td class="zahl">${groesse(f.groesse)}</td>
+      <td>${new Date(f.geaendert_am).toLocaleString("de-DE")}</td>
+      <td><button class="gefahr" data-name="${esc(f.name)}">✕</button></td>`;
+    tb.appendChild(tr);
+  }
+  if (!d.dateien.length) {
+    tb.innerHTML = `<tr><td colspan="4" class="hinweis">Noch keine Sicherungen vorhanden.</td></tr>`;
+  }
+  tb.querySelectorAll("button[data-name]").forEach(btn => btn.addEventListener("click", async () => {
+    if (!confirm(`Sicherung ${btn.dataset.name} löschen?`)) return;
+    try { await api("DELETE", `/api/backups/${encodeURIComponent(btn.dataset.name)}`); ladeBackups(); }
+    catch (e) { toast(e.message); }
+  }));
+}
+
+document.getElementById("backup-erstellen").addEventListener("click", async () => {
+  try {
+    const erg = await api("POST", "/api/backups");
+    toast(`Sicherung ${erg.name} erstellt.`, false);
+    ladeBackups();
+  } catch (e) { toast(e.message); }
+});
+
+document.getElementById("restore-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!confirm("Wirklich den KOMPLETTEN Datenbestand durch die Sicherung ersetzen?")) return;
+  const fd = new FormData(e.target);
+  try {
+    const erg = await apiDatei("/api/backups/wiederherstellen", fd);
+    toast(`Wiederherstellung abgeschlossen (Vorab-Sicherung: ${erg.vorab_sicherung}). Seite wird neu geladen.`, false);
+    setTimeout(() => location.reload(), 1500);
+  } catch (err) { toast(err.message); }
+});
+
 lade();
+ladeBackups();
 </script>
 {% endblock %}

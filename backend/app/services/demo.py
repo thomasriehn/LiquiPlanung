@@ -66,6 +66,7 @@ def lege_demo_mandant_an(db: Session, heute: date | None = None) -> models.Manda
         (PostenArt.KREDITOR, "Großhandel Nord GmbH", "3400", 5, "18740.00"),
         (PostenArt.KREDITOR, "Großhandel Nord GmbH", "3400", 19, "9310.00"),
         (PostenArt.KREDITOR, "Spedition Weber", "4900", 8, "2140.00"),
+        (PostenArt.KREDITOR, "Spedition Weber", "4900", 15, "1860.00"),
         (PostenArt.KREDITOR, "IT-Service Runge", "4920", -3, "890.00"),  # überfällig
         (PostenArt.DEBITOR, "Kunde Albrecht AG", "8400", 7, "22610.00"),
         (PostenArt.DEBITOR, "Kunde Behrens KG", "8400", 14, "15470.00"),
@@ -200,6 +201,18 @@ def lege_demo_mandant_an(db: Session, heute: date | None = None) -> models.Manda
             betrag=Decimal("-3480.50"),
             partner="Stadtwerke Musterstadt",
             verwendungszweck="Abschlag Strom und Gas",
+        )
+    )
+    # Sammelüberweisung: gleicht beide Weber-Rechnungen (2.140 + 1.860) aus
+    db.add(
+        models.BankTransaktion(
+            mandant_id=mandant.id,
+            konto_id=konto["1200"].id,
+            buchungstag=heute,
+            valuta=heute,
+            betrag=Decimal("-4000.00"),
+            partner="Spedition Weber",
+            verwendungszweck="Sammelueberweisung Frachtrechnungen",
         )
     )
 

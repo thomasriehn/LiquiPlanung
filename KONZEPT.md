@@ -78,8 +78,11 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
    Umsatz (aufhebbar). **Teilzahlungen** werden vorgeschlagen, wenn ein starkes
    Signal vorliegt (Belegnummer oder eindeutiger Partner) – nie vorausgewählt; die
    Übernahme erhöht nur den bezahlten Betrag, der Posten bleibt mit Restbetrag
-   offen und die Planung rechnet mit dem Rest. Überzahlungen/Sammelüberweisungen
-   werden abgelehnt (Roadmap).
+   offen und die Planung rechnet mit dem Rest. **Sammelüberweisungen (1:n)** werden
+   erkannt, wenn eine Teilmenge offener Posten (mit Beleg-/Partnersignal) die
+   Zahlung exakt ergibt; die Zuordnungstabelle hält je Posten den Zahlungsanteil,
+   die Aufhebung löst alle Anteile wieder. Reine Überzahlungen ohne passende
+   Postenkombination werden abgelehnt.
 
 **Steuer-/SV-Regeln**
 
@@ -110,8 +113,14 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
 19. ✔ **Export (PDF/Excel):** 13-Wochen-Plan als Excel-Arbeitsmappe (Blätter Info,
     Tage, Wochen mit Plan/Ist/Δ, Soll-Ist) und als PDF-Bericht (Querformat, Wochenspalten)
     für Gericht, Sachwalter, Gläubigerausschuss.
-20. → **Datensicherung:** pg_dump-Cron im LXC (Anleitung in `deploy/PROXMOX_LXC.md`),
-    später integrierte Sicherung.
+20. ✔ **Integrierte Datensicherung:** Automatische Voll-Sicherung im konfigurierbaren
+    Intervall (Standard: täglich) mit Aufbewahrungsfrist, dazu manuelle Sicherung,
+    Download und Löschung in der Admin-Oberfläche. Sicherungen sind
+    datenbankunabhängige Zip-Archive (alle Tabellen als JSON) mit Manifest inkl.
+    Schema-Revision; die Wiederherstellung ersetzt den kompletten Datenbestand,
+    verlangt die passende Schema-Revision, eine explizite Bestätigung und legt
+    vorab automatisch eine Sicherung des Ist-Zustands an. Ergänzend bleibt der
+    pg_dump-Cron im LXC empfohlen (`deploy/PROXMOX_LXC.md`).
 21. → **DSGVO:** Personenbezogene Daten (Kreditoren-/Debitorennamen) – Löschkonzept nach
     Verfahrensende; TLS via Reverse Proxy (Anleitung enthalten).
 22. ✔ **Alembic-Migrationen:** Schemaänderungen sind über Alembic versioniert
@@ -239,8 +248,7 @@ Vorbelegungen (USt-Sätze, Gruppenzuordnung) sind Vorschlagswerte und je Mandant
 
 ## 10. Roadmap (bewusst noch nicht enthalten)
 
-1. Sammelüberweisungs-Matching (ein Bankumsatz gleicht mehrere Posten aus, 1:n).
-2. Integrierte Backups, 2-Faktor-Login.
-3. USt-Zahllast-Vorschau aus Budget (Erlöse × Satz − Vorsteuer) statt Historienschätzung.
-4. Feingranulare Verteilungsprofile für Budgets (z. B. Zahllauf freitags).
-5. Szenario-Detailregeln je Konto/Gruppe (statt globaler Faktoren).
+1. 2-Faktor-Login.
+2. USt-Zahllast-Vorschau aus Budget (Erlöse × Satz − Vorsteuer) statt Historienschätzung.
+3. Feingranulare Verteilungsprofile für Budgets (z. B. Zahllauf freitags).
+4. Szenario-Detailregeln je Konto/Gruppe (statt globaler Faktoren).

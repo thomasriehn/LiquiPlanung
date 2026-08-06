@@ -108,8 +108,94 @@ def bewerte(
     return score, gruende, art
 
 
+def _sammel_vorschlag(
+    transaktion: models.BankTransaktion, offene: list[models.OffenerPosten]
+) -> dict | None:
+    """Sammelüberweisung: Teilmenge offener Posten, deren Restbeträge exakt die
+    Zahlung ergeben. Kandidaten brauchen ein Signal (Belegnummer im
+    Verwendungszweck oder eindeutiger Partner); bei mehreren Lösungen gewinnen
+    mehr Belegtreffer, dann weniger Posten."""
+    eingang = transaktion.betrag > 0
+    zahlung = abs(transaktion.betrag)
+    zweck_norm = _norm((transaktion.verwendungszweck or "") + (transaktion.referenz or ""))
+    umsatz_tokens = _tokens((transaktion.partner or "") + " " + (transaktion.verwendungszweck or ""))
+
+    pool: list[tuple[models.OffenerPosten, Decimal, bool]] = []
+    for p in offene:
+        if eingang != (p.art == PostenArt.DEBITOR.value):
+            continue
+        rest = restbetrag(p)
+        if rest <= 0 or rest > zahlung + Decimal("0.01"):
+            continue
+        beleg_norm = _norm(p.belegnr)
+        beleg = len(beleg_norm) >= 3 and beleg_norm in zweck_norm
+        posten_tokens = _tokens(p.partner)
+        partner_stark = bool(posten_tokens) and (
+            len(posten_tokens & umsatz_tokens) / len(posten_tokens) >= 0.5
+        )
+        if beleg or partner_stark:
+            pool.append((p, rest, beleg))
+    if len(pool) < 2:
+        return None
+    pool = pool[:15]  # Suchraum begrenzen
+
+    beste: tuple[int, int, list[tuple[models.OffenerPosten, Decimal, bool]]] | None = None
+
+    def suche(idx: int, aktuell: list, summe: Decimal) -> None:
+        nonlocal beste
+        if len(aktuell) >= 2 and abs(summe - zahlung) <= Decimal("0.01"):
+            belege = sum(1 for _, _, b in aktuell if b)
+            kandidat = (belege, -len(aktuell), list(aktuell))
+            if beste is None or kandidat[:2] > beste[:2]:
+                beste = kandidat
+            return
+        if idx >= len(pool) or len(aktuell) >= 6 or summe > zahlung + Decimal("0.01"):
+            return
+        suche(idx + 1, aktuell + [pool[idx]], summe + pool[idx][1])
+        suche(idx + 1, aktuell, summe)
+
+    suche(0, [], Decimal("0"))
+    if beste is None:
+        return None
+    belege, _, teilmenge = beste
+    alle_belege = belege == len(teilmenge)
+    score = 90 if alle_belege else 75
+    gruende = [f"Summe aus {len(teilmenge)} Posten exakt"]
+    if belege:
+        gruende.append(f"{belege} Belegnummer(n) im Verwendungszweck")
+    if any(not b for _, _, b in teilmenge):
+        gruende.append("Partner passt")
+    return {
+        "score": score,
+        "konfidenz": "SICHER" if alle_belege else "MOEGLICH",
+        "art": "SAMMEL",
+        "gruende": gruende,
+        "transaktion": {
+            "id": transaktion.id,
+            "buchungstag": transaktion.buchungstag.isoformat(),
+            "betrag": float(transaktion.betrag),
+            "partner": transaktion.partner,
+            "verwendungszweck": transaktion.verwendungszweck,
+        },
+        "posten_liste": [
+            {
+                "id": p.id,
+                "art": p.art,
+                "partner": p.partner,
+                "belegnr": p.belegnr,
+                "restbetrag": float(rest),
+                "faellig_am": p.faellig_am.isoformat(),
+            }
+            for p, rest, _ in teilmenge
+        ],
+    }
+
+
 def vorschlaege(db: Session, mandant: models.Mandant) -> list[dict]:
-    """Eindeutige Zuordnungsvorschläge (je Umsatz und Posten höchstens einer)."""
+    """Eindeutige Zuordnungsvorschläge (je Umsatz und Posten höchstens einer).
+
+    Zuerst 1:1 (voll/Skonto/Teilzahlung), danach Sammelüberweisungen (1:n) für
+    Umsätze und Posten, die noch keinem 1:1-Vorschlag zugeteilt sind."""
     offene = list(
         db.scalars(
             select(models.OffenerPosten).where(
@@ -118,14 +204,19 @@ def vorschlaege(db: Session, mandant: models.Mandant) -> list[dict]:
             )
         )
     )
-    umsaetze = list(
-        db.scalars(
+    zugeordnete = set(
+        db.scalars(select(models.AusgleichZuordnung.transaktion_id).where(
+            models.AusgleichZuordnung.mandant_id == mandant.id))
+    )
+    umsaetze = [
+        t
+        for t in db.scalars(
             select(models.BankTransaktion).where(
                 models.BankTransaktion.mandant_id == mandant.id,
-                models.BankTransaktion.posten_id.is_(None),
             )
         )
-    )
+        if t.id not in zugeordnete
+    ]
     kandidaten: list[
         tuple[int, list[str], str, models.BankTransaktion, models.OffenerPosten]
     ] = []
@@ -175,62 +266,105 @@ def vorschlaege(db: Session, mandant: models.Mandant) -> list[dict]:
                 },
             }
         )
+
+    # Sammelüberweisungen für verbleibende Umsätze/Posten
+    for t in umsaetze:
+        if t.id in belegt_t:
+            continue
+        verfuegbar = [p for p in offene if p.id not in belegt_p]
+        sammel = _sammel_vorschlag(t, verfuegbar)
+        if sammel is None:
+            continue
+        belegt_t.add(t.id)
+        for eintrag in sammel["posten_liste"]:
+            belegt_p.add(eintrag["id"])
+        ergebnis.append(sammel)
+
+    ergebnis.sort(key=lambda v: -v["score"])
     return ergebnis
 
 
 def gleiche_aus(
     db: Session,
     mandant: models.Mandant,
-    paare: list[tuple[int, int]],
+    paare: list[tuple[int, list[int]]],
 ) -> int:
-    """Bestätigte Zuordnungen übernehmen.
+    """Bestätigte Zuordnungen übernehmen (je Paar: ein Umsatz, ein oder mehrere Posten).
 
-    Deckt die Zahlung den Restbetrag (mit Skonto-Toleranz 3 %), wird der Posten
-    BEZAHLT; sonst bleibt er als Teilzahlung OFFEN und nur `bezahlt_betrag`
-    steigt – die Planung rechnet dann mit dem Restbetrag. Überzahlungen werden
-    abgelehnt (Sammelüberweisungen sind manuell zu behandeln).
+    1:1 – deckt die Zahlung den Restbetrag (Skonto-Toleranz 3 %), wird der Posten
+    BEZAHLT; sonst bleibt er als Teilzahlung OFFEN und nur `bezahlt_betrag` steigt.
+    Sammelüberweisung (mehrere Posten) – die Restbeträge müssen die Zahlung exakt
+    ergeben; jeder Posten wird voll ausgeglichen. Überzahlungen werden abgelehnt.
     """
     anzahl = 0
-    for transaktion_id, posten_id in paare:
+    for transaktion_id, posten_ids in paare:
         t = db.get(models.BankTransaktion, transaktion_id)
-        p = db.get(models.OffenerPosten, posten_id)
-        if (
-            t is None or p is None
-            or t.mandant_id != mandant.id or p.mandant_id != mandant.id
-        ):
-            raise ValueError("Umsatz oder Posten nicht gefunden")
-        if t.posten_id is not None:
+        if t is None or t.mandant_id != mandant.id:
+            raise ValueError("Umsatz nicht gefunden")
+        if t.zuordnungen:
             raise ValueError(f"Bankumsatz {transaktion_id} ist bereits abgeglichen")
-        if p.status != PostenStatus.OFFEN.value:
-            raise ValueError(f"Posten {posten_id} ist nicht offen")
-        rest = restbetrag(p)
+        if not posten_ids:
+            raise ValueError("Keine Posten angegeben")
+        posten: list[models.OffenerPosten] = []
+        for pid in posten_ids:
+            p = db.get(models.OffenerPosten, pid)
+            if p is None or p.mandant_id != mandant.id:
+                raise ValueError(f"Posten {pid} nicht gefunden")
+            if p.status != PostenStatus.OFFEN.value:
+                raise ValueError(f"Posten {pid} ist nicht offen")
+            posten.append(p)
         zahlung = abs(t.betrag)
-        if zahlung > rest + Decimal("0.01"):
-            raise ValueError(
-                f"Zahlung ({zahlung:.2f} €) übersteigt den Restbetrag "
-                f"({rest:.2f} €) von Posten {posten_id}"
-            )
-        t.posten_id = p.id
-        p.bezahlt_betrag = (p.bezahlt_betrag or Decimal("0")) + zahlung
-        if zahlung >= rest * Decimal("0.97"):
-            p.status = PostenStatus.BEZAHLT.value
-            p.bezahlt_am = t.buchungstag
+
+        if len(posten) == 1:
+            p = posten[0]
+            rest = restbetrag(p)
+            if zahlung > rest + Decimal("0.01"):
+                raise ValueError(
+                    f"Zahlung ({zahlung:.2f} €) übersteigt den Restbetrag "
+                    f"({rest:.2f} €) von Posten {p.id}"
+                )
+            db.add(models.AusgleichZuordnung(
+                mandant_id=mandant.id, transaktion=t, posten=p, betrag=zahlung
+            ))
+            p.bezahlt_betrag = (p.bezahlt_betrag or Decimal("0")) + zahlung
+            if zahlung >= rest * Decimal("0.97"):
+                p.status = PostenStatus.BEZAHLT.value
+                p.bezahlt_am = t.buchungstag
+        else:
+            # Sammelüberweisung: Summe der Restbeträge muss exakt passen
+            summe = sum((restbetrag(p) for p in posten), Decimal("0"))
+            if abs(summe - zahlung) > Decimal("0.01"):
+                raise ValueError(
+                    f"Restbeträge ({summe:.2f} €) ergeben nicht die Zahlung "
+                    f"({zahlung:.2f} €) – Sammelüberweisung nicht übernommen"
+                )
+            for p in posten:
+                rest = restbetrag(p)
+                db.add(models.AusgleichZuordnung(
+                    mandant_id=mandant.id, transaktion=t, posten=p, betrag=rest
+                ))
+                p.bezahlt_betrag = (p.bezahlt_betrag or Decimal("0")) + rest
+                p.status = PostenStatus.BEZAHLT.value
+                p.bezahlt_am = t.buchungstag
         anzahl += 1
     return anzahl
 
 
 def hebe_auf(db: Session, mandant: models.Mandant, transaktion_id: int) -> None:
-    """Ausgleich rückgängig machen: Zahlung abziehen, Posten wieder öffnen."""
+    """Ausgleich rückgängig machen: alle Zuordnungen des Umsatzes lösen und die
+    Zahlungsanteile von den Posten abziehen."""
     t = db.get(models.BankTransaktion, transaktion_id)
     if t is None or t.mandant_id != mandant.id:
         raise ValueError("Bankumsatz nicht gefunden")
-    if t.posten_id is None:
+    if not t.zuordnungen:
         raise ValueError("Bankumsatz ist nicht abgeglichen")
-    p = db.get(models.OffenerPosten, t.posten_id)
-    if p is not None:
-        p.bezahlt_betrag = max(
-            Decimal("0"), (p.bezahlt_betrag or Decimal("0")) - abs(t.betrag)
-        )
-        p.status = PostenStatus.OFFEN.value
-        p.bezahlt_am = None
-    t.posten_id = None
+    for zuordnung in list(t.zuordnungen):
+        p = zuordnung.posten
+        if p is not None:
+            p.bezahlt_betrag = max(
+                Decimal("0"), (p.bezahlt_betrag or Decimal("0")) - zuordnung.betrag
+            )
+            p.status = PostenStatus.OFFEN.value
+            p.bezahlt_am = None
+        db.delete(zuordnung)
+    t.zuordnungen.clear()

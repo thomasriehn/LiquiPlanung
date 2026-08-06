@@ -1,4 +1,5 @@
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -114,10 +115,41 @@ def init_db() -> None:
                 print("[LiquiPlanung] Demo-Mandant 'Muster GmbH (Demo)' angelegt.")
 
 
+async def _backup_schleife() -> None:
+    """Regelmäßige Sicherung (erste direkt beim Start, dann im Intervall)."""
+    from .services import backup
+
+    settings = get_settings()
+    while True:
+        try:
+            pfad = await asyncio.to_thread(
+                backup.erstelle_backup, settings.backup_verzeichnis
+            )
+            geloescht = await asyncio.to_thread(
+                backup.raeume_auf,
+                settings.backup_verzeichnis,
+                settings.backup_aufbewahrung_tage,
+            )
+            meldung = f"[LiquiPlanung] Sicherung erstellt: {pfad.name}"
+            if geloescht:
+                meldung += f" ({geloescht} alte Sicherung(en) entfernt)"
+            print(meldung)
+        except Exception as e:  # Sicherung darf den Betrieb nie stoppen
+            print(f"[LiquiPlanung] Sicherung fehlgeschlagen: {e}")
+        await asyncio.sleep(get_settings().backup_intervall_stunden * 3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    backup_task = None
+    if get_settings().backup_intervall_stunden > 0:
+        backup_task = asyncio.create_task(_backup_schleife())
     yield
+    if backup_task is not None:
+        backup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await backup_task
 
 
 def create_app() -> FastAPI:

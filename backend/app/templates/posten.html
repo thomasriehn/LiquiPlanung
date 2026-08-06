@@ -80,8 +80,10 @@
       <strong>Sichere</strong> Treffer sind vorausgewählt; die Übernahme setzt den
       Posten auf „bezahlt“ und verknüpft den Umsatz. <strong>Teilzahlungen</strong>
       werden nur bei starkem Signal (Belegnummer/Partner) vorgeschlagen und nie
-      vorausgewählt – der Posten bleibt mit Restbetrag offen. Überzahlungen und
-      Sammelüberweisungen sind manuell zu behandeln.
+      vorausgewählt – der Posten bleibt mit Restbetrag offen.
+      <strong>Sammelüberweisungen</strong> werden erkannt, wenn eine Kombination
+      offener Posten die Zahlung exakt ergibt. Überzahlungen ohne passende
+      Kombination sind manuell zu behandeln.
     </p>
     <div class="werkzeuge">
       <button id="vorschlaege-laden" class="sekundaer">Vorschläge aktualisieren</button>
@@ -284,18 +286,27 @@ async function ladeVorschlaege() {
   const tb = document.getElementById("vorschlaege");
   tb.innerHTML = "";
   for (const v of vorschlaege) {
-    const t = v.transaktion, p = v.posten;
+    const t = v.transaktion;
+    const postenListe = v.art === "SAMMEL" ? v.posten_liste : [v.posten];
+    const pids = JSON.stringify(postenListe.map(p => p.id));
+    const postenHtml = postenListe.map(p =>
+      `${p.art === "KREDITOR" ? "ER" : "FO"} · ${esc(p.partner)}${p.belegnr ? ` · ${esc(p.belegnr)}` : ""}
+       <span class="klein">fällig ${p.faellig_am}</span>`).join("<br>");
+    const betragHtml = v.art === "SAMMEL"
+      ? postenListe.map(p => eur(p.restbetrag)).join("<br>")
+      : `${eur(v.posten.restbetrag)}${v.posten.restbetrag !== v.posten.betrag_brutto ? `<br><span class="klein">von ${eur(v.posten.betrag_brutto)}</span>` : ""}`;
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><input type="checkbox" data-tid="${t.id}" data-pid="${p.id}" ${v.konfidenz === "SICHER" ? "checked" : ""} ${LESER ? "disabled" : ""}></td>
+      <td><input type="checkbox" data-tid="${t.id}" data-pids='${pids}' ${v.konfidenz === "SICHER" ? "checked" : ""} ${LESER ? "disabled" : ""}></td>
       <td>${t.buchungstag} · ${esc(t.partner)}<br><span class="klein">${esc(t.verwendungszweck)}</span></td>
       <td class="zahl" style="${t.betrag < 0 ? "color:var(--rot)" : ""}">${eur(t.betrag)}</td>
-      <td>${p.art === "KREDITOR" ? "ER" : "FO"} · ${esc(p.partner)}${p.belegnr ? ` · ${esc(p.belegnr)}` : ""}<br><span class="klein">fällig ${p.faellig_am}</span></td>
-      <td class="zahl">${eur(p.restbetrag)}${p.restbetrag !== p.betrag_brutto ? `<br><span class="klein">von ${eur(p.betrag_brutto)}</span>` : ""}</td>
+      <td>${postenHtml}</td>
+      <td class="zahl">${betragHtml}</td>
       <td>${v.konfidenz === "SICHER"
         ? `<span class="badge-gesperrt" style="background:#e8f5ec;color:#1e5c38;border-color:#9fd3ae">sicher (${v.score})</span>`
         : `<span class="badge-gesperrt" style="background:#fff6e0;color:#8a5a00;border-color:#e8c56b">möglich (${v.score})</span>`}
-        ${v.art === "TEIL" ? `<br><span class="badge-gesperrt">Teilzahlung · Rest danach ${eur(p.rest_nach_zahlung)} €</span>` : ""}</td>
+        ${v.art === "TEIL" ? `<br><span class="badge-gesperrt">Teilzahlung · Rest danach ${eur(v.posten.rest_nach_zahlung)} €</span>` : ""}
+        ${v.art === "SAMMEL" ? `<br><span class="badge-gesperrt" style="background:#eaf1fa;color:#1d4e89;border-color:#9db4d0">Sammelüberweisung · ${postenListe.length} Posten</span>` : ""}</td>
       <td class="klein">${v.gruende.map(esc).join(", ")}</td>`;
     tb.appendChild(tr);
   }
@@ -308,14 +319,19 @@ async function ladeAbgeglichene() {
   const umsaetze = await api("GET", `/api/mandanten/${MANDANT_ID}/bank-umsaetze?limit=200`);
   const tb = document.getElementById("abgeglichene");
   tb.innerHTML = "";
-  for (const u of umsaetze.filter(u => u.posten_id)) {
-    const p = postenById[u.posten_id];
+  for (const u of umsaetze.filter(u => u.zuordnungen.length)) {
+    const postenHtml = u.zuordnungen.map(z => {
+      const p = postenById[z.posten_id];
+      return p
+        ? `${esc(p.partner)}${p.belegnr ? " · " + esc(p.belegnr) : ""} (${eur(z.betrag)} €)`
+        : `#${z.posten_id} (${eur(z.betrag)} €)`;
+    }).join("<br>");
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${u.buchungstag}</td>
       <td class="zahl" style="${u.betrag < 0 ? "color:var(--rot)" : ""}">${eur(u.betrag)}</td>
       <td>${esc(u.partner)}</td>
-      <td>${p ? `${esc(p.partner)}${p.belegnr ? " · " + esc(p.belegnr) : ""} (${eur(p.betrag_brutto)} €)` : "#" + u.posten_id}</td>
+      <td>${postenHtml}${u.zuordnungen.length > 1 ? ` <span class="klein">(Sammel, ${u.zuordnungen.length} Posten)</span>` : ""}</td>
       <td>${LESER ? "" : `<button class="sekundaer" data-tid="${u.id}">aufheben</button>`}</td>`;
     tb.appendChild(tr);
   }
@@ -338,7 +354,7 @@ document.getElementById("vorschlaege-laden").addEventListener("click", () => {
 const uebernehmenKnopf = document.getElementById("ausgleich-uebernehmen");
 if (uebernehmenKnopf) uebernehmenKnopf.addEventListener("click", async () => {
   const paare = [...document.querySelectorAll("#vorschlaege input:checked")].map(cb => ({
-    transaktion_id: parseInt(cb.dataset.tid), posten_id: parseInt(cb.dataset.pid),
+    transaktion_id: parseInt(cb.dataset.tid), posten_ids: JSON.parse(cb.dataset.pids),
   }));
   if (!paare.length) { toast("Keine Zuordnung ausgewählt.", false); return; }
   try {
