@@ -16,6 +16,9 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
 - **Bankimport (MT940/CAMT.053)**: Kontoauszüge liefern tagesaktuelle Bestandsanker
   (Endsaldo je Auszug, IBAN-Zuordnung) und Bankumsätze zur Referenz – unabhängig vom
   Buchhaltungsexport, ohne Doppelzählung im Ist.
+- **Automatischer OP-Ausgleich**: Scoring-basierte Zuordnungsvorschläge Bankumsatz ↔
+  offener Posten (Betrag/Skonto, Belegnummer, Partner, Datumsnähe); Übernahme setzt
+  Posten auf „bezahlt“ und verknüpft den Umsatz, jederzeit aufhebbar.
 - **Kontenrahmen** SKR03/SKR04 als editierbare Vorlage je Mandant, USt-Satz je Konto.
 - **Planbasis**: offene Eingangsrechnungen/Forderungen, Dauerverbindlichkeiten,
   Budget je Konto/Monat (Restbudget-Logik, Netto→Brutto über USt-Satz).

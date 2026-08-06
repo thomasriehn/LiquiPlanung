@@ -179,6 +179,30 @@ def lege_demo_mandant_an(db: Session, heute: date | None = None) -> models.Manda
             )
         )
 
+    # Bankumsätze für den OP-Ausgleich (passen zu zwei offenen Posten)
+    db.add(
+        models.BankTransaktion(
+            mandant_id=mandant.id,
+            konto_id=konto["1200"].id,
+            buchungstag=heute,
+            valuta=heute,
+            betrag=Decimal("22610.00"),
+            partner="Kunde Albrecht AG",
+            verwendungszweck="Rechnung Albrecht Projektabrechnung",
+        )
+    )
+    db.add(
+        models.BankTransaktion(
+            mandant_id=mandant.id,
+            konto_id=konto["1200"].id,
+            buchungstag=heute,
+            valuta=heute,
+            betrag=Decimal("-3480.50"),
+            partner="Stadtwerke Musterstadt",
+            verwendungszweck="Abschlag Strom und Gas",
+        )
+    )
+
     db.commit()
     generiere_termine(db, mandant, start, start + timedelta(days=13 * 7 - 1), heute)
     return mandant

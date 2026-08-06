@@ -6,6 +6,7 @@
   <div class="tab-leiste">
     <button id="tab-op" class="aktiv">Offene Posten</button>
     <button id="tab-dauer">Dauerbuchungen</button>
+    <button id="tab-abgleich">Bankabgleich</button>
   </div>
 
   <div id="bereich-op">
@@ -71,6 +72,32 @@
       <tbody id="dauer-tabelle"></tbody>
     </table>
   </div>
+
+  <div id="bereich-abgleich" style="display:none">
+    <p class="hinweis">
+      Vorschläge aus dem Abgleich importierter Bankumsätze mit offenen Posten
+      (Betrag, Belegnummer im Verwendungszweck, Partnername, Datumsnähe).
+      <strong>Sichere</strong> Treffer sind vorausgewählt; die Übernahme setzt den
+      Posten auf „bezahlt“ und verknüpft den Umsatz. Teilzahlungen werden nicht
+      vorgeschlagen und sind manuell zu behandeln.
+    </p>
+    <div class="werkzeuge">
+      <button id="vorschlaege-laden" class="sekundaer">Vorschläge aktualisieren</button>
+      {% if not leser %}<button id="ausgleich-uebernehmen">Ausgewählte übernehmen</button>{% endif %}
+      <span class="hinweis" id="abgleich-info"></span>
+    </div>
+    <table class="liste">
+      <thead><tr><th></th><th>Bankumsatz</th><th class="zahl">Betrag</th>
+        <th>Offener Posten</th><th class="zahl">Betrag</th><th>Konfidenz</th><th>Begründung</th></tr></thead>
+      <tbody id="vorschlaege"></tbody>
+    </table>
+    <h2>Abgeglichene Bankumsätze</h2>
+    <table class="liste">
+      <thead><tr><th>Buchungstag</th><th class="zahl">Betrag</th><th>Partner</th>
+        <th>Posten</th><th></th></tr></thead>
+      <tbody id="abgeglichene"></tbody>
+    </table>
+  </div>
 </div>
 {% endblock %}
 {% block skripte %}
@@ -110,8 +137,11 @@ function klasseSelect(p) {
   return `<select data-feld="forderungsklasse" style="width:110px">${optionen}</select>${badge}`;
 }
 
+let postenById = {};
+
 async function ladeOP() {
   const posten = await api("GET", `/api/mandanten/${MANDANT_ID}/posten`);
+  postenById = Object.fromEntries(posten.map(p => [p.id, p]));
   const tb = document.getElementById("op-tabelle");
   tb.innerHTML = "";
   let gesperrt = 0;
@@ -231,12 +261,88 @@ if (dauerForm) dauerForm.addEventListener("submit", async (e) => {
 
 document.getElementById("tab-op").addEventListener("click", () => wechsel("op"));
 document.getElementById("tab-dauer").addEventListener("click", () => wechsel("dauer"));
+document.getElementById("tab-abgleich").addEventListener("click", () => {
+  wechsel("abgleich");
+  ladeVorschlaege();
+  ladeAbgeglichene();
+});
 function wechsel(tab) {
-  document.getElementById("bereich-op").style.display = tab === "op" ? "" : "none";
-  document.getElementById("bereich-dauer").style.display = tab === "dauer" ? "" : "none";
-  document.getElementById("tab-op").classList.toggle("aktiv", tab === "op");
-  document.getElementById("tab-dauer").classList.toggle("aktiv", tab === "dauer");
+  for (const name of ["op", "dauer", "abgleich"]) {
+    document.getElementById("bereich-" + name).style.display = tab === name ? "" : "none";
+    document.getElementById("tab-" + name).classList.toggle("aktiv", tab === name);
+  }
 }
+
+// ---- Bankabgleich ----
+async function ladeVorschlaege() {
+  let vorschlaege;
+  try { vorschlaege = await api("GET", `/api/mandanten/${MANDANT_ID}/op-ausgleich/vorschlaege`); }
+  catch (e) { toast(e.message); return; }
+  const tb = document.getElementById("vorschlaege");
+  tb.innerHTML = "";
+  for (const v of vorschlaege) {
+    const t = v.transaktion, p = v.posten;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><input type="checkbox" data-tid="${t.id}" data-pid="${p.id}" ${v.konfidenz === "SICHER" ? "checked" : ""} ${LESER ? "disabled" : ""}></td>
+      <td>${t.buchungstag} · ${esc(t.partner)}<br><span class="klein">${esc(t.verwendungszweck)}</span></td>
+      <td class="zahl" style="${t.betrag < 0 ? "color:var(--rot)" : ""}">${eur(t.betrag)}</td>
+      <td>${p.art === "KREDITOR" ? "ER" : "FO"} · ${esc(p.partner)}${p.belegnr ? ` · ${esc(p.belegnr)}` : ""}<br><span class="klein">fällig ${p.faellig_am}</span></td>
+      <td class="zahl">${eur(p.betrag_brutto)}</td>
+      <td>${v.konfidenz === "SICHER"
+        ? `<span class="badge-gesperrt" style="background:#e8f5ec;color:#1e5c38;border-color:#9fd3ae">sicher (${v.score})</span>`
+        : `<span class="badge-gesperrt" style="background:#fff6e0;color:#8a5a00;border-color:#e8c56b">möglich (${v.score})</span>`}</td>
+      <td class="klein">${v.gruende.map(esc).join(", ")}</td>`;
+    tb.appendChild(tr);
+  }
+  document.getElementById("abgleich-info").textContent = vorschlaege.length
+    ? `${vorschlaege.length} Vorschläge (${vorschlaege.filter(v => v.konfidenz === "SICHER").length} sicher).`
+    : "Keine Vorschläge – alle Umsätze abgeglichen oder keine passenden offenen Posten.";
+}
+
+async function ladeAbgeglichene() {
+  const umsaetze = await api("GET", `/api/mandanten/${MANDANT_ID}/bank-umsaetze?limit=200`);
+  const tb = document.getElementById("abgeglichene");
+  tb.innerHTML = "";
+  for (const u of umsaetze.filter(u => u.posten_id)) {
+    const p = postenById[u.posten_id];
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${u.buchungstag}</td>
+      <td class="zahl" style="${u.betrag < 0 ? "color:var(--rot)" : ""}">${eur(u.betrag)}</td>
+      <td>${esc(u.partner)}</td>
+      <td>${p ? `${esc(p.partner)}${p.belegnr ? " · " + esc(p.belegnr) : ""} (${eur(p.betrag_brutto)} €)` : "#" + u.posten_id}</td>
+      <td>${LESER ? "" : `<button class="sekundaer" data-tid="${u.id}">aufheben</button>`}</td>`;
+    tb.appendChild(tr);
+  }
+  if (!tb.children.length) {
+    tb.innerHTML = `<tr><td colspan="5" class="hinweis">Noch keine abgeglichenen Umsätze.</td></tr>`;
+  }
+  tb.querySelectorAll("button[data-tid]").forEach(btn => btn.addEventListener("click", async () => {
+    if (!confirm("Ausgleich aufheben? Der Posten wird wieder geöffnet.")) return;
+    try {
+      await api("POST", `/api/mandanten/${MANDANT_ID}/op-ausgleich/aufheben`,
+        { transaktion_id: parseInt(btn.dataset.tid) });
+      await ladeOP(); ladeVorschlaege(); ladeAbgeglichene();
+    } catch (e) { toast(e.message); }
+  }));
+}
+
+document.getElementById("vorschlaege-laden").addEventListener("click", () => {
+  ladeVorschlaege(); ladeAbgeglichene();
+});
+const uebernehmenKnopf = document.getElementById("ausgleich-uebernehmen");
+if (uebernehmenKnopf) uebernehmenKnopf.addEventListener("click", async () => {
+  const paare = [...document.querySelectorAll("#vorschlaege input:checked")].map(cb => ({
+    transaktion_id: parseInt(cb.dataset.tid), posten_id: parseInt(cb.dataset.pid),
+  }));
+  if (!paare.length) { toast("Keine Zuordnung ausgewählt.", false); return; }
+  try {
+    const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/op-ausgleich`, { paare });
+    toast(`${erg.ausgeglichen} Posten ausgeglichen.`, false);
+    await ladeOP(); ladeVorschlaege(); ladeAbgeglichene();
+  } catch (e) { toast(e.message); }
+});
 
 ladeKonten().then(() => { ladeOP(); ladeDauer(); });
 </script>

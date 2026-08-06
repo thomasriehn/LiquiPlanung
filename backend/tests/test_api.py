@@ -328,6 +328,64 @@ def test_bank_import_ohne_zuordnung(client):
     assert antwort.json()["anzahl"] == 2
 
 
+def test_op_ausgleich_flow(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Abgleich GmbH", "kurzname": "abgleich"}
+    ).json()["id"]
+    konten = client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]
+    bank_konto = next(k for k in konten if k["nummer"] == "1200")
+    client.patch(f"/api/konten/{bank_konto['id']}", json={"iban": "DE89370400440532013000"})
+    client.post(
+        f"/api/mandanten/{mandant_id}/bank-import",
+        files={"datei": ("auszug.sta", MT940_BEISPIEL, "text/plain")},
+    )
+    # passende offene Posten anlegen
+    fo = client.post(
+        f"/api/mandanten/{mandant_id}/posten",
+        json={"art": "DEBITOR", "partner": "Kunde Albrecht AG", "belegnr": "RE-100",
+              "faellig_am": "2026-08-10", "betrag_brutto": 1190},
+    ).json()["id"]
+    er = client.post(
+        f"/api/mandanten/{mandant_id}/posten",
+        json={"art": "KREDITOR", "partner": "Vermieter GmbH",
+              "faellig_am": "2026-08-05", "betrag_brutto": 500},
+    ).json()["id"]
+
+    vorschlaege = client.get(
+        f"/api/mandanten/{mandant_id}/op-ausgleich/vorschlaege"
+    ).json()
+    assert len(vorschlaege) == 2
+    assert all(v["konfidenz"] == "SICHER" for v in vorschlaege)
+
+    paare = [
+        {"transaktion_id": v["transaktion"]["id"], "posten_id": v["posten"]["id"]}
+        for v in vorschlaege
+    ]
+    erg = client.post(
+        f"/api/mandanten/{mandant_id}/op-ausgleich", json={"paare": paare}
+    ).json()
+    assert erg["ausgeglichen"] == 2
+    posten = client.get(f"/api/mandanten/{mandant_id}/posten").json()
+    assert all(p["status"] == "BEZAHLT" for p in posten)
+    assert next(p for p in posten if p["id"] == fo)["bezahlt_am"] == "2026-08-04"
+    # keine neuen Vorschläge mehr; erneuter Ausgleich desselben Umsatzes -> 409
+    assert client.get(f"/api/mandanten/{mandant_id}/op-ausgleich/vorschlaege").json() == []
+    antwort = client.post(
+        f"/api/mandanten/{mandant_id}/op-ausgleich", json={"paare": [paare[0]]}
+    )
+    assert antwort.status_code == 409
+
+    # Aufheben öffnet den Posten wieder
+    client.post(
+        f"/api/mandanten/{mandant_id}/op-ausgleich/aufheben",
+        json={"transaktion_id": paare[0]["transaktion_id"]},
+    )
+    posten = client.get(f"/api/mandanten/{mandant_id}/posten").json()
+    assert sum(1 for p in posten if p["status"] == "OFFEN") == 1
+    assert len(client.get(f"/api/mandanten/{mandant_id}/op-ausgleich/vorschlaege").json()) == 1
+
+
 def test_szenarien_vergleich_endpoint(client):
     _login(client)
     mandant_id = client.post(

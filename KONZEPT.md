@@ -71,6 +71,11 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
    Buchhaltungsbewegungen. Zuordnung über die IBAN am Bankkonto; Einzelumsätze werden
    zur Referenz gespeichert. Die BWA-Zeilen (Ist-Zahlungsflüsse) speisen sich bewusst
    weiterhin nur aus den Buchhaltungs-Buchungen – keine Doppelzählung.
+   **Automatischer OP-Ausgleich:** Ein Scoring-Verfahren (Richtung, Betrag exakt bzw.
+   Skonto-Toleranz 3 %, Belegnummer im Verwendungszweck, Partnername, Datumsnähe)
+   schlägt eindeutige Zuordnungen Bankumsatz ↔ offener Posten vor; sichere Treffer
+   sind vorausgewählt, die Übernahme setzt den Posten auf BEZAHLT und verknüpft den
+   Umsatz (aufhebbar). Teilzahlungen werden bewusst nicht vorgeschlagen.
 
 **Steuer-/SV-Regeln**
 
@@ -227,8 +232,8 @@ Vorbelegungen (USt-Sätze, Gruppenzuordnung) sind Vorschlagswerte und je Mandant
 
 ## 10. Roadmap (bewusst noch nicht enthalten)
 
-1. Automatischer OP-Ausgleich aus Bankumsätzen (Matching Zahlungseingang ↔ offener
-   Posten mit Vorschlagsliste).
+1. Teilzahlungs-Ausgleich (ein Bankumsatz gleicht einen Posten anteilig aus,
+   Restbetrag bleibt offen) und Sammelüberweisungs-Matching (1:n).
 2. Alembic-Migrationen (der Erststand zieht additive Spalten beim Start automatisch
    nach), integrierte Backups, 2-Faktor-Login.
 3. USt-Zahllast-Vorschau aus Budget (Erlöse × Satz − Vorsteuer) statt Historienschätzung.

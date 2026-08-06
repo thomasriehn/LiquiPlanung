@@ -254,8 +254,13 @@ class BankTransaktion(Base):
     partner: Mapped[str | None] = mapped_column(String(255), nullable=True)
     verwendungszweck: Mapped[str | None] = mapped_column(Text, nullable=True)
     referenz: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # OP-Ausgleich: verknüpfter offener Posten (None = nicht abgeglichen)
+    posten_id: Mapped[int | None] = mapped_column(
+        ForeignKey("offene_posten.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     konto: Mapped[Konto] = relationship()
+    posten: Mapped["OffenerPosten | None"] = relationship()
 
 
 class BWAWert(Base):

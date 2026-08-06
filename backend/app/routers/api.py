@@ -20,7 +20,7 @@ from ..security import (
     nur_schreibend,
     sichere_mandanten_liste,
 )
-from ..services import bank, datev, export, insolvenzgeld
+from ..services import ausgleich, bank, datev, export, insolvenzgeld
 from ..services.feiertage import BUNDESLAENDER
 from ..services.kontenrahmen import lege_kontenrahmen_an, lege_standard_szenarien_an
 from ..services.liquiditaet import (
@@ -598,9 +598,76 @@ def bank_umsaetze(
             "partner": u.partner,
             "verwendungszweck": u.verwendungszweck,
             "referenz": u.referenz,
+            "posten_id": u.posten_id,
         }
         for u in umsaetze
     ]
+
+
+# ---------------------------------------------------------------- OP-Ausgleich
+
+@router.get("/mandanten/{mandant_id}/op-ausgleich/vorschlaege")
+def ausgleich_vorschlaege(
+    mandant_id: int,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    return ausgleich.vorschlaege(db, mandant)
+
+
+class AusgleichPaar(BaseModel):
+    transaktion_id: int
+    posten_id: int
+
+
+class AusgleichUebernahme(BaseModel):
+    paare: list[AusgleichPaar]
+
+
+@router.post("/mandanten/{mandant_id}/op-ausgleich")
+def ausgleich_uebernehmen(
+    mandant_id: int,
+    daten: AusgleichUebernahme,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    if not daten.paare:
+        raise HTTPException(422, "Keine Zuordnungen übergeben")
+    try:
+        anzahl = ausgleich.gleiche_aus(
+            db, mandant, [(p.transaktion_id, p.posten_id) for p in daten.paare]
+        )
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(409, str(e))
+    audit(db, benutzer, mandant.id, "OP_AUSGLEICH", f"{anzahl} Zuordnungen")
+    db.commit()
+    return {"ausgeglichen": anzahl}
+
+
+class AusgleichAufhebung(BaseModel):
+    transaktion_id: int
+
+
+@router.post("/mandanten/{mandant_id}/op-ausgleich/aufheben")
+def ausgleich_aufheben(
+    mandant_id: int,
+    daten: AusgleichAufhebung,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    try:
+        ausgleich.hebe_auf(db, mandant, daten.transaktion_id)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    audit(db, benutzer, mandant.id, "OP_AUSGLEICH_AUFGEHOBEN", str(daten.transaktion_id))
+    db.commit()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- Offene Posten
