@@ -89,5 +89,7 @@ git pull
 docker compose up -d --build
 ```
 
-Das Schema wird beim Start automatisch angelegt (Erstversion ohne Migrationstool; vor
-Updates mit Schemaänderungen Sicherung erstellen – siehe KONZEPT.md, Roadmap Alembic).
+Schemaänderungen laufen über Alembic-Migrationen und werden beim Anwendungsstart
+automatisch angewendet (`alembic upgrade head`); ältere Installationen aus der Zeit
+vor Alembic werden beim ersten Start übernommen. Vor Updates empfiehlt sich dennoch
+eine Sicherung (Abschnitt 5).

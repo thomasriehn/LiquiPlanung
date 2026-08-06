@@ -165,15 +165,19 @@ def plan_fluesse(
             if p.bezahlt_am is None or p.bezahlt_am < start:
                 continue
             d = zahltag if zahltag >= start else naechster_bankarbeitstag(start, bl)
-        else:  # OFFEN
+            grundbetrag = p.betrag_brutto
+        else:  # OFFEN: nur den Restbetrag planen (Teilzahlungen sind abgezogen)
+            grundbetrag = p.betrag_brutto - (p.bezahlt_betrag or Decimal("0"))
+            if grundbetrag <= 0:
+                continue
             grenze = max(start, heute + timedelta(days=1)) if nur_offen else max(start, heute)
             d = zahltag if zahltag >= grenze else roll_ziel
         if d > ende:
             continue
         if p.art == PostenArt.DEBITOR.value:
-            betrag = (p.betrag_brutto * ein_f).quantize(CENT)
+            betrag = (grundbetrag * ein_f).quantize(CENT)
         else:
-            betrag = -p.betrag_brutto
+            betrag = -grundbetrag
         key: Key = p.konto_id if p.konto_id is not None else f"TERMIN:OP_{p.art}"
         plan[key][d] += betrag
 
@@ -635,7 +639,7 @@ def berechne_plan(
             == models.Forderungsklasse.INSOLVENZFORDERUNG.value,
         )
     ):
-        gesperrt += p.betrag_brutto
+        gesperrt += max(Decimal("0"), p.betrag_brutto - (p.bezahlt_betrag or Decimal("0")))
 
     # ---- Insolvenzgeld-Entlastung im Fenster (nachrichtlich) ----
     from .insolvenzgeld import igeld_fenster, vorschau as igeld_vorschau

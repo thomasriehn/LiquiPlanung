@@ -75,7 +75,11 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
    Skonto-Toleranz 3 %, Belegnummer im Verwendungszweck, Partnername, Datumsnähe)
    schlägt eindeutige Zuordnungen Bankumsatz ↔ offener Posten vor; sichere Treffer
    sind vorausgewählt, die Übernahme setzt den Posten auf BEZAHLT und verknüpft den
-   Umsatz (aufhebbar). Teilzahlungen werden bewusst nicht vorgeschlagen.
+   Umsatz (aufhebbar). **Teilzahlungen** werden vorgeschlagen, wenn ein starkes
+   Signal vorliegt (Belegnummer oder eindeutiger Partner) – nie vorausgewählt; die
+   Übernahme erhöht nur den bezahlten Betrag, der Posten bleibt mit Restbetrag
+   offen und die Planung rechnet mit dem Rest. Überzahlungen/Sammelüberweisungen
+   werden abgelehnt (Roadmap).
 
 **Steuer-/SV-Regeln**
 
@@ -110,8 +114,11 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
     später integrierte Sicherung.
 21. → **DSGVO:** Personenbezogene Daten (Kreditoren-/Debitorennamen) – Löschkonzept nach
     Verfahrensende; TLS via Reverse Proxy (Anleitung enthalten).
-22. → **Alembic-Migrationen:** Erststand nutzt `create_all`; sobald produktive Daten
-    vorliegen, werden Schemaänderungen über Alembic versioniert.
+22. ✔ **Alembic-Migrationen:** Schemaänderungen sind über Alembic versioniert
+    (`backend/migrations`); beim Anwendungsstart läuft automatisch
+    `alembic upgrade head`. Bestandsinstallationen aus der Zeit vor Alembic werden
+    beim ersten Start übernommen (Schema additiv angleichen, Baseline stempeln).
+    Ein Test stellt sicher, dass Modelle und Migrationen nie auseinanderlaufen.
 
 ## 3. Architektur
 
@@ -232,10 +239,8 @@ Vorbelegungen (USt-Sätze, Gruppenzuordnung) sind Vorschlagswerte und je Mandant
 
 ## 10. Roadmap (bewusst noch nicht enthalten)
 
-1. Teilzahlungs-Ausgleich (ein Bankumsatz gleicht einen Posten anteilig aus,
-   Restbetrag bleibt offen) und Sammelüberweisungs-Matching (1:n).
-2. Alembic-Migrationen (der Erststand zieht additive Spalten beim Start automatisch
-   nach), integrierte Backups, 2-Faktor-Login.
+1. Sammelüberweisungs-Matching (ein Bankumsatz gleicht mehrere Posten aus, 1:n).
+2. Integrierte Backups, 2-Faktor-Login.
 3. USt-Zahllast-Vorschau aus Budget (Erlöse × Satz − Vorsteuer) statt Historienschätzung.
 4. Feingranulare Verteilungsprofile für Budgets (z. B. Zahllauf freitags).
 5. Szenario-Detailregeln je Konto/Gruppe (statt globaler Faktoren).

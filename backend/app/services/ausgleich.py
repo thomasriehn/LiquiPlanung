@@ -26,50 +26,78 @@ _RECHTSFORMEN = {
 }
 
 
+_TRANSLITERATION = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"})
+
+
 def _norm(text: str | None) -> str:
-    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower().translate(_TRANSLITERATION))
 
 
 def _tokens(text: str | None) -> set[str]:
-    roh = re.split(r"[^a-zA-Z0-9äöüÄÖÜß]+", (text or "").lower())
+    roh = re.split(r"[^a-z0-9]+", (text or "").lower().translate(_TRANSLITERATION))
     return {t for t in roh if len(t) >= 3 and t not in _RECHTSFORMEN}
+
+
+def restbetrag(posten: models.OffenerPosten) -> Decimal:
+    return posten.betrag_brutto - (posten.bezahlt_betrag or Decimal("0"))
 
 
 def bewerte(
     transaktion: models.BankTransaktion, posten: models.OffenerPosten
-) -> tuple[int, list[str]] | None:
-    """Score eines Kandidatenpaars; None = kein sinnvoller Kandidat."""
+) -> tuple[int, list[str], str] | None:
+    """Score eines Kandidatenpaars; None = kein sinnvoller Kandidat.
+
+    Liefert (score, gründe, art) mit art VOLL (gleicht den Restbetrag aus, ggf.
+    mit Skonto) oder TEIL (Teilzahlung – nur bei starken Signalen wie Belegnummer
+    oder eindeutigem Partner). Überzahlungen werden nicht vorgeschlagen.
+    """
     eingang = transaktion.betrag > 0
     if eingang != (posten.art == PostenArt.DEBITOR.value):
         return None
-
-    diff = abs(abs(transaktion.betrag) - posten.betrag_brutto)
-    gruende: list[str] = []
-    if diff <= Decimal("0.01"):
-        score = 50
-        gruende.append("Betrag exakt")
-    elif posten.betrag_brutto and diff / posten.betrag_brutto <= Decimal("0.03"):
-        score = 35
-        gruende.append(f"Betrag ähnlich (Differenz {diff:.2f} € – Skonto?)")
-    else:
+    rest = restbetrag(posten)
+    if rest <= 0:
         return None
+    zahlung = abs(transaktion.betrag)
+    if zahlung > rest + Decimal("0.01"):
+        return None  # Überzahlung/Sammler -> kein automatischer Vorschlag
+
+    gruende: list[str] = []
+    if abs(zahlung - rest) <= Decimal("0.01"):
+        score = 50
+        art = "VOLL"
+        gruende.append("Betrag exakt")
+    elif zahlung >= rest * Decimal("0.97"):
+        score = 35
+        art = "VOLL"
+        gruende.append(f"Betrag ähnlich (Differenz {rest - zahlung:.2f} € – Skonto?)")
+    else:
+        score = 20
+        art = "TEIL"
+        gruende.append(f"Teilzahlung ({zahlung:.2f} von {rest:.2f} € offen)")
 
     zweck_norm = _norm((transaktion.verwendungszweck or "") + (transaktion.referenz or ""))
     beleg_norm = _norm(posten.belegnr)
-    if len(beleg_norm) >= 3 and beleg_norm in zweck_norm:
+    beleg_treffer = len(beleg_norm) >= 3 and beleg_norm in zweck_norm
+    if beleg_treffer:
         score += 40
         gruende.append("Belegnummer im Verwendungszweck")
 
     posten_tokens = _tokens(posten.partner)
     umsatz_tokens = _tokens((transaktion.partner or "") + " " + (transaktion.verwendungszweck or ""))
+    partner_stark = False
     if posten_tokens:
         gemeinsam = posten_tokens & umsatz_tokens
         if len(gemeinsam) / len(posten_tokens) >= 0.5:
             score += 25
+            partner_stark = True
             gruende.append("Partner passt")
         elif gemeinsam:
             score += 15
             gruende.append("Partner passt teilweise")
+
+    # Teilzahlungen nur mit starkem Signal (Betrag allein ist kein Indiz)
+    if art == "TEIL" and not (beleg_treffer or partner_stark):
+        return None
 
     zahltag = posten.zahlung_geplant_am or posten.faellig_am
     if abs((transaktion.buchungstag - zahltag).days) <= 45:
@@ -77,7 +105,7 @@ def bewerte(
     if posten.rechnungsdatum and transaktion.buchungstag < posten.rechnungsdatum:
         score -= 30
         gruende.append("Umsatz liegt vor dem Rechnungsdatum")
-    return score, gruende
+    return score, gruende, art
 
 
 def vorschlaege(db: Session, mandant: models.Mandant) -> list[dict]:
@@ -98,28 +126,35 @@ def vorschlaege(db: Session, mandant: models.Mandant) -> list[dict]:
             )
         )
     )
-    kandidaten: list[tuple[int, list[str], models.BankTransaktion, models.OffenerPosten]] = []
+    kandidaten: list[
+        tuple[int, list[str], str, models.BankTransaktion, models.OffenerPosten]
+    ] = []
     for t in umsaetze:
         for p in offene:
             ergebnis = bewerte(t, p)
             if ergebnis is None or ergebnis[0] < SCHWELLE_MOEGLICH:
                 continue
-            kandidaten.append((ergebnis[0], ergebnis[1], t, p))
+            kandidaten.append((ergebnis[0], ergebnis[1], ergebnis[2], t, p))
 
-    # eindeutig zuordnen: bester Score zuerst, jedes Element nur einmal
+    # eindeutig zuordnen: bester Score zuerst, jedes Element nur einmal je Runde
+    # (nach Übernahme einer Teilzahlung liefert die nächste Runde neue Vorschläge
+    # auf Basis des reduzierten Restbetrags)
     kandidaten.sort(key=lambda k: -k[0])
     belegt_t: set[int] = set()
     belegt_p: set[int] = set()
     ergebnis: list[dict] = []
-    for score, gruende, t, p in kandidaten:
+    for score, gruende, art, t, p in kandidaten:
         if t.id in belegt_t or p.id in belegt_p:
             continue
         belegt_t.add(t.id)
         belegt_p.add(p.id)
+        rest = restbetrag(p)
         ergebnis.append(
             {
                 "score": score,
-                "konfidenz": "SICHER" if score >= SCHWELLE_SICHER else "MOEGLICH",
+                # Teilzahlungen nie automatisch vorauswählen
+                "konfidenz": "SICHER" if score >= SCHWELLE_SICHER and art == "VOLL" else "MOEGLICH",
+                "art": art,
                 "gruende": gruende,
                 "transaktion": {
                     "id": t.id,
@@ -134,6 +169,8 @@ def vorschlaege(db: Session, mandant: models.Mandant) -> list[dict]:
                     "partner": p.partner,
                     "belegnr": p.belegnr,
                     "betrag_brutto": float(p.betrag_brutto),
+                    "restbetrag": float(rest),
+                    "rest_nach_zahlung": float(rest - abs(t.betrag)),
                     "faellig_am": p.faellig_am.isoformat(),
                 },
             }
@@ -146,7 +183,13 @@ def gleiche_aus(
     mandant: models.Mandant,
     paare: list[tuple[int, int]],
 ) -> int:
-    """Bestätigte Zuordnungen übernehmen: Posten -> BEZAHLT, Umsatz verknüpfen."""
+    """Bestätigte Zuordnungen übernehmen.
+
+    Deckt die Zahlung den Restbetrag (mit Skonto-Toleranz 3 %), wird der Posten
+    BEZAHLT; sonst bleibt er als Teilzahlung OFFEN und nur `bezahlt_betrag`
+    steigt – die Planung rechnet dann mit dem Restbetrag. Überzahlungen werden
+    abgelehnt (Sammelüberweisungen sind manuell zu behandeln).
+    """
     anzahl = 0
     for transaktion_id, posten_id in paare:
         t = db.get(models.BankTransaktion, transaktion_id)
@@ -160,15 +203,24 @@ def gleiche_aus(
             raise ValueError(f"Bankumsatz {transaktion_id} ist bereits abgeglichen")
         if p.status != PostenStatus.OFFEN.value:
             raise ValueError(f"Posten {posten_id} ist nicht offen")
+        rest = restbetrag(p)
+        zahlung = abs(t.betrag)
+        if zahlung > rest + Decimal("0.01"):
+            raise ValueError(
+                f"Zahlung ({zahlung:.2f} €) übersteigt den Restbetrag "
+                f"({rest:.2f} €) von Posten {posten_id}"
+            )
         t.posten_id = p.id
-        p.status = PostenStatus.BEZAHLT.value
-        p.bezahlt_am = t.buchungstag
+        p.bezahlt_betrag = (p.bezahlt_betrag or Decimal("0")) + zahlung
+        if zahlung >= rest * Decimal("0.97"):
+            p.status = PostenStatus.BEZAHLT.value
+            p.bezahlt_am = t.buchungstag
         anzahl += 1
     return anzahl
 
 
 def hebe_auf(db: Session, mandant: models.Mandant, transaktion_id: int) -> None:
-    """Ausgleich rückgängig machen: Posten wieder öffnen, Verknüpfung lösen."""
+    """Ausgleich rückgängig machen: Zahlung abziehen, Posten wieder öffnen."""
     t = db.get(models.BankTransaktion, transaktion_id)
     if t is None or t.mandant_id != mandant.id:
         raise ValueError("Bankumsatz nicht gefunden")
@@ -176,6 +228,9 @@ def hebe_auf(db: Session, mandant: models.Mandant, transaktion_id: int) -> None:
         raise ValueError("Bankumsatz ist nicht abgeglichen")
     p = db.get(models.OffenerPosten, t.posten_id)
     if p is not None:
+        p.bezahlt_betrag = max(
+            Decimal("0"), (p.bezahlt_betrag or Decimal("0")) - abs(t.betrag)
+        )
         p.status = PostenStatus.OFFEN.value
         p.bezahlt_am = None
     t.posten_id = None

@@ -696,6 +696,8 @@ def posten_liste(
             "faellig_am": p.faellig_am.isoformat(),
             "zahlung_geplant_am": p.zahlung_geplant_am.isoformat() if p.zahlung_geplant_am else None,
             "betrag_brutto": float(p.betrag_brutto),
+            "bezahlt_betrag": float(p.bezahlt_betrag or 0),
+            "restbetrag": float(p.betrag_brutto - (p.bezahlt_betrag or 0)),
             "konto_id": p.konto_id,
             "status": p.status,
             "bezahlt_am": p.bezahlt_am.isoformat() if p.bezahlt_am else None,

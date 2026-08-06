@@ -289,6 +289,8 @@ class OffenerPosten(Base):
     faellig_am: Mapped[date] = mapped_column(Date, index=True)
     zahlung_geplant_am: Mapped[date | None] = mapped_column(Date, nullable=True)
     betrag_brutto: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    # Summe der zugeordneten (Teil-)Zahlungen; geplant wird nur der Restbetrag
+    bezahlt_betrag: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
     konto_id: Mapped[int | None] = mapped_column(ForeignKey("konten.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[str] = mapped_column(String(12), default=PostenStatus.OFFEN.value)
     bezahlt_am: Mapped[date | None] = mapped_column(Date, nullable=True)

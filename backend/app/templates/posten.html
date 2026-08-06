@@ -78,8 +78,10 @@
       Vorschläge aus dem Abgleich importierter Bankumsätze mit offenen Posten
       (Betrag, Belegnummer im Verwendungszweck, Partnername, Datumsnähe).
       <strong>Sichere</strong> Treffer sind vorausgewählt; die Übernahme setzt den
-      Posten auf „bezahlt“ und verknüpft den Umsatz. Teilzahlungen werden nicht
-      vorgeschlagen und sind manuell zu behandeln.
+      Posten auf „bezahlt“ und verknüpft den Umsatz. <strong>Teilzahlungen</strong>
+      werden nur bei starkem Signal (Belegnummer/Partner) vorgeschlagen und nie
+      vorausgewählt – der Posten bleibt mit Restbetrag offen. Überzahlungen und
+      Sammelüberweisungen sind manuell zu behandeln.
     </p>
     <div class="werkzeuge">
       <button id="vorschlaege-laden" class="sekundaer">Vorschläge aktualisieren</button>
@@ -157,10 +159,11 @@ async function ladeOP() {
       <td>${esc(p.partner)}</td><td>${esc(p.belegnr)}</td>
       <td>${p.rechnungsdatum || ""}</td>
       <td>${p.faellig_am}</td><td>${p.zahlung_geplant_am || ""}</td>
-      <td class="zahl">${eur(p.betrag_brutto)}</td>
+      <td class="zahl">${eur(p.betrag_brutto)}${p.status === "OFFEN" && p.bezahlt_betrag > 0
+        ? `<br><span class="klein">bezahlt ${eur(p.bezahlt_betrag)}, offen ${eur(p.restbetrag)}</span>` : ""}</td>
       <td>${kontoName(p.konto_id)}</td>
       <td>${klasseSelect(p)}</td>
-      <td>${p.status}</td>
+      <td>${p.status}${p.status === "OFFEN" && p.bezahlt_betrag > 0 ? `<br><span class="klein">teilbezahlt</span>` : ""}</td>
       <td>${LESER ? "" : `
         ${p.status === "OFFEN" ? `<button class="sekundaer" data-aktion="bezahlt" data-id="${p.id}">bezahlt</button>` : ""}
         <button class="gefahr" data-aktion="loeschen" data-id="${p.id}">✕</button>`}</td>`;
@@ -288,10 +291,11 @@ async function ladeVorschlaege() {
       <td>${t.buchungstag} · ${esc(t.partner)}<br><span class="klein">${esc(t.verwendungszweck)}</span></td>
       <td class="zahl" style="${t.betrag < 0 ? "color:var(--rot)" : ""}">${eur(t.betrag)}</td>
       <td>${p.art === "KREDITOR" ? "ER" : "FO"} · ${esc(p.partner)}${p.belegnr ? ` · ${esc(p.belegnr)}` : ""}<br><span class="klein">fällig ${p.faellig_am}</span></td>
-      <td class="zahl">${eur(p.betrag_brutto)}</td>
+      <td class="zahl">${eur(p.restbetrag)}${p.restbetrag !== p.betrag_brutto ? `<br><span class="klein">von ${eur(p.betrag_brutto)}</span>` : ""}</td>
       <td>${v.konfidenz === "SICHER"
         ? `<span class="badge-gesperrt" style="background:#e8f5ec;color:#1e5c38;border-color:#9fd3ae">sicher (${v.score})</span>`
-        : `<span class="badge-gesperrt" style="background:#fff6e0;color:#8a5a00;border-color:#e8c56b">möglich (${v.score})</span>`}</td>
+        : `<span class="badge-gesperrt" style="background:#fff6e0;color:#8a5a00;border-color:#e8c56b">möglich (${v.score})</span>`}
+        ${v.art === "TEIL" ? `<br><span class="badge-gesperrt">Teilzahlung · Rest danach ${eur(p.rest_nach_zahlung)} €</span>` : ""}</td>
       <td class="klein">${v.gruende.map(esc).join(", ")}</td>`;
     tb.appendChild(tr);
   }

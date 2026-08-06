@@ -15,11 +15,12 @@ from .security import hash_passwort
 
 
 def ensure_schema() -> None:
-    """Ergänzt fehlende Spalten bestehender Tabellen (additiv, ohne Alembic).
+    """Ergänzt fehlende Spalten bestehender Tabellen (additiv).
 
-    `create_all` legt nur fehlende Tabellen an; neue Spalten auf bestehenden
-    Tabellen werden hier per ALTER TABLE nachgezogen (nullable, anschließend
-    mit dem Modell-Default befüllt).
+    Wird nur für die Übernahme von Alt-Installationen benötigt, die vor der
+    Alembic-Einführung per `create_all` entstanden sind: Ihr Schema wird auf den
+    aktuellen Stand gebracht und anschließend als Baseline gestempelt; danach
+    laufen Schemaänderungen ausschließlich über Alembic-Migrationen.
     """
     inspector = inspect(engine)
     with engine.begin() as conn:
@@ -43,9 +44,43 @@ def ensure_schema() -> None:
                 print(f"[LiquiPlanung] Schema ergänzt: {tabelle.name}.{spalte.name}")
 
 
+def _alembic_config():
+    from alembic.config import Config
+
+    basis = Path(__file__).resolve().parent.parent  # backend/
+    cfg = Config(str(basis / "alembic.ini"))
+    cfg.set_main_option("script_location", str(basis / "migrations"))
+    return cfg
+
+
+def migriere_datenbank() -> None:
+    """Bringt das Schema per Alembic auf den aktuellen Stand.
+
+    Bestandsinstallationen aus der Zeit vor Alembic (Tabellen vorhanden, aber
+    keine alembic_version) werden übernommen: Schema additiv angleichen, dann
+    als Baseline stempeln. Alles Weitere läuft über `alembic upgrade head`.
+    """
+    from alembic import command
+
+    inspector = inspect(engine)
+    hat_version = inspector.has_table("alembic_version")
+    hat_tabellen = inspector.has_table("mandanten")
+    cfg = _alembic_config()
+    if not hat_version and hat_tabellen:
+        Base.metadata.create_all(bind=engine)  # seither hinzugekommene Tabellen
+        ensure_schema()                        # seither hinzugekommene Spalten
+        with engine.begin() as verbindung:
+            cfg.attributes["connection"] = verbindung
+            command.stamp(cfg, "head")
+        print("[LiquiPlanung] Bestandsdatenbank übernommen und als Baseline gestempelt.")
+    else:
+        with engine.begin() as verbindung:
+            cfg.attributes["connection"] = verbindung
+            command.upgrade(cfg, "head")
+
+
 def init_db() -> None:
-    Base.metadata.create_all(bind=engine)
-    ensure_schema()
+    migriere_datenbank()
     settings = get_settings()
     if settings.secret_key == "bitte-aendern-unsicherer-entwicklungsschluessel":
         print(

@@ -283,6 +283,21 @@ def test_snapshot_und_sollist(db):
     assert plan["vergleichsbasis"] == "SNAPSHOT"
 
 
+def test_teilbezahlter_posten_plant_nur_restbetrag(db):
+    m = _mandant(db)
+    material = _konto(db, m, "3400")
+    db.add(models.OffenerPosten(mandant_id=m.id, art="KREDITOR", partner="X",
+                                faellig_am=START + timedelta(days=5),
+                                betrag_brutto=Decimal("1000"),
+                                bezahlt_betrag=Decimal("400"),
+                                konto_id=material.id))
+    db.commit()
+    plan = berechne_plan(db, m, start=START, heute=HEUTE)
+    mat = next(g for g in plan["zeilen"] if g["code"] == "A_MAT")
+    zeile = next(k for k in mat["kinder"] if k["nummer"] == "3400")
+    assert zeile["plan"][(START + timedelta(days=5)).isoformat()] == -600.0
+
+
 def test_insolvenzforderung_zahlungssperre(db):
     # Insolvenzforderungen (§ 38) dürfen weder im Plan noch in der Projektion auftauchen
     m = _mandant(db)

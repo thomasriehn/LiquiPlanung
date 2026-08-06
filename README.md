@@ -18,7 +18,9 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Buchhaltungsexport, ohne Doppelzählung im Ist.
 - **Automatischer OP-Ausgleich**: Scoring-basierte Zuordnungsvorschläge Bankumsatz ↔
   offener Posten (Betrag/Skonto, Belegnummer, Partner, Datumsnähe); Übernahme setzt
-  Posten auf „bezahlt“ und verknüpft den Umsatz, jederzeit aufhebbar.
+  Posten auf „bezahlt“ und verknüpft den Umsatz, jederzeit aufhebbar. Teilzahlungen
+  (nur bei starkem Signal, nie vorausgewählt) lassen den Posten mit Restbetrag offen –
+  die Planung rechnet automatisch mit dem Rest.
 - **Kontenrahmen** SKR03/SKR04 als editierbare Vorlage je Mandant, USt-Satz je Konto.
 - **Planbasis**: offene Eingangsrechnungen/Forderungen, Dauerverbindlichkeiten,
   Budget je Konto/Monat (Restbudget-Logik, Netto→Brutto über USt-Satz).
@@ -62,6 +64,17 @@ pytest
 
 Ohne `DATABASE_URL` erwartet die Anwendung PostgreSQL unter
 `postgresql+psycopg://liqui:liqui@localhost:5432/liqui`. API-Dokumentation: `/api/docs`.
+
+**Schemaänderungen** laufen über Alembic (`backend/migrations`): Beim Anwendungsstart
+wird automatisch `alembic upgrade head` ausgeführt (Bestandsdatenbanken aus der Zeit
+vor Alembic werden beim ersten Start übernommen). Nach Modelländerungen:
+
+```bash
+cd backend && alembic revision --autogenerate -m "Beschreibung"
+```
+
+Ein Test (`tests/test_migrationen.py`) schlägt fehl, wenn Modelle und Migrationen
+auseinanderlaufen.
 
 ## Projektstruktur
 

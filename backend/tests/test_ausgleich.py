@@ -86,6 +86,61 @@ def test_eindeutige_zuordnung(db):
     assert v[0]["posten"]["belegnr"] == "RE-2026-002"  # Belegnummer entscheidet
 
 
+def test_teilzahlung_mit_belegnummer(db):
+    m = _mandant(db)
+    p = _posten(db, m, "KREDITOR", "Grosshandel Nord GmbH", "1000.00", belegnr="RE-2026-777")
+    u1 = _umsatz(db, m, "-400.00", partner="Grosshandel Nord", zweck="RE-2026-777 Abschlag 1")
+    db.commit()
+    v = vorschlaege(db, m)
+    assert len(v) == 1
+    assert v[0]["art"] == "TEIL"
+    assert v[0]["konfidenz"] == "MOEGLICH"  # Teilzahlungen nie vorausgewählt
+    assert v[0]["posten"]["rest_nach_zahlung"] == 600.0
+
+    gleiche_aus(db, m, [(u1.id, p.id)])
+    db.commit()
+    assert p.status == "OFFEN"              # Teilzahlung: Posten bleibt offen
+    assert p.bezahlt_betrag == Decimal("400.00")
+
+    # zweite Zahlung über den Rest -> Vollausgleich gegen den Restbetrag
+    u2 = _umsatz(db, m, "-600.00", partner="Grosshandel Nord", zweck="RE-2026-777 Rest")
+    db.commit()
+    v = vorschlaege(db, m)
+    assert len(v) == 1 and v[0]["art"] == "VOLL" and v[0]["konfidenz"] == "SICHER"
+    gleiche_aus(db, m, [(u2.id, p.id)])
+    db.commit()
+    assert p.status == "BEZAHLT"
+    assert p.bezahlt_betrag == Decimal("1000.00")
+
+    # Aufhebung der zweiten Zahlung öffnet den Posten mit Rest 600
+    hebe_auf(db, m, u2.id)
+    db.commit()
+    assert p.status == "OFFEN"
+    assert p.bezahlt_betrag == Decimal("400.00")
+
+
+def test_teilzahlung_ohne_signal_kein_vorschlag(db):
+    m = _mandant(db)
+    _posten(db, m, "KREDITOR", "Grosshandel Nord GmbH", "1000.00")
+    _umsatz(db, m, "-400.00", partner="Unbekannter Zahler")
+    db.commit()
+    assert vorschlaege(db, m) == []
+
+
+def test_ueberzahlung_wird_abgelehnt(db):
+    m = _mandant(db)
+    p = _posten(db, m, "KREDITOR", "Lieferant X", "1000.00")
+    u = _umsatz(db, m, "-1200.00", partner="Lieferant X")
+    db.commit()
+    assert bewerte(u, p) is None
+    try:
+        gleiche_aus(db, m, [(u.id, p.id)])
+        raise AssertionError("erwartete ValueError")
+    except ValueError as e:
+        assert "übersteigt" in str(e)
+        db.rollback()
+
+
 def test_ausgleich_und_aufhebung(db):
     m = _mandant(db)
     p = _posten(db, m, "DEBITOR", "Kunde B", "250.00")
