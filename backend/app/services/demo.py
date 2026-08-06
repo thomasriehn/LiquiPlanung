@@ -59,6 +59,8 @@ def lege_demo_mandant_an(db: Session, heute: date | None = None) -> models.Manda
         ]
     )
     konto["1200"].kreditlinie = Decimal("25000.00")
+    konto["4110"].verteilung = "MONATSENDE"   # Lohnlauf am letzten Bankarbeitstag
+    konto["4930"].verteilung = "WTAG_FR"      # Zahllauf freitags
 
     # Offene Eingangsrechnungen und Forderungen
     op = [

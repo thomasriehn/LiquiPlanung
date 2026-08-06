@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block titel %}Profil – LiquiPlanung{% endblock %}
+{% block inhalt %}
+<div class="seite">
+  <h1>Profil – {{ benutzer.name }}</h1>
+  <p class="hinweis">{{ benutzer.email }} · Rolle: {{ benutzer.rolle }}</p>
+
+  <h2>Passwort ändern</h2>
+  <form id="pw-form" class="formular-zeilen">
+    <label>Aktuelles Passwort<input type="password" name="aktuelles_passwort" required></label>
+    <label>Neues Passwort<input type="password" name="neues_passwort" required minlength="8"></label>
+    <button type="submit">Passwort ändern</button>
+  </form>
+
+  <h2>Zwei-Faktor-Anmeldung (TOTP)</h2>
+  <p class="hinweis">
+    Zusätzlicher Schutz beim Login mit einem 6-stelligen Code aus einer
+    Authenticator-App (z. B. Google Authenticator, Aegis, 2FAS). Bei Geräteverlust
+    kann ein Administrator die Zwei-Faktor-Anmeldung zurücksetzen.
+  </p>
+  <div id="zweifaktor-status"></div>
+  <div id="zweifaktor-einrichtung" style="display:none">
+    <div class="warnung gruen">
+      1. QR-Code mit der Authenticator-App scannen (oder das Geheimnis manuell eingeben).<br>
+      2. Den angezeigten 6-stelligen Code unten bestätigen – erst dann ist 2FA aktiv.
+    </div>
+    <p><img id="zweifaktor-qr" alt="QR-Code für Authenticator-App" style="border:1px solid var(--rand);border-radius:8px"></p>
+    <p class="klein">Geheimnis (manuelle Eingabe): <code id="zweifaktor-geheimnis"></code></p>
+    <form id="bestaetigen-form" class="formular-zeilen" style="max-width:420px">
+      <label>Code aus der App<input name="code" inputmode="numeric" maxlength="7" required></label>
+      <button type="submit">2FA aktivieren</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+async function ladeStatus() {
+  const p = await api("GET", "/api/profil");
+  const box = document.getElementById("zweifaktor-status");
+  if (p.totp_aktiv) {
+    box.innerHTML = `
+      <div class="warnung gruen">Zwei-Faktor-Anmeldung ist <strong>aktiv</strong>.</div>
+      <form id="deaktivieren-form" class="formular-zeilen" style="max-width:420px">
+        <label>Passwort zur Bestätigung<input type="password" name="passwort" required></label>
+        <button type="submit" class="gefahr">2FA deaktivieren</button>
+      </form>`;
+    document.getElementById("zweifaktor-einrichtung").style.display = "none";
+    document.getElementById("deaktivieren-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        await api("POST", "/api/profil/2fa/deaktivieren",
+          { passwort: new FormData(e.target).get("passwort") });
+        toast("2FA deaktiviert.", false);
+        ladeStatus();
+      } catch (err) { toast(err.message); }
+    });
+  } else {
+    box.innerHTML = `<div class="werkzeuge">
+      <span>Zwei-Faktor-Anmeldung ist <strong>nicht aktiv</strong>.</span>
+      <button id="einrichten-knopf">2FA einrichten</button></div>`;
+    document.getElementById("einrichten-knopf").addEventListener("click", async () => {
+      try {
+        const d = await api("POST", "/api/profil/2fa/einrichten");
+        document.getElementById("zweifaktor-qr").src = d.qr_svg;
+        document.getElementById("zweifaktor-geheimnis").textContent = d.geheimnis;
+        document.getElementById("zweifaktor-einrichtung").style.display = "";
+      } catch (err) { toast(err.message); }
+    });
+  }
+}
+
+document.getElementById("pw-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  try {
+    await api("POST", "/api/profil/passwort", {
+      aktuelles_passwort: f.get("aktuelles_passwort"),
+      neues_passwort: f.get("neues_passwort"),
+    });
+    toast("Passwort geändert.", false);
+    e.target.reset();
+  } catch (err) { toast(err.message); }
+});
+
+document.getElementById("bestaetigen-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("POST", "/api/profil/2fa/bestaetigen",
+      { code: new FormData(e.target).get("code") });
+    toast("2FA ist jetzt aktiv – beim nächsten Login wird der Code abgefragt.", false);
+    e.target.reset();
+    ladeStatus();
+  } catch (err) { toast(err.message); }
+});
+
+ladeStatus();
+</script>
+{% endblock %}

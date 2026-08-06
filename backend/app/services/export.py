@@ -89,6 +89,8 @@ def _szenario_text(plan: dict) -> str | None:
     teile = [f"Einzahlungen {s['ein_faktor']:.0f} %", f"variable Auszahlungen {s['aus_faktor']:.0f} %"]
     if s["debitoren_verzoegerung_tage"]:
         teile.append(f"Debitoren +{s['debitoren_verzoegerung_tage']} Tage")
+    if s.get("regeln_anzahl"):
+        teile.append(f"{s['regeln_anzahl']} Detailregel(n)")
     return f"{s['name']} ({', '.join(teile)})"
 
 

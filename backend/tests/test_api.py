@@ -372,6 +372,93 @@ def test_szenarien_vergleich_endpoint(client):
     assert client.get(f"/mandanten/{mandant_id}/szenarien").status_code == 200
 
 
+def test_zwei_faktor_anmeldung(client):
+    import time
+
+    from app.services.totp import code_fuer_schritt
+
+    _login(client)
+    # Einrichten und mit gültigem Code bestätigen
+    d = client.post("/api/profil/2fa/einrichten").json()
+    assert d["qr_svg"].startswith("data:image/svg+xml")
+    schritt = int(time.time() // 30)
+    antwort = client.post("/api/profil/2fa/bestaetigen",
+                          json={"code": code_fuer_schritt(d["geheimnis"], schritt)})
+    assert antwort.status_code == 200, antwort.text
+    assert client.get("/api/profil").json()["totp_aktiv"] is True
+
+    # Neuer Login: Passwort allein reicht nicht mehr
+    client.get("/logout")
+    antwort = client.post(
+        "/login", data={"email": "admin@example.com", "passwort": "admin"},
+        follow_redirects=False,
+    )
+    assert antwort.headers["location"] == "/login/2fa"
+    assert client.get("/api/mandanten").status_code == 401  # noch keine Sitzung
+
+    # falscher Code -> abgelehnt; Folgeschritt-Code -> angemeldet
+    antwort = client.post("/login/2fa", data={"code": "000000"}, follow_redirects=False)
+    assert antwort.status_code == 401
+    code = code_fuer_schritt(d["geheimnis"], schritt + 1)
+    antwort = client.post("/login/2fa", data={"code": code}, follow_redirects=False)
+    assert antwort.status_code == 303
+    assert client.get("/api/mandanten").status_code == 200
+
+    # Deaktivieren mit Passwort
+    antwort = client.post("/api/profil/2fa/deaktivieren", json={"passwort": "admin"})
+    assert antwort.status_code == 200
+    assert client.get("/api/profil").json()["totp_aktiv"] is False
+
+
+def test_eigenes_passwort_aendern(client):
+    _login(client)
+    assert client.post(
+        "/api/profil/passwort",
+        json={"aktuelles_passwort": "falsch", "neues_passwort": "neues-passwort"},
+    ).status_code == 403
+    assert client.post(
+        "/api/profil/passwort",
+        json={"aktuelles_passwort": "admin", "neues_passwort": "neues-passwort"},
+    ).status_code == 200
+    client.get("/logout")
+    antwort = client.post(
+        "/login", data={"email": "admin@example.com", "passwort": "neues-passwort"},
+        follow_redirects=False,
+    )
+    assert antwort.status_code == 303
+
+
+def test_szenario_detailregeln_api(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Regel AG", "kurzname": "regel-ag"}
+    ).json()["id"]
+    szenarien = client.get(f"/api/mandanten/{mandant_id}/szenarien").json()
+    worst = next(s for s in szenarien if s["name"] == "Worst Case")
+    konten = client.get(f"/api/mandanten/{mandant_id}/konten").json()
+    k8400 = next(k for k in konten["konten"] if k["nummer"] == "8400")
+    gruppe = next(g for g in konten["gruppen"] if g["code"] == "E_UMSATZ")
+
+    # beides gesetzt -> 422
+    antwort = client.put(
+        f"/api/szenarien/{worst['id']}/regeln",
+        json=[{"konto_id": k8400["id"], "gruppe_id": gruppe["id"], "faktor": 50}],
+    )
+    assert antwort.status_code == 422
+    antwort = client.put(
+        f"/api/szenarien/{worst['id']}/regeln",
+        json=[{"konto_id": k8400["id"], "faktor": 50},
+              {"gruppe_id": gruppe["id"], "faktor": 60}],
+    )
+    assert antwort.status_code == 200
+    regeln = client.get(f"/api/szenarien/{worst['id']}/regeln").json()
+    assert len(regeln) == 2
+    plan = client.get(
+        f"/api/mandanten/{mandant_id}/plan?szenario_id={worst['id']}"
+    ).json()
+    assert plan["szenario"]["regeln_anzahl"] == 2
+
+
 def test_leser_darf_nicht_schreiben(client):
     _login(client)
     m1 = client.post("/api/mandanten", json={"name": "C", "kurzname": "c"}).json()["id"]

@@ -477,6 +477,64 @@ def test_szenario_faktoren_und_verzoegerung(db):
     assert worst["szenario"]["name"] == "Worst"
 
 
+def test_verteilungsprofil_monatsende_und_freitags(db):
+    m = _mandant(db)
+    lohn = _konto(db, m, "4110")
+    lohn.verteilung = "MONATSENDE"
+    telefon = _konto(db, m, "4920")
+    telefon.verteilung = "WTAG_FR"
+    telefon.ust_satz = None  # netto = brutto für einfache Zahlen
+    db.add(models.Budget(mandant_id=m.id, konto_id=lohn.id, jahr=2026, monat=8,
+                         betrag_netto=Decimal("10000")))
+    db.add(models.Budget(mandant_id=m.id, konto_id=telefon.id, jahr=2026, monat=8,
+                         betrag_netto=Decimal("4000")))
+    db.commit()
+    plan = berechne_plan(db, m, start=START, heute=HEUTE)
+    pers = next(g for g in plan["zeilen"] if g["code"] == "A_PERS")
+    zeile_lohn = next(k for k in pers["kinder"] if k["nummer"] == "4110")
+    # kompletter Monatsbetrag am letzten Bankarbeitstag (31.08.2026, Montag)
+    assert zeile_lohn["plan"]["2026-08-31"] == -10000.0
+    assert "2026-08-14" not in zeile_lohn["plan"]
+    sonst = next(g for g in plan["zeilen"] if g["code"] == "A_SONST")
+    zeile_tel = next(k for k in sonst["kinder"] if k["nummer"] == "4920")
+    # August 2026 hat vier Freitage (7., 14., 21., 28.) -> je 1.000
+    for tag in ("2026-08-07", "2026-08-14", "2026-08-21", "2026-08-28"):
+        assert zeile_tel["plan"][tag] == -1000.0
+    assert "2026-08-10" not in zeile_tel["plan"]
+
+
+def test_szenario_detailregeln_engine(db):
+    m = _mandant(db)
+    e8400 = _konto(db, m, "8400")   # 19 % USt, Gruppe E_UMSATZ
+    e8300 = _konto(db, m, "8300")   # 7 % USt, Gruppe E_UMSATZ
+    for konto in (e8400, e8300):
+        db.add(models.Budget(mandant_id=m.id, konto_id=konto.id, jahr=2026, monat=8,
+                             betrag_netto=Decimal("10000")))
+    szenario = models.Szenario(mandant_id=m.id, name="Detail", ein_faktor=Decimal("80"),
+                               aus_faktor=Decimal("100"))
+    db.add(szenario)
+    db.flush()
+    gruppe = e8400.gruppe
+    db.add(models.SzenarioRegel(szenario_id=szenario.id, gruppe_id=gruppe.id,
+                                faktor=Decimal("60")))
+    db.add(models.SzenarioRegel(szenario_id=szenario.id, konto_id=e8400.id,
+                                faktor=Decimal("50")))
+    db.commit()
+    db.refresh(szenario)
+
+    plan = berechne_plan(db, m, start=START, heute=HEUTE, szenario=szenario)
+    umsatz = next(g for g in plan["zeilen"] if g["code"] == "E_UMSATZ")
+
+    def august(nummer):
+        zeile = next(k for k in umsatz["kinder"] if k["nummer"] == nummer)
+        return sum(v for t, v in zeile["plan"].items() if t.startswith("2026-08"))
+
+    # Konto-Regel (50 %) schlägt Gruppen-Regel; Gruppen-Regel (60 %) schlägt global (80 %)
+    assert abs(august("8400") - 11900 * 0.5) < 0.1
+    assert abs(august("8300") - 10700 * 0.6) < 0.1
+    assert plan["szenario"]["regeln_anzahl"] == 2
+
+
 def test_mehrere_bestandsanker_stueckweise(db):
     # Tägliche Kontoauszugssalden: Anker sind maßgeblich, dazwischen zählen Buchungen
     m = _mandant(db)

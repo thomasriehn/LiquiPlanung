@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block titel %}Zwei-Faktor-Anmeldung – LiquiPlanung{% endblock %}
+{% block inhalt %}
+<div class="login-box">
+  <h1>Zwei-Faktor-Anmeldung</h1>
+  <p class="hinweis">Bitte den 6-stelligen Code aus Ihrer Authenticator-App eingeben.</p>
+  {% if fehler %}<p class="fehler">{{ fehler }}</p>{% endif %}
+  <form method="post" action="/login/2fa">
+    <label>Code<input name="code" inputmode="numeric" pattern="[0-9 ]*" maxlength="7"
+      autocomplete="one-time-code" required autofocus></label>
+    <button type="submit">Anmelden</button>
+  </form>
+  <p class="klein"><a href="/login">Zurück zur Anmeldung</a></p>
+</div>
+{% endblock %}

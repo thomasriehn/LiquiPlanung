@@ -8,7 +8,9 @@
     SV-Beiträge: drittletzter Bankarbeitstag des Monats · USt-VA/LSt: 10. des Folgemonats
     {% if mandant.dauerfrist %}(USt mit Dauerfristverlängerung: +1 Monat){% endif %}
     · GewSt: 15.02/05/08/11 · KSt: 10.03/06/09/12. Betrag „Historie“ = Ø der letzten
-    Ist-Zahlungen auf dem verknüpften Konto.
+    Ist-Zahlungen auf dem verknüpften Konto. Betrag „aus Budget“ (nur USt-VA) =
+    USt auf Erlösbudgets − Vorsteuer auf Aufwandsbudgets des Voranmeldungszeitraums;
+    ein negativer Betrag wird als erwartete Erstattung (Einzahlung) geplant.
   </p>
   <table class="liste" id="regeln"></table>
   <div class="werkzeuge" style="margin-top:12px">
@@ -49,6 +51,7 @@ async function ladeRegeln() {
       <td><select data-feld="betrag_modus">
         <option value="FIX" ${r.betrag_modus==="FIX"?"selected":""}>fester Betrag</option>
         <option value="HISTORIE" ${r.betrag_modus==="HISTORIE"?"selected":""}>aus Historie schätzen</option>
+        <option value="BUDGET" ${r.betrag_modus==="BUDGET"?"selected":""}>aus Budget (nur USt-VA)</option>
       </select></td>
       <td class="zahl"><input type="number" step="0.01" data-feld="betrag_fix" value="${r.betrag_fix || ""}" style="width:110px"></td>
       <td><select data-feld="konto_id">${kontoOpt(r.konto_id)}</select></td></tr>`;

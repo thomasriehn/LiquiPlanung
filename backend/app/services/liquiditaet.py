@@ -105,6 +105,74 @@ def _termin_key(t_typ: str, konto_id: int | None) -> Key:
     return konto_id if konto_id is not None else f"TERMIN:{t_typ}"
 
 
+def _szenario_aufloeser(szenario: models.Szenario | None):
+    """Faktor je Konto: Konto-Detailregel > Gruppen-Detailregel > globaler Faktor."""
+    if szenario is None:
+        eins = Decimal("1")
+        return lambda konto, richtung: eins
+    konto_regeln = {r.konto_id: r.faktor for r in szenario.regeln if r.konto_id}
+    gruppen_regeln = {r.gruppe_id: r.faktor for r in szenario.regeln if r.gruppe_id}
+    ein = szenario.ein_faktor / Decimal("100")
+    aus = szenario.aus_faktor / Decimal("100")
+
+    def faktor(konto: models.Konto | None, richtung: str) -> Decimal:
+        if konto is not None:
+            if konto.id in konto_regeln:
+                return konto_regeln[konto.id] / Decimal("100")
+            if konto.gruppe_id in gruppen_regeln:
+                return gruppen_regeln[konto.gruppe_id] / Decimal("100")
+        return ein if richtung == Richtung.EIN.value else aus
+
+    return faktor
+
+
+VERTEILUNGEN = (
+    "GLEICH", "MONATSANFANG", "MONATSMITTE", "MONATSENDE",
+    "WTAG_MO", "WTAG_DI", "WTAG_MI", "WTAG_DO", "WTAG_FR",
+)
+_WOCHENTAG = {"WTAG_MO": 0, "WTAG_DI": 1, "WTAG_MI": 2, "WTAG_DO": 3, "WTAG_FR": 4}
+_verteilung_cache: dict[tuple[int, int, str, str], dict[date, Decimal]] = {}
+
+
+def _monats_verteilung(jahr: int, monat: int, profil: str, bl: str) -> dict[date, Decimal]:
+    """Anteil je Tag (Summe 1) für das Verteilungsprofil eines Monatsbudgets."""
+    key = (jahr, monat, profil, bl)
+    if key in _verteilung_cache:
+        return _verteilung_cache[key]
+    from .feiertage import bankarbeitstage_im_monat
+
+    banktage = bankarbeitstage_im_monat(jahr, monat, bl)
+    verteilung: dict[date, Decimal]
+    if not banktage:
+        verteilung = {}
+    elif profil == "MONATSANFANG":
+        verteilung = {banktage[0]: Decimal("1")}
+    elif profil == "MONATSENDE":
+        verteilung = {banktage[-1]: Decimal("1")}
+    elif profil == "MONATSMITTE":
+        mitte = min(banktage, key=lambda d: (abs(d.day - 15), d.day))
+        verteilung = {mitte: Decimal("1")}
+    elif profil in _WOCHENTAG:
+        ziel = _WOCHENTAG[profil]
+        zahltage: list[date] = []
+        d = date(jahr, monat, 1)
+        while d.month == monat:
+            if d.weekday() == ziel:
+                zahltag = naechster_bankarbeitstag(d, bl)
+                if zahltag.month != monat:
+                    zahltag = banktage[-1]  # Monatsende statt Überlauf in den Folgemonat
+                if zahltag not in zahltage:
+                    zahltage.append(zahltag)
+            d += timedelta(days=1)
+        anteil = Decimal("1") / len(zahltage) if zahltage else Decimal("0")
+        verteilung = {t: anteil for t in zahltage}
+    else:  # GLEICH
+        anteil = Decimal("1") / len(banktage)
+        verteilung = {t: anteil for t in banktage}
+    _verteilung_cache[key] = verteilung
+    return verteilung
+
+
 def plan_fluesse(
     db: Session,
     mandant: models.Mandant,
@@ -134,7 +202,7 @@ def plan_fluesse(
     from .insolvenzgeld import igeld_fenster, termin_entlastung
 
     igeld = igeld_fenster(mandant)
-    ein_f = (szenario.ein_faktor / Decimal("100")) if szenario else Decimal("1")
+    szenario_faktor = _szenario_aufloeser(szenario)
     verzoegerung = szenario.debitoren_verzoegerung_tage if szenario else 0
 
     if nur_offen:
@@ -175,7 +243,8 @@ def plan_fluesse(
         if d > ende:
             continue
         if p.art == PostenArt.DEBITOR.value:
-            betrag = (grundbetrag * ein_f).quantize(CENT)
+            f = szenario_faktor(konto_by_id.get(p.konto_id), Richtung.EIN.value)
+            betrag = (grundbetrag * f).quantize(CENT)
         else:
             betrag = -grundbetrag
         key: Key = p.konto_id if p.konto_id is not None else f"TERMIN:OP_{p.art}"
@@ -208,7 +277,8 @@ def plan_fluesse(
             ):
                 continue
             if db_.art == PostenArt.DEBITOR.value:
-                betrag = (db_.betrag_brutto * ein_f).quantize(CENT)
+                f = szenario_faktor(d_konto, Richtung.EIN.value)
+                betrag = (db_.betrag_brutto * f).quantize(CENT)
             else:
                 betrag = -db_.betrag_brutto
             key = db_.konto_id if db_.konto_id is not None else f"TERMIN:DAUER_{db_.art}"
@@ -319,8 +389,7 @@ def _budget_einarbeiten(
         wochen.append((w, min(w + timedelta(days=6), ende)))
         w += timedelta(days=7)
 
-    ein_f = (szenario.ein_faktor / Decimal("100")) if szenario else Decimal("1")
-    aus_f = (szenario.aus_faktor / Decimal("100")) if szenario else Decimal("1")
+    szenario_faktor = _szenario_aufloeser(szenario)
 
     for konto_id in konto_ids:
         konto = konto_by_id.get(konto_id)
@@ -330,7 +399,8 @@ def _budget_einarbeiten(
         if richtung == Richtung.INFO.value:
             continue
         vorzeichen = Decimal("1") if richtung == Richtung.EIN.value else Decimal("-1")
-        faktor = ein_f if richtung == Richtung.EIN.value else aus_f
+        faktor = szenario_faktor(konto, richtung)
+        profil = konto.verteilung if konto.verteilung in VERTEILUNGEN else "GLEICH"
         # Insolvenzgeld: Personal-/SV-Budgets im Zeitraum entfallen (tagesgenau)
         igeld_konto = (
             igeld
@@ -348,23 +418,34 @@ def _budget_einarbeiten(
             ]
             if not banktage:
                 banktage = [w_von]
-            # Tagesgenaue Basisverteilung (brutto): Wochen-Override gleichmäßig,
-            # sonst Monatsbudget je Bankarbeitstag des jeweiligen Monats
+            # Tagesgenaue Basisverteilung (brutto) gemäß Verteilungsprofil
             basis: dict[date, Decimal] = {}
             if (konto_id, iso.year, iso.week) in overrides:
                 netto = abs(overrides[(konto_id, iso.year, iso.week)])
                 if netto:
-                    anteil = _brutto(netto, konto.ust_satz) * faktor / len(banktage)
-                    for d in banktage:
-                        basis[d] = anteil
+                    # Wochen-Override: wöchentliche Profile auf den Zahltag der
+                    # Woche, Monatsanker-Profile gleichmäßig auf die Banktage
+                    if profil in _WOCHENTAG:
+                        ziel = w_von + timedelta(days=_WOCHENTAG[profil])
+                        ziel = naechster_bankarbeitstag(ziel, bl)
+                        if ziel > w_bis:
+                            ziel = banktage[-1]
+                        zieltage = [ziel]
+                    else:
+                        zieltage = banktage
+                    anteil = _brutto(netto, konto.ust_satz) * faktor / len(zieltage)
+                    for d in zieltage:
+                        basis[d] = basis.get(d, Decimal("0")) + anteil
             else:
-                for d in banktage:
+                for d in (w_von + timedelta(days=i) for i in range(7)):
+                    if d > w_bis:
+                        continue
                     mb = monat_budget.get((konto_id, d.year, d.month))
                     if mb is None:
                         continue
-                    bt = bankarbeitstage_anzahl(d.year, d.month, bl)
-                    if bt:
-                        basis[d] = _brutto(abs(mb), konto.ust_satz) * faktor / bt
+                    anteil = _monats_verteilung(d.year, d.month, profil, bl).get(d)
+                    if anteil:
+                        basis[d] = _brutto(abs(mb), konto.ust_satz) * faktor * anteil
             if igeld_konto:
                 for d in list(basis):
                     if igeld_konto[0] <= d <= igeld_konto[1]:
@@ -663,6 +744,7 @@ def berechne_plan(
                 "ein_faktor": _f(szenario.ein_faktor),
                 "aus_faktor": _f(szenario.aus_faktor),
                 "debitoren_verzoegerung_tage": szenario.debitoren_verzoegerung_tage,
+                "regeln_anzahl": len(szenario.regeln),
             }
             if szenario else None
         ),

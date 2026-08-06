@@ -197,6 +197,7 @@ def konten_liste(
                 "gruppe_id": k.gruppe_id,
                 "kreditlinie": float(k.kreditlinie or 0),
                 "iban": k.iban,
+                "verteilung": k.verteilung,
                 "liquiditaetswirksam": k.liquiditaetswirksam,
                 "aktiv": k.aktiv,
             }
@@ -277,6 +278,11 @@ def konto_aendern(
             konto.kreditlinie = _dec(wert, feld)
         elif feld == "iban":
             konto.iban = bank.normalisiere_iban(str(wert)) or None if wert else None
+        elif feld == "verteilung":
+            from ..services.liquiditaet import VERTEILUNGEN
+
+            _enum_pruefen(wert, VERTEILUNGEN, feld)
+            konto.verteilung = wert
         elif feld == "typ":
             if wert not in [t.value for t in models.KontoTyp]:
                 raise HTTPException(422, "Unbekannter Kontotyp")
@@ -1229,7 +1235,7 @@ def regel_aendern(
             r.konto_id = wert
         elif feld in {"aktiv", "betrag_modus"}:
             if feld == "betrag_modus":
-                _enum_pruefen(wert, ["FIX", "HISTORIE"], feld)
+                _enum_pruefen(wert, ["FIX", "HISTORIE", "BUDGET"], feld)
             setattr(r, feld, wert)
     db.commit()
     return {"ok": True}
@@ -1344,9 +1350,77 @@ def szenarien_liste(
             "ein_faktor": float(s.ein_faktor),
             "aus_faktor": float(s.aus_faktor),
             "debitoren_verzoegerung_tage": s.debitoren_verzoegerung_tage,
+            "regeln_anzahl": len(s.regeln),
         }
         for s in szenarien
     ]
+
+
+@router.get("/szenarien/{szenario_id}/regeln")
+def szenario_regeln_liste(
+    szenario_id: int,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    s = db.get(models.Szenario, szenario_id)
+    if s is None:
+        raise HTTPException(404, "Szenario nicht gefunden")
+    mandant_oder_403(db, benutzer, s.mandant_id)
+    return [
+        {
+            "id": r.id,
+            "konto_id": r.konto_id,
+            "gruppe_id": r.gruppe_id,
+            "faktor": float(r.faktor),
+        }
+        for r in s.regeln
+    ]
+
+
+class SzenarioRegelNeu(BaseModel):
+    konto_id: int | None = None
+    gruppe_id: int | None = None
+    faktor: float = 100
+
+
+@router.put("/szenarien/{szenario_id}/regeln")
+def szenario_regeln_speichern(
+    szenario_id: int,
+    regeln: list[SzenarioRegelNeu],
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Ersetzt alle Detailregeln des Szenarios (leere Liste löscht alle)."""
+    nur_schreibend(benutzer)
+    s = db.get(models.Szenario, szenario_id)
+    if s is None:
+        raise HTTPException(404, "Szenario nicht gefunden")
+    mandant_oder_403(db, benutzer, s.mandant_id)
+    gesehen: set[tuple] = set()
+    neue: list[models.SzenarioRegel] = []
+    for r in regeln:
+        if (r.konto_id is None) == (r.gruppe_id is None):
+            raise HTTPException(422, "Je Regel genau ein Konto ODER eine Gruppe angeben")
+        if not (0 <= r.faktor <= 500):
+            raise HTTPException(422, "Faktor muss zwischen 0 und 500 Prozent liegen")
+        if r.konto_id is not None:
+            _konto_pruefen(db, s.mandant_id, r.konto_id)
+        else:
+            gruppe = db.get(models.KontoGruppe, r.gruppe_id)
+            if gruppe is None or gruppe.mandant_id != s.mandant_id:
+                raise HTTPException(422, "Ungültige Gruppe")
+        schluessel = ("K", r.konto_id) if r.konto_id else ("G", r.gruppe_id)
+        if schluessel in gesehen:
+            raise HTTPException(422, "Doppelte Regel für dasselbe Konto/dieselbe Gruppe")
+        gesehen.add(schluessel)
+        neue.append(models.SzenarioRegel(
+            konto_id=r.konto_id, gruppe_id=r.gruppe_id,
+            faktor=_dec(r.faktor, "faktor"),
+        ))
+    s.regeln = neue
+    audit(db, benutzer, s.mandant_id, "SZENARIO_REGELN", f"{s.name}: {len(neue)} Regeln")
+    db.commit()
+    return {"anzahl": len(neue)}
 
 
 class SzenarioNeu(BaseModel):
@@ -1610,6 +1684,110 @@ def sollist_abrufen(
         raise HTTPException(404, str(e))
 
 
+# ---------------------------------------------------------------- Profil / 2FA
+
+class PasswortWechsel(BaseModel):
+    aktuelles_passwort: str
+    neues_passwort: str
+
+
+@router.post("/profil/passwort")
+def eigenes_passwort_aendern(
+    daten: PasswortWechsel,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    from ..security import pruefe_passwort
+
+    if not pruefe_passwort(daten.aktuelles_passwort, benutzer.passwort_hash):
+        raise HTTPException(403, "Aktuelles Passwort falsch")
+    if len(daten.neues_passwort) < 8:
+        raise HTTPException(422, "Passwort muss mindestens 8 Zeichen haben")
+    benutzer.passwort_hash = hash_passwort(daten.neues_passwort)
+    audit(db, benutzer, None, "PASSWORT_GEAENDERT")
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/profil")
+def profil_abrufen(benutzer=Depends(aktueller_benutzer)):
+    return {
+        "email": benutzer.email,
+        "name": benutzer.name,
+        "rolle": benutzer.rolle,
+        "totp_aktiv": benutzer.totp_aktiv,
+    }
+
+
+@router.post("/profil/2fa/einrichten")
+def zwei_faktor_einrichten(
+    benutzer=Depends(aktueller_benutzer), db: Session = Depends(get_db)
+):
+    """Erzeugt ein neues TOTP-Geheimnis (aktiv erst nach Bestätigung)."""
+    import segno
+
+    from ..services import totp
+
+    if benutzer.totp_aktiv:
+        raise HTTPException(409, "2FA ist bereits aktiv – zuerst deaktivieren")
+    geheimnis = totp.neues_geheimnis()
+    benutzer.totp_geheimnis = geheimnis
+    benutzer.totp_letzter_schritt = 0
+    db.commit()
+    uri = totp.otpauth_uri(geheimnis, benutzer.email)
+    return {
+        "geheimnis": geheimnis,
+        "uri": uri,
+        "qr_svg": segno.make(uri).svg_data_uri(scale=4),
+    }
+
+
+class ZweiFaktorCode(BaseModel):
+    code: str
+
+
+@router.post("/profil/2fa/bestaetigen")
+def zwei_faktor_bestaetigen(
+    daten: ZweiFaktorCode,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    from ..services import totp
+
+    if not benutzer.totp_geheimnis:
+        raise HTTPException(409, "Zuerst 2FA einrichten")
+    schritt = totp.pruefe_code(benutzer.totp_geheimnis, daten.code)
+    if schritt is None:
+        raise HTTPException(422, "Code ungültig – bitte erneut versuchen")
+    benutzer.totp_aktiv = True
+    benutzer.totp_letzter_schritt = schritt
+    audit(db, benutzer, None, "2FA_AKTIVIERT")
+    db.commit()
+    return {"ok": True}
+
+
+class ZweiFaktorDeaktivierung(BaseModel):
+    passwort: str
+
+
+@router.post("/profil/2fa/deaktivieren")
+def zwei_faktor_deaktivieren(
+    daten: ZweiFaktorDeaktivierung,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    from ..security import pruefe_passwort
+
+    if not pruefe_passwort(daten.passwort, benutzer.passwort_hash):
+        raise HTTPException(403, "Passwort falsch")
+    benutzer.totp_aktiv = False
+    benutzer.totp_geheimnis = None
+    benutzer.totp_letzter_schritt = 0
+    audit(db, benutzer, None, "2FA_DEAKTIVIERT")
+    db.commit()
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- Sicherungen (Admin)
 
 @router.get("/backups")
@@ -1712,6 +1890,7 @@ def benutzer_liste(admin=Depends(nur_admin), db: Session = Depends(get_db)):
             "name": b.name,
             "rolle": b.rolle,
             "aktiv": b.aktiv,
+            "totp_aktiv": b.totp_aktiv,
             "mandanten_ids": [m.id for m in b.mandanten],
         }
         for b in benutzer
@@ -1768,6 +1947,11 @@ def benutzer_aendern(
             b.mandanten = [
                 m for mid in wert if (m := db.get(models.Mandant, mid)) is not None
             ]
+        elif feld == "totp_zuruecksetzen" and wert:
+            # Geräteverlust: Admin setzt 2FA zurück, Benutzer richtet neu ein
+            b.totp_aktiv = False
+            b.totp_geheimnis = None
+            b.totp_letzter_schritt = 0
         elif feld in {"name", "aktiv"}:
             setattr(b, feld, wert)
     audit(db, admin, None, "BENUTZER_GEAENDERT", b.email)

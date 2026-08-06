@@ -23,7 +23,7 @@
   </form>
   <div style="height:10px"></div>
   <table class="liste">
-    <thead><tr><th>E-Mail</th><th>Name</th><th>Rolle</th><th>Mandanten</th><th>aktiv</th><th></th></tr></thead>
+    <thead><tr><th>E-Mail</th><th>Name</th><th>Rolle</th><th>Mandanten</th><th>aktiv</th><th>2FA</th><th></th></tr></thead>
     <tbody id="tabelle"></tbody>
   </table>
 
@@ -64,11 +64,21 @@ async function lade() {
     tr.innerHTML = `<td>${esc(b.email)}</td><td>${esc(b.name)}</td><td>${esc(b.rolle)}</td>
       <td class="klein">${b.rolle === "ADMIN" ? "alle" : esc(b.mandanten_ids.map(id => MANDANTEN[id] || id).join(", ")) || "–"}</td>
       <td>${b.aktiv ? "✓" : "–"}</td>
-      <td><button class="sekundaer" data-id="${b.id}" data-aktiv="${b.aktiv}">${b.aktiv ? "sperren" : "entsperren"}</button></td>`;
+      <td>${b.totp_aktiv ? "✓" : "–"}</td>
+      <td><button class="sekundaer" data-aktion="sperren" data-id="${b.id}" data-aktiv="${b.aktiv}">${b.aktiv ? "sperren" : "entsperren"}</button>
+        ${b.totp_aktiv ? `<button class="sekundaer" data-aktion="totp" data-id="${b.id}" title="Bei Geräteverlust: 2FA zurücksetzen">2FA zurücksetzen</button>` : ""}</td>`;
     tb.appendChild(tr);
   }
   tb.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
-    try { await api("PATCH", `/api/benutzer/${btn.dataset.id}`, { aktiv: btn.dataset.aktiv !== "true" }); lade(); }
+    try {
+      if (btn.dataset.aktion === "totp") {
+        if (!confirm("2FA für diesen Benutzer zurücksetzen?")) return;
+        await api("PATCH", `/api/benutzer/${btn.dataset.id}`, { totp_zuruecksetzen: true });
+      } else {
+        await api("PATCH", `/api/benutzer/${btn.dataset.id}`, { aktiv: btn.dataset.aktiv !== "true" });
+      }
+      lade();
+    }
     catch (e) { toast(e.message); }
   }));
 }

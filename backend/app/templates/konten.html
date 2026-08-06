@@ -18,7 +18,8 @@
   <table class="liste" id="tabelle">
     <thead><tr>
       <th>Nummer</th><th>Bezeichnung</th><th>Typ</th><th class="zahl">USt %</th>
-      <th>Gruppe</th><th class="zahl">Kreditlinie</th><th>IBAN (Bank)</th>
+      <th>Gruppe</th><th title="Verteilung des Monatsbudgets auf Zahltage">Budget-Verteilung</th>
+      <th class="zahl">Kreditlinie</th><th>IBAN (Bank)</th>
       <th>liq.wirksam</th><th>aktiv</th>
     </tr></thead>
     <tbody></tbody>
@@ -40,6 +41,15 @@ function gruppeSelect(wert) {
   return `<select data-feld="gruppe_id"><option value="">–</option>` + gruppen.map(g =>
     `<option value="${g.id}" ${g.id===wert?"selected":""}>${esc(g.name)}</option>`).join("") + `</select>`;
 }
+const VERTEILUNGEN = {
+  GLEICH: "gleichmäßig", MONATSANFANG: "Monatsanfang", MONATSMITTE: "Monatsmitte",
+  MONATSENDE: "Monatsende", WTAG_MO: "montags", WTAG_DI: "dienstags",
+  WTAG_MI: "mittwochs", WTAG_DO: "donnerstags", WTAG_FR: "freitags",
+};
+function verteilungSelect(wert) {
+  return `<select data-feld="verteilung">` + Object.entries(VERTEILUNGEN).map(([w, name]) =>
+    `<option value="${w}" ${w===wert?"selected":""}>${name}</option>`).join("") + `</select>`;
+}
 
 async function lade() {
   const d = await api("GET", `/api/mandanten/${MANDANT_ID}/konten`);
@@ -60,6 +70,7 @@ async function lade() {
       <td>${typSelect(k.typ)}</td>
       <td class="zahl"><input data-feld="ust_satz" type="number" step="0.01" min="0" max="100" style="width:70px" value="${k.ust_satz ?? ""}"></td>
       <td>${gruppeSelect(k.gruppe_id)}</td>
+      <td>${verteilungSelect(k.verteilung)}</td>
       <td class="zahl"><input data-feld="kreditlinie" type="number" step="0.01" style="width:100px" value="${k.kreditlinie || ""}"></td>
       <td><input data-feld="iban" style="width:210px" placeholder="${k.typ === "BANK" ? "DE.." : ""}" value="${esc(k.iban)}"></td>
       <td><input data-feld="liquiditaetswirksam" type="checkbox" ${k.liquiditaetswirksam?"checked":""}></td>

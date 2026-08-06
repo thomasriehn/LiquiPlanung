@@ -113,6 +113,17 @@ def einstellungen_seite(request: Request, mandant_id: int, db: Session = Depends
     )
 
 
+@router.get("/profil")
+def profil_seite(request: Request, db: Session = Depends(get_db)):
+    benutzer = _benutzer_oder_login(request, db)
+    if benutzer is None:
+        return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse(
+        request, "profil.html",
+        {"benutzer": benutzer, "ist_admin": ist_admin(benutzer)},
+    )
+
+
 @router.get("/benutzer")
 def benutzer_seite(request: Request, db: Session = Depends(get_db)):
     benutzer = _benutzer_oder_login(request, db)

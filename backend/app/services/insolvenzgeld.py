@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import models
-from .feiertage import bankarbeitstage_im_monat, naechster_bankarbeitstag
+from .feiertage import naechster_bankarbeitstag
 from .zahlungskalender import _monat_plus  # Monatsarithmetik
 
 CENT = Decimal("0.01")
@@ -173,7 +173,10 @@ def vorschau(
                     }
                 )
 
-    # 3) Budgets auf Personalkonten: Bankarbeitstags-Anteile im Fenster und Zeitraum
+    # 3) Budgets auf Personalkonten: Tagesanteile gemäß Verteilungsprofil des
+    #    Kontos (z. B. Lohnlauf am Monatsende) im Fenster und Zeitraum
+    from .liquiditaet import VERTEILUNGEN, _monats_verteilung
+
     budgets = db.scalars(
         select(models.Budget).where(models.Budget.mandant_id == mandant.id)
     )
@@ -181,18 +184,19 @@ def vorschau(
         konto = konten.get(b.konto_id)
         if konto is None or b.konto_id not in personal_ids or not konto.aktiv:
             continue
-        banktage = bankarbeitstage_im_monat(b.jahr, b.monat, bl)
-        if not banktage:
-            continue
-        betroffen = [
-            d for d in banktage if start <= d <= ende and f_von <= d <= f_bis
-        ]
-        if not betroffen:
+        profil = konto.verteilung if konto.verteilung in VERTEILUNGEN else "GLEICH"
+        verteilung = _monats_verteilung(b.jahr, b.monat, profil, bl)
+        anteil = sum(
+            (a for d, a in verteilung.items()
+             if start <= d <= ende and f_von <= d <= f_bis),
+            Decimal("0"),
+        )
+        if anteil <= 0:
             continue
         brutto = b.betrag_netto  # Personalkonten ohne USt
         if konto.ust_satz is not None:
             brutto = brutto * (Decimal("100") + konto.ust_satz) / Decimal("100")
-        entlastung = (abs(brutto) * Decimal(len(betroffen)) / Decimal(len(banktage))).quantize(CENT)
+        entlastung = (abs(brutto) * anteil).quantize(CENT)
         summen["personal_budget"] += entlastung
         positionen.append(
             {

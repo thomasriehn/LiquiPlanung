@@ -105,6 +105,61 @@ def steuertermine(
     )
 
 
+def _periode_monate(periode: str) -> list[tuple[int, int]]:
+    """'2026-05' -> [(2026, 5)]; '2026-Q3' -> [(2026, 7), (2026, 8), (2026, 9)]."""
+    try:
+        jahr_teil, rest = periode.split("-")
+        jahr = int(jahr_teil)
+        if rest.startswith("Q"):
+            q = int(rest[1:])
+            return [(jahr, (q - 1) * 3 + i) for i in (1, 2, 3)]
+        return [(jahr, int(rest))]
+    except (ValueError, AttributeError):
+        return []
+
+
+def ust_zahllast_aus_budget(
+    db: Session, mandant: models.Mandant, monate: list[tuple[int, int]]
+) -> Decimal | None:
+    """Erwartete USt-Zahllast des Zeitraums aus der Budgetplanung.
+
+    Umsatzsteuer auf Erlösbudgets minus Vorsteuer auf Aufwands-/Investitions-
+    budgets (jeweils Netto-Budget × USt-Satz des Kontos). Negativ = erwartete
+    Erstattung. None, wenn keine umsatzsteuerrelevanten Budgets vorliegen.
+    """
+    from .liquiditaet import _konto_richtung
+
+    if not monate:
+        return None
+    konten = {
+        k.id: k
+        for k in db.scalars(
+            select(models.Konto).where(
+                models.Konto.mandant_id == mandant.id, models.Konto.aktiv.is_(True)
+            )
+        )
+    }
+    zahllast = Decimal("0")
+    gefunden = False
+    for b in db.scalars(
+        select(models.Budget).where(models.Budget.mandant_id == mandant.id)
+    ):
+        if (b.jahr, b.monat) not in monate:
+            continue
+        konto = konten.get(b.konto_id)
+        if konto is None or konto.ust_satz is None or konto.ust_satz <= 0:
+            continue
+        richtung = _konto_richtung(konto)
+        steuer = abs(b.betrag_netto) * konto.ust_satz / Decimal("100")
+        if richtung == models.Richtung.EIN.value:
+            zahllast += steuer
+            gefunden = True
+        elif richtung == models.Richtung.AUS.value:
+            zahllast -= steuer
+            gefunden = True
+    return zahllast.quantize(Decimal("0.01")) if gefunden else None
+
+
 def _historien_schaetzung(
     db: Session, mandant: models.Mandant, konto: models.Konto | None, heute: date
 ) -> Decimal:
@@ -176,7 +231,10 @@ def generiere_termine(
         if (v.typ, v.periode) in vorhandene_perioden or (v.typ, v.datum) in vorhandene_daten:
             uebersprungen += 1
             continue
-        if regel.betrag_modus == "HISTORIE":
+        if regel.betrag_modus == "BUDGET" and v.typ == TerminTyp.UST_VA.value:
+            zahllast = ust_zahllast_aus_budget(db, mandant, _periode_monate(v.periode))
+            betrag = zahllast if zahllast is not None else (regel.betrag_fix or Decimal("0"))
+        elif regel.betrag_modus == "HISTORIE":
             betrag = _historien_schaetzung(db, mandant, regel.konto, heute)
             if betrag == 0:
                 betrag = regel.betrag_fix or Decimal("0")

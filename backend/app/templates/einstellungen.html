@@ -76,8 +76,31 @@
   {% endif %}
   <table class="liste">
     <thead><tr><th>Name</th><th class="zahl">Einzahlungen %</th><th class="zahl">Var. Auszahlungen %</th>
-      <th class="zahl">Debitoren +Tage</th><th>Kommentar</th><th></th></tr></thead>
+      <th class="zahl">Debitoren +Tage</th><th>Kommentar</th><th>Detailregeln</th><th></th></tr></thead>
     <tbody id="szenarien"></tbody>
+  </table>
+
+  <h2>Szenario-Detailregeln</h2>
+  <p class="hinweis">
+    Eigener Faktor je Konto oder BWA-Gruppe – Vorrang: Konto-Regel vor Gruppen-Regel
+    vor globalem Faktor. Der Faktor wirkt überall dort, wo der globale Faktor für das
+    Konto greifen würde (Budgets; bei Einzahlungen auch Forderungen und Dauererlöse).
+  </p>
+  <div class="werkzeuge">
+    <label>Szenario <select id="regel-szenario"></select></label>
+    {% if not leser %}<button id="regeln-speichern">Regeln speichern</button>{% endif %}
+  </div>
+  {% if not leser %}
+  <form id="regel-form" class="formular-zeilen">
+    <label>Konto<select name="konto_id" id="regel-konto"><option value="">–</option></select></label>
+    <label>oder Gruppe<select name="gruppe_id" id="regel-gruppe"><option value="">–</option></select></label>
+    <label>Faktor %<input type="number" name="faktor" step="1" min="0" max="500" value="100"></label>
+    <button type="submit" class="sekundaer">Regel hinzufügen</button>
+  </form>
+  {% endif %}
+  <table class="liste">
+    <thead><tr><th>Ziel</th><th class="zahl">Faktor %</th><th></th></tr></thead>
+    <tbody id="regel-liste"></tbody>
   </table>
 
   <h2>Bestände (Anker für die Fortschreibung)</h2>
@@ -176,11 +199,14 @@ async function ladeIgeldVorschau() {
 document.getElementById("igeld-vorschau-knopf").addEventListener("click", ladeIgeldVorschau);
 
 // ---- Szenarien ----
+let szenarienListe = [];
+let regelEntwurf = [];
+
 async function ladeSzenarien() {
-  const szenarien = await api("GET", `/api/mandanten/${MANDANT_ID}/szenarien`);
+  szenarienListe = await api("GET", `/api/mandanten/${MANDANT_ID}/szenarien`);
   const tb = document.getElementById("szenarien");
   tb.innerHTML = "";
-  for (const s of szenarien) {
+  for (const s of szenarienListe) {
     const tr = document.createElement("tr");
     tr.dataset.id = s.id;
     tr.innerHTML = `
@@ -189,6 +215,7 @@ async function ladeSzenarien() {
       <td class="zahl"><input data-feld="aus_faktor" type="number" step="1" min="0" max="500" style="width:80px" value="${s.aus_faktor}" ${LESER ? "disabled" : ""}></td>
       <td class="zahl"><input data-feld="debitoren_verzoegerung_tage" type="number" step="1" min="0" max="180" style="width:70px" value="${s.debitoren_verzoegerung_tage}" ${LESER ? "disabled" : ""}></td>
       <td><input data-feld="kommentar" value="${esc(s.kommentar)}" ${LESER ? "disabled" : ""}></td>
+      <td class="zahl">${s.regeln_anzahl || "–"}</td>
       <td>${LESER ? "" : `<button class="gefahr" data-id="${s.id}">✕</button>`}</td>`;
     tb.appendChild(tr);
   }
@@ -197,7 +224,81 @@ async function ladeSzenarien() {
     try { await api("DELETE", `/api/szenarien/${btn.dataset.id}`); ladeSzenarien(); }
     catch (e) { toast(e.message); }
   }));
+  const sel = document.getElementById("regel-szenario");
+  const vorher = sel.value;
+  sel.innerHTML = szenarienListe.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join("");
+  if (vorher && szenarienListe.some(s => String(s.id) === vorher)) sel.value = vorher;
+  if (szenarienListe.length) ladeRegeln();
+  else document.getElementById("regel-liste").innerHTML = "";
 }
+
+// ---- Detailregeln ----
+function regelZiel(r) {
+  if (r.konto_id) {
+    const k = konten.find(k => k.id === r.konto_id);
+    return k ? `Konto ${esc(k.nummer + " " + k.bezeichnung)}` : `Konto #${r.konto_id}`;
+  }
+  const g = (window.gruppenListe || []).find(g => g.id === r.gruppe_id);
+  return g ? `Gruppe ${esc(g.name)}` : `Gruppe #${r.gruppe_id}`;
+}
+
+function zeichneRegeln() {
+  const tb = document.getElementById("regel-liste");
+  tb.innerHTML = "";
+  regelEntwurf.forEach((r, i) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${regelZiel(r)}</td>
+      <td class="zahl"><input type="number" step="1" min="0" max="500" style="width:80px"
+        value="${r.faktor}" data-index="${i}" ${LESER ? "disabled" : ""}></td>
+      <td>${LESER ? "" : `<button class="gefahr" data-index="${i}">✕</button>`}</td>`;
+    tb.appendChild(tr);
+  });
+  if (!regelEntwurf.length) {
+    tb.innerHTML = `<tr><td colspan="3" class="hinweis">Keine Detailregeln – es gelten die globalen Faktoren.</td></tr>`;
+  }
+  tb.querySelectorAll("input[data-index]").forEach(el => el.addEventListener("change", () => {
+    regelEntwurf[parseInt(el.dataset.index)].faktor = parseFloat(el.value);
+  }));
+  tb.querySelectorAll("button[data-index]").forEach(btn => btn.addEventListener("click", () => {
+    regelEntwurf.splice(parseInt(btn.dataset.index), 1);
+    zeichneRegeln();
+  }));
+}
+
+async function ladeRegeln() {
+  const sid = document.getElementById("regel-szenario").value;
+  if (!sid) return;
+  regelEntwurf = await api("GET", `/api/szenarien/${sid}/regeln`);
+  zeichneRegeln();
+}
+
+document.getElementById("regel-szenario").addEventListener("change", ladeRegeln);
+
+const regelForm = document.getElementById("regel-form");
+if (regelForm) regelForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const f = new FormData(regelForm);
+  const kontoId = f.get("konto_id") ? parseInt(f.get("konto_id")) : null;
+  const gruppeId = f.get("gruppe_id") ? parseInt(f.get("gruppe_id")) : null;
+  if ((kontoId === null) === (gruppeId === null)) {
+    toast("Bitte genau ein Konto ODER eine Gruppe wählen."); return;
+  }
+  regelEntwurf.push({ konto_id: kontoId, gruppe_id: gruppeId, faktor: parseFloat(f.get("faktor")) });
+  regelForm.reset();
+  zeichneRegeln();
+});
+
+const regelnSpeichern = document.getElementById("regeln-speichern");
+if (regelnSpeichern) regelnSpeichern.addEventListener("click", async () => {
+  const sid = document.getElementById("regel-szenario").value;
+  if (!sid) { toast("Kein Szenario gewählt."); return; }
+  try {
+    await api("PUT", `/api/szenarien/${sid}/regeln`,
+      regelEntwurf.map(r => ({ konto_id: r.konto_id, gruppe_id: r.gruppe_id, faktor: r.faktor })));
+    toast("Detailregeln gespeichert.", false);
+    ladeSzenarien();
+  } catch (e) { toast(e.message); }
+});
 
 document.getElementById("szenarien").addEventListener("change", async (e) => {
   const feld = e.target.dataset.feld;
@@ -225,7 +326,6 @@ if (szenarioForm) szenarioForm.addEventListener("submit", async (e) => {
     ladeSzenarien();
   } catch (err) { toast(err.message); }
 });
-ladeSzenarien();
 
 async function ladeBestaende() {
   const bestaende = await api("GET", `/api/mandanten/${MANDANT_ID}/bestaende`);
@@ -270,8 +370,17 @@ function fuelleKonten() {
 
 api("GET", `/api/mandanten/${MANDANT_ID}/konten`).then(d => {
   konten = d.konten;
+  window.gruppenListe = d.gruppen;
+  const rk = document.getElementById("regel-konto");
+  if (rk) {
+    rk.innerHTML = `<option value="">–</option>` + konten.filter(k => k.aktiv).map(k =>
+      `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}</option>`).join("");
+    document.getElementById("regel-gruppe").innerHTML = `<option value="">–</option>` +
+      d.gruppen.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join("");
+  }
   fuelleKonten();
   ladeBestaende();
+  ladeSzenarien();
 });
 </script>
 {% endblock %}

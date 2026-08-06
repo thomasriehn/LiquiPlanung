@@ -37,6 +37,49 @@ def login(
             status_code=401,
         )
     request.session.clear()
+    if benutzer.totp_aktiv and benutzer.totp_geheimnis:
+        # Passwort korrekt, aber noch keine Sitzung: zweiter Faktor erforderlich
+        request.session["zwei_faktor_benutzer_id"] = benutzer.id
+        return RedirectResponse("/login/2fa", status_code=303)
+    request.session["benutzer_id"] = benutzer.id
+    audit(db, benutzer, None, "LOGIN")
+    db.commit()
+    return RedirectResponse("/", status_code=303)
+
+
+@router.get("/login/2fa")
+def zwei_faktor_seite(request: Request):
+    if not request.session.get("zwei_faktor_benutzer_id"):
+        return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse(request, "login2fa.html", {"fehler": None})
+
+
+@router.post("/login/2fa")
+def zwei_faktor_pruefen(
+    request: Request,
+    code: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    from ..services import totp
+
+    benutzer_id = request.session.get("zwei_faktor_benutzer_id")
+    benutzer = db.get(models.Benutzer, benutzer_id) if benutzer_id else None
+    if benutzer is None or not benutzer.aktiv or not benutzer.totp_geheimnis:
+        request.session.clear()
+        return RedirectResponse("/login", status_code=303)
+    schritt = totp.pruefe_code(
+        benutzer.totp_geheimnis, code, benutzer.totp_letzter_schritt or 0
+    )
+    if schritt is None:
+        audit(db, benutzer, None, "LOGIN_2FA_FEHLGESCHLAGEN")
+        db.commit()
+        return templates.TemplateResponse(
+            request, "login2fa.html",
+            {"fehler": "Code ungültig oder bereits verwendet."},
+            status_code=401,
+        )
+    benutzer.totp_letzter_schritt = schritt
+    request.session.clear()
     request.session["benutzer_id"] = benutzer.id
     audit(db, benutzer, None, "LOGIN")
     db.commit()

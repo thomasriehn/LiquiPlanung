@@ -28,10 +28,13 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   an die Schema-Revision gebunden, mit automatischer Vorab-Sicherung.
 - **Kontenrahmen** SKR03/SKR04 als editierbare Vorlage je Mandant, USt-Satz je Konto.
 - **Planbasis**: offene Eingangsrechnungen/Forderungen, Dauerverbindlichkeiten,
-  Budget je Konto/Monat (Restbudget-Logik, Netto→Brutto über USt-Satz).
+  Budget je Konto/Monat (Restbudget-Logik, Netto→Brutto über USt-Satz) mit
+  Verteilungsprofil je Konto (gleichmäßig, Monatsanfang/-mitte/-ende,
+  wöchentlicher Zahllauf z. B. freitags).
 - **Zahlungskalender**: SV-Beiträge (drittletzter Bankarbeitstag, Feiertage je
-  Bundesland), USt-VA (Monat/Quartal, Dauerfrist), LSt, GewSt, KSt – Beträge fest oder
-  aus Historie geschätzt, Termine einzeln anpassbar.
+  Bundesland), USt-VA (Monat/Quartal, Dauerfrist), LSt, GewSt, KSt – Beträge fest,
+  aus Historie geschätzt oder (USt-VA) als Zahllast-Vorschau aus dem Budget;
+  Termine einzeln anpassbar.
 - **Insolvenzspezifisch**: Forderungsklassen je Posten (§ 38 / § 55 InsO, Aus-/Absonderung)
   mit Zahlungssperre für Insolvenzforderungen und automatischer Vorbelegung anhand des
   Insolvenz-Stichtags; gesperrte Summen werden nachrichtlich ausgewiesen.
@@ -40,11 +43,14 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   (§§ 165 ff., 175 SGB III), mit Entlastungsvorschau je Position.
 - **Szenarien (Best/Base/Worst)**: Faktoren auf Einzahlungen und variable Auszahlungen,
   Debitorenverzögerung; umschaltbar auf der Plan-Seite, im Export vermerkt; Soll/Ist
-  bleibt auf dem Basisplan. Eigene **Vergleichsansicht** mit allen Szenarien
+  bleibt auf dem Basisplan. Detailregeln je Konto/BWA-Gruppe übersteuern die globalen
+  Faktoren. Eigene **Vergleichsansicht** mit allen Szenarien
   nebeneinander (Liquidität je Wochenende, Netto-Cashflow, minimale Liquidität).
 - **Export**: 13-Wochen-Plan als Excel-Arbeitsmappe (Tage, Wochen mit Plan/Ist/Δ,
   Soll-Ist) und als PDF-Bericht für Gericht, Sachwalter, Gläubigerausschuss.
-- **Mehrbenutzerbetrieb**: Rollen Admin/Bearbeiter/Leser, Mandantenzuordnung, Audit-Log.
+- **Mehrbenutzerbetrieb**: Rollen Admin/Bearbeiter/Leser, Mandantenzuordnung, Audit-Log,
+  Profil mit Passwortwechsel und optionaler Zwei-Faktor-Anmeldung (TOTP mit
+  QR-Einrichtung; Admin-Reset bei Geräteverlust).
 
 ## Schnellstart (Docker)
 

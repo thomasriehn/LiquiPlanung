@@ -61,8 +61,10 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
 8. ✔ **Szenarien (Best/Base/Worst):** Je Mandant definierbare Planvarianten mit
    Faktoren auf geplante Einzahlungen und budgetbasierte (variable) Auszahlungen sowie
    Debitorenverzögerung in Tagen; vertraglich fixe Posten und Steuer-/SV-Termine
-   bleiben unverändert. Auswahl auf der Plan-Seite (inkl. Export-Vermerk); Snapshots
-   und Soll/Ist beziehen sich stets auf den Basisplan. Best-/Worst-Vorlagen werden je
+   bleiben unverändert. **Detailregeln je Konto oder BWA-Gruppe** übersteuern die
+   globalen Faktoren (Vorrang: Konto vor Gruppe vor global). Auswahl auf der
+   Plan-Seite (inkl. Export-Vermerk), eigene Vergleichsansicht; Snapshots und
+   Soll/Ist beziehen sich stets auf den Basisplan. Best-/Worst-Vorlagen werden je
    Mandant angelegt.
 9. ✔ **Bankdatenimport (MT940 / CAMT.053):** Kontoauszüge als tagesaktuelle
    Bestandsquelle unabhängig vom Buchhaltungsexport. Endsalden werden je Auszug als
@@ -94,15 +96,21 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
     den nächsten Werktag, wenn sie auf Sa/So/Feiertag fallen (§ 108 Abs. 3 AO).
 12. ✔ **USt-Zeitraum & Dauerfristverlängerung:** je Mandant monatlich/vierteljährlich,
     Dauerfristverlängerung (+1 Monat) konfigurierbar.
-13. ✔ **Beitrags-/Steuerhöhe:** Je Terminart eine Regel: fester Betrag oder Schätzung aus
-    der Historie (Durchschnitt der letzten Ist-Zahlungen auf den verknüpften Konten).
-    Generierte Termine sind einzeln übersteuerbar.
+13. ✔ **Beitrags-/Steuerhöhe:** Je Terminart eine Regel: fester Betrag, Schätzung aus
+    der Historie (Durchschnitt der letzten Ist-Zahlungen auf den verknüpften Konten)
+    oder – für die USt-VA – **Vorschau aus dem Budget** (USt auf Erlösbudgets minus
+    Vorsteuer auf Aufwands-/Investitionsbudgets des Voranmeldungszeitraums; negativ =
+    erwartete Erstattung). Generierte Termine sind einzeln übersteuerbar.
 14. → **USt-Sondervorauszahlung (1/11)** und Schonfristen: Ausbaustufe.
 
 **Technisch / organisatorisch**
 
 15. ✔ **Benutzer- und Rollenmodell:** Admin / Bearbeiter / Leser, Zuordnung von Benutzern
     zu Mandanten (Mandantentrennung auf Anwendungsebene, jede Abfrage mandantengefiltert).
+    Selbstverwaltung im Profil (Passwortwechsel) und optionale
+    **Zwei-Faktor-Anmeldung** (TOTP nach RFC 6238, QR-Einrichtung für gängige
+    Authenticator-Apps, Code-Wiederverwendungsschutz; Admin kann bei Geräteverlust
+    zurücksetzen).
 16. ✔ **Audit-Log:** Wesentliche Änderungen (Importe, Stammdaten, Snapshots) werden mit
     Benutzer und Zeitstempel protokolliert (GoBD-orientierte Nachvollziehbarkeit).
 17. ✔ **Import-Validierung:** Buchungen auf Konten ohne Stammsatz gehen nicht verloren,
@@ -186,8 +194,10 @@ dadurch entstehen die BWA-Zeilen. Bank-an-Bank = Umbuchung (nur Bestandsverschie
    auf Bankarbeitstag),
 3. Zahlungstermine aus dem Kalender (SV/Steuern; Deduplizierung über die fachliche
    Periode, damit manuell verschobene Termine bei Neugenerierung nicht doppeln),
-4. Budget: tagesgenaue Verteilung (Monatsbudget je Bankarbeitstag des Monats bzw.
-   Wochen-Override), wochenweise **gekürzt** um explizite Posten desselben Kontos
+4. Budget: tagesgenaue Verteilung gemäß **Verteilungsprofil je Konto** – gleichmäßig
+   je Bankarbeitstag, Monatsanfang/-mitte/-ende (z. B. Lohnlauf) oder wöchentlicher
+   Zahllauf an einem Wochentag (z. B. freitags); Wochen-Overrides folgen dem
+   Wochenprofil. Wochenweise **gekürzt** um explizite Posten desselben Kontos
    (Restbudget ≥ 0). Netto-Budgets werden über den USt-Satz des Kontos auf
    Brutto-Zahlungswirkung umgerechnet.
 
@@ -246,9 +256,12 @@ Vorbelegungen (USt-Sätze, Gruppenzuordnung) sind Vorschlagswerte und je Mandant
 - Session-Cookies signiert (`SECRET_KEY` zwingend setzen), Passwort-Hashing PBKDF2.
 - Betrieb hinter Reverse Proxy mit TLS empfohlen (siehe Deployment-Doku).
 
-## 10. Roadmap (bewusst noch nicht enthalten)
+## 10. Ausblick (mögliche weitere Ausbaustufen)
 
-1. 2-Faktor-Login.
-2. USt-Zahllast-Vorschau aus Budget (Erlöse × Satz − Vorsteuer) statt Historienschätzung.
-3. Feingranulare Verteilungsprofile für Budgets (z. B. Zahllauf freitags).
-4. Szenario-Detailregeln je Konto/Gruppe (statt globaler Faktoren).
+Die ursprüngliche Roadmap ist vollständig umgesetzt. Sinnvolle nächste Schritte:
+
+1. USt-Sondervorauszahlung (1/11) und Schonfristen im Zahlungskalender.
+2. Löschkonzept nach Verfahrensende (DSGVO) mit Mandanten-Archivierung.
+3. Optionale Übernahme von Bankumsätzen als Ist-Quelle für Mandanten ohne
+   laufende Buchhaltung (heute bewusst getrennt gehalten).
+4. Mehrsprachigkeit und Mandanten-Branding für Berichte.

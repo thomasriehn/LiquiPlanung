@@ -124,6 +124,11 @@ class Benutzer(Base):
     passwort_hash: Mapped[str] = mapped_column(String(512))
     rolle: Mapped[str] = mapped_column(String(20), default=Rolle.BEARBEITER.value)
     aktiv: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Zwei-Faktor-Anmeldung (TOTP): Geheimnis (Base32), aktiv erst nach Bestätigung;
+    # letzter akzeptierter Zeitschritt verhindert Code-Wiederverwendung
+    totp_geheimnis: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    totp_aktiv: Mapped[bool] = mapped_column(Boolean, default=False)
+    totp_letzter_schritt: Mapped[int] = mapped_column(Integer, default=0)
     erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     mandanten: Mapped[list["Mandant"]] = relationship(
@@ -195,6 +200,9 @@ class Konto(Base):
     kreditlinie: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
     # IBAN (nur Bankkonten): Zuordnung von MT940-/CAMT-Kontoauszügen
     iban: Mapped[str | None] = mapped_column(String(34), nullable=True)
+    # Budget-Verteilungsprofil: GLEICH (je Bankarbeitstag), MONATSANFANG/-MITTE/-ENDE,
+    # WTAG_MO..WTAG_FR (wöchentlicher Zahllauf an diesem Wochentag)
+    verteilung: Mapped[str] = mapped_column(String(16), default="GLEICH")
     liquiditaetswirksam: Mapped[bool] = mapped_column(Boolean, default=True)
     aktiv: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -467,6 +475,37 @@ class Szenario(Base):
     ein_faktor: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("100"))
     aus_faktor: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("100"))
     debitoren_verzoegerung_tage: Mapped[int] = mapped_column(Integer, default=0)
+
+    regeln: Mapped[list["SzenarioRegel"]] = relationship(
+        back_populates="szenario", cascade="all, delete-orphan"
+    )
+
+
+class SzenarioRegel(Base):
+    """Detailregel eines Szenarios: eigener Faktor je Konto oder BWA-Gruppe.
+
+    Vorrang: Konto-Regel vor Gruppen-Regel vor globalem Ein-/Aus-Faktor. Der
+    Faktor ersetzt den globalen Faktor überall dort, wo dieser für das Konto
+    greifen würde (Budgets, bei Einzahlungen auch Posten/Dauerbuchungen).
+    """
+
+    __tablename__ = "szenario_regeln"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    szenario_id: Mapped[int] = mapped_column(
+        ForeignKey("szenarien.id", ondelete="CASCADE"), index=True
+    )
+    konto_id: Mapped[int | None] = mapped_column(
+        ForeignKey("konten.id", ondelete="CASCADE"), nullable=True
+    )
+    gruppe_id: Mapped[int | None] = mapped_column(
+        ForeignKey("konto_gruppen.id", ondelete="CASCADE"), nullable=True
+    )
+    faktor: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("100"))
+
+    szenario: Mapped[Szenario] = relationship(back_populates="regeln")
+    konto: Mapped["Konto | None"] = relationship()
+    gruppe: Mapped["KontoGruppe | None"] = relationship()
 
 
 class AuditLog(Base):

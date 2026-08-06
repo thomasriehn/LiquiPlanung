@@ -33,7 +33,7 @@
   <div class="kopf-rechts">
     {% if benutzer is defined and benutzer %}
       {% if ist_admin %}<a href="/benutzer">Benutzer</a>{% endif %}
-      <span class="benutzer-name">{{ benutzer.name }}</span>
+      <a href="/profil" class="benutzer-name" title="Profil und Zwei-Faktor-Anmeldung">{{ benutzer.name }}</a>
       <a href="/logout">Abmelden</a>
     {% endif %}
   </div>
