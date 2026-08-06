@@ -18,7 +18,8 @@
   <table class="liste" id="tabelle">
     <thead><tr>
       <th>Nummer</th><th>Bezeichnung</th><th>Typ</th><th class="zahl">USt %</th>
-      <th>Gruppe</th><th class="zahl">Kreditlinie</th><th>liq.wirksam</th><th>aktiv</th>
+      <th>Gruppe</th><th class="zahl">Kreditlinie</th><th>IBAN (Bank)</th>
+      <th>liq.wirksam</th><th>aktiv</th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -60,6 +61,7 @@ async function lade() {
       <td class="zahl"><input data-feld="ust_satz" type="number" step="0.01" min="0" max="100" style="width:70px" value="${k.ust_satz ?? ""}"></td>
       <td>${gruppeSelect(k.gruppe_id)}</td>
       <td class="zahl"><input data-feld="kreditlinie" type="number" step="0.01" style="width:100px" value="${k.kreditlinie || ""}"></td>
+      <td><input data-feld="iban" style="width:210px" placeholder="${k.typ === "BANK" ? "DE.." : ""}" value="${esc(k.iban)}"></td>
       <td><input data-feld="liquiditaetswirksam" type="checkbox" ${k.liquiditaetswirksam?"checked":""}></td>
       <td><input data-feld="aktiv" type="checkbox" ${k.aktiv?"checked":""}></td>`;
     tb.appendChild(tr);

@@ -23,10 +23,35 @@
   </form>
   <div id="ergebnis"></div>
   {% endif %}
+  <h2>Kontoauszug importieren (MT940 / CAMT.053)</h2>
+  <p class="hinweis">
+    Bankumsätze dienen der tagesaktuellen Bestandsführung: Der Endsaldo jedes Auszugs
+    wird als Bestandsanker übernommen (Kontoauszug ist maßgeblich). Die Zuordnung
+    erfolgt über die IBAN am Bankkonto (unter „Konten“ hinterlegen) oder die Auswahl
+    hier. Die BWA-Zeilen (Ist) speisen sich weiterhin aus den Buchhaltungs-Buchungen.
+  </p>
+  {% if not leser %}
+  <form id="bank-form" class="formular-zeilen">
+    <label>Datei<input type="file" name="datei" accept=".sta,.txt,.mt940,.xml,.camt" required></label>
+    <label>Bankkonto (falls IBAN nicht zuordenbar)
+      <select name="konto_id" id="bank-konto"><option value="">automatisch über IBAN</option></select>
+    </label>
+    <button type="submit">Kontoauszug importieren</button>
+  </form>
+  <div id="bank-ergebnis"></div>
+  {% endif %}
+
   <h2>Bisherige Importe</h2>
   <table class="liste">
     <thead><tr><th>Datum</th><th>Datei</th><th>Format</th><th class="zahl">Sätze</th><th>Warnungen</th><th></th></tr></thead>
     <tbody id="batches"></tbody>
+  </table>
+
+  <h2>Bankumsätze (aus Kontoauszügen)</h2>
+  <table class="liste">
+    <thead><tr><th>Buchungstag</th><th>Konto</th><th class="zahl">Betrag</th>
+      <th>Partner</th><th>Verwendungszweck</th></tr></thead>
+    <tbody id="bank-umsaetze"></tbody>
   </table>
 </div>
 {% endblock %}
@@ -34,6 +59,39 @@
 <script>
 const MANDANT_ID = {{ mandant.id }};
 const LESER = {{ 'true' if leser else 'false' }};
+let konten = [];
+
+async function ladeKonten() {
+  const d = await api("GET", `/api/mandanten/${MANDANT_ID}/konten`);
+  konten = d.konten;
+  const sel = document.getElementById("bank-konto");
+  if (sel) {
+    sel.innerHTML = `<option value="">automatisch über IBAN</option>` +
+      konten.filter(k => k.aktiv && (k.typ === "BANK" || k.typ === "KASSE")).map(k =>
+        `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}${k.iban ? " (" + esc(k.iban) + ")" : ""}</option>`).join("");
+  }
+}
+
+function kontoName(id) {
+  const k = konten.find(k => k.id === id);
+  return k ? esc(`${k.nummer} ${k.bezeichnung}`) : "–";
+}
+
+async function ladeBankUmsaetze() {
+  const umsaetze = await api("GET", `/api/mandanten/${MANDANT_ID}/bank-umsaetze?limit=50`);
+  const tb = document.getElementById("bank-umsaetze");
+  tb.innerHTML = "";
+  for (const u of umsaetze) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${u.buchungstag}</td><td>${kontoName(u.konto_id)}</td>
+      <td class="zahl ${u.betrag < 0 ? "negativ" : ""}" style="${u.betrag < 0 ? "color:var(--rot)" : ""}">${eur(u.betrag)}</td>
+      <td>${esc(u.partner)}</td><td class="klein">${esc(u.verwendungszweck)}</td>`;
+    tb.appendChild(tr);
+  }
+  if (!umsaetze.length) {
+    tb.innerHTML = `<tr><td colspan="5" class="hinweis">Noch keine Bankumsätze importiert.</td></tr>`;
+  }
+}
 
 async function ladeBatches() {
   const batches = await api("GET", `/api/mandanten/${MANDANT_ID}/importe`);
@@ -77,6 +135,32 @@ if (form) form.addEventListener("submit", async (e) => {
     ladeBatches();
   } catch (err) { toast(err.message); }
 });
-ladeBatches();
+
+const bankForm = document.getElementById("bank-form");
+if (bankForm) bankForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData(bankForm);
+  const kontoId = fd.get("konto_id");
+  fd.delete("konto_id");
+  const url = `/api/mandanten/${MANDANT_ID}/bank-import` + (kontoId ? `?konto_id=${kontoId}` : "");
+  try {
+    const erg = await apiDatei(url, fd);
+    const box = document.getElementById("bank-ergebnis");
+    let html = `<div class="warnung gruen">${erg.anzahl} Bankumsätze importiert (${esc(erg.format)}).</div>`;
+    if (erg.bestandsanker.length) {
+      html += `<div class="warnung gruen">Bestandsanker aktualisiert: ` +
+        erg.bestandsanker.map(a => `${esc(a.konto)} · ${a.datum}: ${eur(a.wert)} €`).join(" — ") + `</div>`;
+    }
+    if (erg.warnungen.length) {
+      html += `<div class="warnung">${erg.warnungen.slice(0, 10).map(esc).join("<br>")}</div>`;
+    }
+    box.innerHTML = html;
+    bankForm.reset();
+    ladeBatches();
+    ladeBankUmsaetze();
+  } catch (err) { toast(err.message); }
+});
+
+ladeKonten().then(() => { ladeBatches(); ladeBankUmsaetze(); });
 </script>
 {% endblock %}

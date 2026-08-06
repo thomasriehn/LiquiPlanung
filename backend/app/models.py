@@ -193,6 +193,8 @@ class Konto(Base):
     )
     # Kreditlinie (nur Bankkonten): verfügbare Liquidität = Bestand + freie Linie
     kreditlinie: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
+    # IBAN (nur Bankkonten): Zuordnung von MT940-/CAMT-Kontoauszügen
+    iban: Mapped[str | None] = mapped_column(String(34), nullable=True)
     liquiditaetswirksam: Mapped[bool] = mapped_column(Boolean, default=True)
     aktiv: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -228,6 +230,32 @@ class Buchung(Base):
     sh: Mapped[str] = mapped_column(String(1), default="S")  # S/H bezogen auf konto_nr
     belegfeld: Mapped[str | None] = mapped_column(String(64), nullable=True)
     text: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class BankTransaktion(Base):
+    """Bankumsatz aus Kontoauszugsimport (MT940 / CAMT.053).
+
+    Dient der tagesaktuellen Bestandsführung und als Referenz; die BWA-Zeilen
+    (Ist-Zahlungsflüsse) speisen sich weiterhin aus den Buchhaltungs-Buchungen,
+    damit nichts doppelt zählt.
+    """
+
+    __tablename__ = "bank_transaktionen"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mandant_id: Mapped[int] = mapped_column(ForeignKey("mandanten.id", ondelete="CASCADE"), index=True)
+    batch_id: Mapped[int | None] = mapped_column(
+        ForeignKey("import_batches.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    konto_id: Mapped[int] = mapped_column(ForeignKey("konten.id", ondelete="CASCADE"), index=True)
+    buchungstag: Mapped[date] = mapped_column(Date, index=True)
+    valuta: Mapped[date | None] = mapped_column(Date, nullable=True)
+    betrag: Mapped[Decimal] = mapped_column(Numeric(14, 2))  # + Eingang / − Ausgang
+    partner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    verwendungszweck: Mapped[str | None] = mapped_column(Text, nullable=True)
+    referenz: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    konto: Mapped[Konto] = relationship()
 
 
 class BWAWert(Base):

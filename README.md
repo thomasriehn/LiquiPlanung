@@ -13,6 +13,9 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   verfügbare Liquidität inkl. Kreditlinien, Warenbestand nachrichtlich.
 - **Import**: DATEV-Buchungsstapel (EXTF/DTVF), generisches CSV (Addison abbildbar),
   BWA-/Saldenlisten; Meldung nicht angelegter Konten.
+- **Bankimport (MT940/CAMT.053)**: Kontoauszüge liefern tagesaktuelle Bestandsanker
+  (Endsaldo je Auszug, IBAN-Zuordnung) und Bankumsätze zur Referenz – unabhängig vom
+  Buchhaltungsexport, ohne Doppelzählung im Ist.
 - **Kontenrahmen** SKR03/SKR04 als editierbare Vorlage je Mandant, USt-Satz je Konto.
 - **Planbasis**: offene Eingangsrechnungen/Forderungen, Dauerverbindlichkeiten,
   Budget je Konto/Monat (Restbudget-Logik, Netto→Brutto über USt-Satz).
@@ -27,7 +30,8 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   (§§ 165 ff., 175 SGB III), mit Entlastungsvorschau je Position.
 - **Szenarien (Best/Base/Worst)**: Faktoren auf Einzahlungen und variable Auszahlungen,
   Debitorenverzögerung; umschaltbar auf der Plan-Seite, im Export vermerkt; Soll/Ist
-  bleibt auf dem Basisplan.
+  bleibt auf dem Basisplan. Eigene **Vergleichsansicht** mit allen Szenarien
+  nebeneinander (Liquidität je Wochenende, Netto-Cashflow, minimale Liquidität).
 - **Export**: 13-Wochen-Plan als Excel-Arbeitsmappe (Tage, Wochen mit Plan/Ist/Δ,
   Soll-Ist) und als PDF-Bericht für Gericht, Sachwalter, Gläubigerausschuss.
 - **Mehrbenutzerbetrieb**: Rollen Admin/Bearbeiter/Leser, Mandantenzuordnung, Audit-Log.

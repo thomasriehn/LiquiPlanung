@@ -64,8 +64,13 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
    bleiben unverändert. Auswahl auf der Plan-Seite (inkl. Export-Vermerk); Snapshots
    und Soll/Ist beziehen sich stets auf den Basisplan. Best-/Worst-Vorlagen werden je
    Mandant angelegt.
-9. → **Bankdatenimport (MT940 / CAMT.053):** Kontoauszüge als zusätzliche, tagesaktuelle
-   Ist-Quelle unabhängig vom Buchhaltungsexport.
+9. ✔ **Bankdatenimport (MT940 / CAMT.053):** Kontoauszüge als tagesaktuelle
+   Bestandsquelle unabhängig vom Buchhaltungsexport. Endsalden werden je Auszug als
+   Bestandsanker übernommen (der Kontoauszug ist maßgeblich); die Bestandsfortschreibung
+   verankert den Verlauf stückweise an allen Auszugssalden, dazwischen zählen die
+   Buchhaltungsbewegungen. Zuordnung über die IBAN am Bankkonto; Einzelumsätze werden
+   zur Referenz gespeichert. Die BWA-Zeilen (Ist-Zahlungsflüsse) speisen sich bewusst
+   weiterhin nur aus den Buchhaltungs-Buchungen – keine Doppelzählung.
 
 **Steuer-/SV-Regeln**
 
@@ -198,6 +203,9 @@ Termine werden bei Neugenerierung nicht überschrieben.
 - **Generisches CSV** (für Addison u. a.): Spalten `Datum;Konto;Gegenkonto;Betrag;SH;Belegfeld;Text`
   (Kopfzeilen-Erkennung, flexible Datumsformate). Ein Addison-Export lässt sich darauf abbilden.
 - **BWA-/Saldenimport:** `Konto;Jahr;Monat;Betrag` als Historienbasis für Budgetvorschläge.
+- **Kontoauszüge (MT940 / CAMT.053):** Bankumsätze und Salden; Endsaldo je Auszug wird
+  als Bestandsanker übernommen (Zuordnung über IBAN am Bankkonto oder manuelle Auswahl,
+  Dubletten-Warnung bei überlappenden Zeiträumen).
 
 Unbekannte Konten werden beim Import gemeldet und können direkt angelegt werden.
 
@@ -219,10 +227,10 @@ Vorbelegungen (USt-Sätze, Gruppenzuordnung) sind Vorschlagswerte und je Mandant
 
 ## 10. Roadmap (bewusst noch nicht enthalten)
 
-1. MT940/CAMT.053-Bankimport; automatischer OP-Ausgleich.
+1. Automatischer OP-Ausgleich aus Bankumsätzen (Matching Zahlungseingang ↔ offener
+   Posten mit Vorschlagsliste).
 2. Alembic-Migrationen (der Erststand zieht additive Spalten beim Start automatisch
    nach), integrierte Backups, 2-Faktor-Login.
 3. USt-Zahllast-Vorschau aus Budget (Erlöse × Satz − Vorsteuer) statt Historienschätzung.
 4. Feingranulare Verteilungsprofile für Budgets (z. B. Zahllauf freitags).
-5. Szenario-Vergleichsansicht (Base/Best/Worst nebeneinander) und Szenario-Detailregeln
-   je Konto.
+5. Szenario-Detailregeln je Konto/Gruppe (statt globaler Faktoren).

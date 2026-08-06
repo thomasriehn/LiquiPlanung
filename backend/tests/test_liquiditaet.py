@@ -462,6 +462,50 @@ def test_szenario_faktoren_und_verzoegerung(db):
     assert worst["szenario"]["name"] == "Worst"
 
 
+def test_mehrere_bestandsanker_stueckweise(db):
+    # Tägliche Kontoauszugssalden: Anker sind maßgeblich, dazwischen zählen Buchungen
+    m = _mandant(db)
+    bank = _konto(db, m, "1200")
+    db.add(models.Bestand(mandant_id=m.id, typ="BANK", konto_id=bank.id,
+                          datum=START, wert=Decimal("1000")))          # Mo
+    db.add(models.Bestand(mandant_id=m.id, typ="BANK", konto_id=bank.id,
+                          datum=START + timedelta(days=2), wert=Decimal("5000")))  # Mi
+    db.add(models.Buchung(mandant_id=m.id, datum=START + timedelta(days=1),
+                          konto_nr="1200", gegenkonto_nr="8400",
+                          betrag=Decimal("100"), sh="S"))              # Di +100
+    db.commit()
+    plan = berechne_plan(db, m, start=START, heute=START + timedelta(days=3))
+    bank_zeile = next(f for f in plan["bestaende"]["finanzkonten"] if f["nummer"] == "1200")
+    assert bank_zeile["bestand"][START.isoformat()] == 1000.0
+    assert bank_zeile["bestand"][(START + timedelta(days=1)).isoformat()] == 1100.0
+    # Mittwoch: Auszugssaldo überschreibt die Fortschreibung
+    assert bank_zeile["bestand"][(START + timedelta(days=2)).isoformat()] == 5000.0
+    assert bank_zeile["bestand"][(START + timedelta(days=3)).isoformat()] == 5000.0
+
+
+def test_szenarien_vergleich(db):
+    from app.services.liquiditaet import szenarien_vergleich
+
+    m = _mandant(db)
+    erloes = _konto(db, m, "8400")
+    db.add(models.Budget(mandant_id=m.id, konto_id=erloes.id, jahr=2026, monat=9,
+                         betrag_netto=Decimal("10000")))
+    db.add(models.Szenario(mandant_id=m.id, name="Worst", ein_faktor=Decimal("50"),
+                           aus_faktor=Decimal("100"), debitoren_verzoegerung_tage=0))
+    db.commit()
+    v = szenarien_vergleich(db, m, start=START, heute=HEUTE)
+    namen = [s["name"] for s in v["szenarien"]]
+    assert namen[0] == "Basisplan" and "Worst" in namen
+    basis = v["szenarien"][0]
+    worst = next(s for s in v["szenarien"] if s["name"] == "Worst")
+    # September-Wochen: Worst-Einzahlungen = 50 % der Basis
+    idx = next(i for i, w in enumerate(v["wochen"]) if w["von"].startswith("2026-09"))
+    assert basis["einzahlungen"][idx] > 0
+    assert abs(worst["einzahlungen"][idx] - basis["einzahlungen"][idx] * 0.5) < 0.1
+    assert worst["endbestand"] < basis["endbestand"]
+    assert "datum" in worst["min_liquiditaet"]
+
+
 def test_unbekanntes_konto_wird_gemeldet(db):
     m = _mandant(db)
     db.add(models.Buchung(mandant_id=m.id, datum=START, konto_nr="1200",

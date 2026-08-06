@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block titel %}Szenario-Vergleich – {{ mandant.name }}{% endblock %}
+{% block inhalt %}
+<div class="seite-breit">
+  <div class="werkzeuge">
+    <label>Start <input type="date" id="start"></label>
+    <label>Wochen <input type="number" id="wochen" value="13" min="1" max="26" style="width:60px"></label>
+    <button id="laden" class="sekundaer">Aktualisieren</button>
+    <span class="hinweis">
+      Basisplan und alle Szenarien nebeneinander – Werte „Ist bis heute, Plan ab morgen“.
+      Szenarien verwalten: <a href="/mandanten/{{ mandant.id }}/einstellungen">Einstellungen</a>.
+    </span>
+  </div>
+  <div class="karten" id="kennzahlen"></div>
+  <div style="height:10px"></div>
+  <div class="matrix-huelle"><table class="matrix" id="tabelle"></table></div>
+  <div class="legende">
+    <span style="color:var(--rot)">negative Liquidität / Unterdeckung</span>
+    <span><span style="background:#fdf3d7;padding:1px 6px;border-radius:3px">markiert</span> = Woche der minimalen Liquidität</span>
+  </div>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+const MANDANT_ID = {{ mandant.id }};
+
+function datumVoll(iso) { const [j, m, t] = iso.split("-"); return `${t}.${m}.${j}`; }
+
+async function lade() {
+  const start = document.getElementById("start").value;
+  const wochen = document.getElementById("wochen").value || 13;
+  let url = `/api/mandanten/${MANDANT_ID}/szenarien-vergleich?wochen=${wochen}`;
+  if (start) url += `&start=${start}`;
+  let d;
+  try { d = await api("GET", url); } catch (e) { toast(e.message); return; }
+  if (!document.getElementById("start").value) document.getElementById("start").value = d.start;
+
+  // Kennzahlen-Karten je Szenario
+  const karten = document.getElementById("kennzahlen");
+  karten.innerHTML = "";
+  for (const s of d.szenarien) {
+    const kritisch = s.min_liquiditaet.wert < 0;
+    const knapp = !kritisch && s.min_verfuegbar < 0;
+    const karte = document.createElement("div");
+    karte.className = "karte";
+    karte.style.borderLeft = `4px solid ${kritisch ? "var(--rot)" : (knapp ? "#e8a000" : "var(--gruen)")}`;
+    karte.innerHTML = `
+      <strong>${esc(s.name)}</strong>
+      ${s.kommentar ? `<span class="klein">${esc(s.kommentar)}</span>` : ""}
+      <span>Minimale Liquidität: <strong style="color:${kritisch ? "var(--rot)" : "inherit"}">${eur(s.min_liquiditaet.wert)} €</strong>
+        am ${datumVoll(s.min_liquiditaet.datum)}</span>
+      <span>Minimal verfügbar (inkl. Linien): <strong style="color:${s.min_verfuegbar < 0 ? "var(--rot)" : "inherit"}">${eur(s.min_verfuegbar)} €</strong></span>
+      <span>Endbestand nach ${d.wochen.length} Wochen: ${eur(s.endbestand)} €</span>`;
+    karten.appendChild(karte);
+  }
+
+  // Vergleichstabelle
+  const tabelle = document.getElementById("tabelle");
+  let html = `<thead><tr><th class="zeilkopf">Szenario</th>` +
+    d.wochen.map(w => `<th>${w.label}<br><span class="klein">${w.von.slice(8,10)}.${w.von.slice(5,7)}.–${w.bis.slice(8,10)}.${w.bis.slice(5,7)}.</span></th>`).join("") +
+    `</tr></thead><tbody>`;
+
+  const bloecke = [
+    ["Liquidität zum Wochenende", "liquiditaet_wochenende", true],
+    ["Netto-Cashflow je Woche", "netto", false],
+    ["Einzahlungen je Woche", "einzahlungen", false],
+    ["Auszahlungen je Woche", "auszahlungen", false],
+  ];
+  for (const [titel, feld, markiereMin] of bloecke) {
+    html += `<tr class="gruppe"><td class="zeilkopf" style="cursor:default">${titel}</td>` +
+      d.wochen.map(() => `<td></td>`).join("") + `</tr>`;
+    for (const s of d.szenarien) {
+      const werte = s[feld];
+      let minIdx = -1;
+      if (markiereMin) {
+        minIdx = werte.indexOf(Math.min(...werte));
+      }
+      html += `<tr><td class="zeilkopf">&nbsp;&nbsp;${esc(s.name)}</td>` +
+        werte.map((v, i) => {
+          const klassen = [];
+          if (v < 0) klassen.push("negativ");
+          if (i === minIdx) klassen.push("heute-spalte");
+          return `<td class="${klassen.join(" ")}">${v === 0 && !markiereMin ? "" : eur(v)}</td>`;
+        }).join("") + `</tr>`;
+    }
+  }
+  tabelle.innerHTML = html + "</tbody>";
+}
+
+document.getElementById("laden").addEventListener("click", lade);
+lade();
+</script>
+{% endblock %}

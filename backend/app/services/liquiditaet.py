@@ -710,22 +710,28 @@ def _bestaende(
     plan_projektion: dict[Key, dict[date, Decimal]],
 ) -> dict:
     start, ende = tage[0], tage[-1]
-    anker: dict[int, tuple[date, Decimal]] = {}
+    # Alle Anker je Konto (z. B. tägliche Kontoauszugssalden): der Verlauf wird
+    # stückweise verankert – zwischen zwei Ankern zählen die Buchungsbewegungen,
+    # am Ankertag gilt der Auszugssaldo als maßgeblich.
+    anker: dict[int, list[tuple[date, Decimal]]] = {}
     for k in finanzkonten:
-        b = db.scalars(
-            select(models.Bestand)
-            .where(
-                models.Bestand.mandant_id == mandant.id,
-                models.Bestand.konto_id == k.id,
-                models.Bestand.datum <= heute,
+        zeilen = list(
+            db.scalars(
+                select(models.Bestand)
+                .where(
+                    models.Bestand.mandant_id == mandant.id,
+                    models.Bestand.konto_id == k.id,
+                    models.Bestand.datum <= heute,
+                )
+                .order_by(models.Bestand.datum, models.Bestand.id)
             )
-            .order_by(models.Bestand.datum.desc(), models.Bestand.id.desc())
-        ).first()
-        # Bestand.wert = Kontostand zum Ende des Tages `datum`
-        anker[k.id] = (b.datum, b.wert) if b else (start - timedelta(days=1), Decimal("0"))
+        )
+        # Bestand.wert = Kontostand zum Ende des Tages `datum`; letzter je Tag gilt
+        je_tag: dict[date, Decimal] = {b.datum: b.wert for b in zeilen}
+        anker[k.id] = sorted(je_tag.items()) or [(start - timedelta(days=1), Decimal("0"))]
 
     # Bewegungen ab frühestem Anker bis heute (deckt auch Anker nach Fensterende ab)
-    frueh = min([a[0] for a in anker.values()] + [start]) + timedelta(days=1)
+    frueh = min([a[0][0] for a in anker.values()] + [start]) + timedelta(days=1)
     _, bank_bewegungen = ist_zahlungsfluesse(db, mandant.id, finanz_nrn, frueh, heute)
 
     konto_bestaende: list[dict] = []
@@ -733,25 +739,31 @@ def _bestaende(
     basis_heute = Decimal("0")
     linien = Decimal("0")
     for k in finanzkonten:
-        a_datum, a_wert = anker[k.id]
+        anker_liste = anker[k.id]
         bew = bank_bewegungen.get(k.nummer, {})
         werte: dict[str, float | None] = {}
-        laufend: dict[date, Decimal] = {a_datum: a_wert}
-        # vorwärts vom Anker bis heute (unabhängig vom Fenster)
-        stand = a_wert
-        d = a_datum + timedelta(days=1)
-        while d <= heute:
-            stand += bew.get(d, Decimal("0"))
-            laufend[d] = stand
-            d += timedelta(days=1)
-        # rückwärts vom Anker bis zum Fensterbeginn (falls Anker nach start liegt)
-        stand = a_wert
-        d = a_datum
+        erster_datum, erster_wert = anker_liste[0]
+        laufend: dict[date, Decimal] = {erster_datum: erster_wert}
+        # rückwärts vom ersten Anker bis zum Fensterbeginn
+        stand = erster_wert
+        d = erster_datum
         while d > start:
             stand -= bew.get(d, Decimal("0"))
             d -= timedelta(days=1)
             laufend[d] = stand
-        basis_heute += laufend.get(heute, a_wert)
+        # vorwärts vom ersten Anker bis heute; spätere Anker setzen den Stand neu
+        folgende = anker_liste[1:]
+        idx = 0
+        stand = erster_wert
+        d = erster_datum + timedelta(days=1)
+        while d <= heute:
+            stand += bew.get(d, Decimal("0"))
+            while idx < len(folgende) and folgende[idx][0] == d:
+                stand = folgende[idx][1]
+                idx += 1
+            laufend[d] = stand
+            d += timedelta(days=1)
+        basis_heute += laufend.get(heute, anker_liste[-1][1])
         for d in tage:
             if d <= heute and d in laufend:
                 werte[d.isoformat()] = _f(laufend[d])
@@ -766,7 +778,10 @@ def _bestaende(
                 "name": k.bezeichnung,
                 "typ": k.typ,
                 "kreditlinie": _f(k.kreditlinie),
-                "anker": {"datum": anker[k.id][0].isoformat(), "wert": _f(anker[k.id][1])},
+                "anker": {
+                    "datum": anker_liste[-1][0].isoformat(),
+                    "wert": _f(anker_liste[-1][1]),
+                },
                 "bestand": werte,
             }
         )
@@ -819,6 +834,72 @@ def _bestaende(
         "kreditlinien": _f(linien),
         "waren": waren,
     }
+
+
+def szenarien_vergleich(
+    db: Session,
+    mandant: models.Mandant,
+    start: date | None = None,
+    wochen: int = 13,
+    heute: date | None = None,
+) -> dict:
+    """Basisplan und alle Szenarien nebeneinander (Wochenwerte + Liquidität).
+
+    Wochenwerte folgen der Anzeige-Logik "Ist bis heute, Plan ab morgen"; das Ist
+    ist für alle Szenarien identisch, die Unterschiede entstehen im Planteil.
+    """
+    heute = heute or date.today()
+    szenarien = list(
+        db.scalars(
+            select(models.Szenario)
+            .where(models.Szenario.mandant_id == mandant.id)
+            .order_by(models.Szenario.name)
+        )
+    )
+    ergebnis: dict = {"szenarien": []}
+    for szenario in [None, *szenarien]:
+        plan = berechne_plan(db, mandant, start=start, wochen=wochen, heute=heute,
+                             szenario=szenario)
+        ergebnis.setdefault("start", plan["start"])
+        ergebnis.setdefault("ende", plan["ende"])
+        ergebnis.setdefault("heute", plan["heute"])
+        ergebnis.setdefault("wochen", plan["wochen"])
+
+        def wochenwerte(quelle: dict) -> list[float]:
+            werte = []
+            for w in plan["wochen"]:
+                summe = 0.0
+                for tag in w["tage"]:
+                    if tag <= plan["heute"]:
+                        summe += quelle["ist"].get(tag, 0.0)
+                    else:
+                        summe += quelle["plan"].get(tag, 0.0)
+                werte.append(round(summe, 2))
+            return werte
+
+        liquiditaet = plan["bestaende"]["liquiditaet"]
+        verfuegbar = plan["bestaende"]["verfuegbar"]
+        min_tag = min(liquiditaet, key=lambda t: liquiditaet[t])
+        ergebnis["szenarien"].append(
+            {
+                "id": szenario.id if szenario else None,
+                "name": szenario.name if szenario else "Basisplan",
+                "kommentar": szenario.kommentar if szenario else None,
+                "ein_faktor": _f(szenario.ein_faktor) if szenario else 100.0,
+                "aus_faktor": _f(szenario.aus_faktor) if szenario else 100.0,
+                "debitoren_verzoegerung_tage": szenario.debitoren_verzoegerung_tage if szenario else 0,
+                "einzahlungen": wochenwerte(plan["summen"]["einzahlungen"]),
+                "auszahlungen": wochenwerte(plan["summen"]["auszahlungen"]),
+                "netto": wochenwerte(plan["summen"]["netto"]),
+                "liquiditaet_wochenende": [
+                    liquiditaet[w["tage"][-1]] for w in plan["wochen"]
+                ],
+                "min_liquiditaet": {"datum": min_tag, "wert": liquiditaet[min_tag]},
+                "min_verfuegbar": min(verfuegbar.values()),
+                "endbestand": liquiditaet[plan["tage"][-1]],
+            }
+        )
+    return ergebnis
 
 
 def erstelle_snapshot(

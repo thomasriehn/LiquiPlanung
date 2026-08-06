@@ -99,6 +99,11 @@ def sollist_seite(request: Request, mandant_id: int, db: Session = Depends(get_d
     return _mandanten_seite(request, db, mandant_id, "sollist.html")
 
 
+@router.get("/mandanten/{mandant_id}/szenarien")
+def szenarien_seite(request: Request, mandant_id: int, db: Session = Depends(get_db)):
+    return _mandanten_seite(request, db, mandant_id, "szenvergleich.html")
+
+
 @router.get("/mandanten/{mandant_id}/einstellungen")
 def einstellungen_seite(request: Request, mandant_id: int, db: Session = Depends(get_db)):
     from ..services.feiertage import BUNDESLAENDER

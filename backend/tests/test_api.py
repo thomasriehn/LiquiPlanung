@@ -243,6 +243,105 @@ def test_insolvenzgeld_einstellungen_und_vorschau(client):
     assert plan["insolvenzgeld"]["aktiv"] is True
 
 
+MT940_BEISPIEL = (
+    ":20:STMT-1\n"
+    ":25:DE89370400440532013000\n"
+    ":28C:152/1\n"
+    ":60F:C260803EUR41250,00\n"
+    ":61:2608040804CR1190,00NTRFNONREF\n"
+    ":86:166?00GUTSCHRIFT?20SVWZ+RE-100?32Kunde Albrecht AG\n"
+    ":61:260805DR500,00NDDT0815\n"
+    ":86:105?20SVWZ+Miete?32Vermieter GmbH\n"
+    ":62F:C260805EUR41940,00\n"
+    "-\n"
+).encode("cp1252")
+
+
+def test_bank_import_mt940(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Bank GmbH", "kurzname": "bank"}
+    ).json()["id"]
+    konten = client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]
+    bank_konto = next(k for k in konten if k["nummer"] == "1200")
+    # IBAN mit Leerzeichen -> wird normalisiert gespeichert
+    client.patch(f"/api/konten/{bank_konto['id']}", json={"iban": "DE89 3704 0044 0532 0130 00"})
+
+    antwort = client.post(
+        f"/api/mandanten/{mandant_id}/bank-import",
+        files={"datei": ("auszug.sta", MT940_BEISPIEL, "text/plain")},
+    )
+    assert antwort.status_code == 200, antwort.text
+    erg = antwort.json()
+    assert erg["format"] == "MT940"
+    assert erg["anzahl"] == 2
+    assert erg["bestandsanker"][0]["datum"] == "2026-08-05"
+    assert erg["bestandsanker"][0]["wert"] == 41940.0
+
+    umsaetze = client.get(f"/api/mandanten/{mandant_id}/bank-umsaetze").json()
+    assert len(umsaetze) == 2
+    assert umsaetze[0]["partner"] == "Vermieter GmbH"  # neuester zuerst
+
+    # Endsaldo wirkt als Bestandsanker in der Planung
+    plan = client.get(f"/api/mandanten/{mandant_id}/plan").json()
+    bank_zeile = next(
+        f for f in plan["bestaende"]["finanzkonten"] if f["nummer"] == "1200"
+    )
+    assert bank_zeile["anker"] == {"datum": "2026-08-05", "wert": 41940.0}
+    assert plan["bestaende"]["liquiditaet"][plan["heute"]] == 41940.0
+
+    # Re-Import: Dubletten-Warnung; Anker wird aktualisiert, nicht dupliziert
+    antwort = client.post(
+        f"/api/mandanten/{mandant_id}/bank-import",
+        files={"datei": ("auszug.sta", MT940_BEISPIEL, "text/plain")},
+    )
+    assert any("Dubletten" in w for w in antwort.json()["warnungen"])
+    bestaende = client.get(f"/api/mandanten/{mandant_id}/bestaende").json()
+    assert len([b for b in bestaende if b["datum"] == "2026-08-05"]) == 1
+
+    # Import löschen entfernt die Bankumsätze des Batches
+    client.delete(f"/api/importe/{erg['batch_id']}")
+    umsaetze = client.get(f"/api/mandanten/{mandant_id}/bank-umsaetze").json()
+    assert len(umsaetze) == 2  # die des zweiten Imports bleiben
+
+
+def test_bank_import_ohne_zuordnung(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Bank2 GmbH", "kurzname": "bank2"}
+    ).json()["id"]
+    # keine IBAN hinterlegt, aber zwei Finanzkonten (Bank + Kasse) -> Warnung, 0 Umsätze
+    antwort = client.post(
+        f"/api/mandanten/{mandant_id}/bank-import",
+        files={"datei": ("auszug.sta", MT940_BEISPIEL, "text/plain")},
+    )
+    erg = antwort.json()
+    assert erg["anzahl"] == 0
+    assert any("übersprungen" in w for w in erg["warnungen"])
+    # mit expliziter Kontoauswahl klappt es
+    konten = client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]
+    bank_konto = next(k for k in konten if k["nummer"] == "1200")
+    antwort = client.post(
+        f"/api/mandanten/{mandant_id}/bank-import?konto_id={bank_konto['id']}",
+        files={"datei": ("auszug.sta", MT940_BEISPIEL, "text/plain")},
+    )
+    assert antwort.json()["anzahl"] == 2
+
+
+def test_szenarien_vergleich_endpoint(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Vergleich AG", "kurzname": "vgl"}
+    ).json()["id"]
+    v = client.get(f"/api/mandanten/{mandant_id}/szenarien-vergleich").json()
+    namen = [s["name"] for s in v["szenarien"]]
+    assert namen[0] == "Basisplan"
+    assert {"Best Case", "Worst Case"} <= set(namen)
+    assert len(v["szenarien"][0]["liquiditaet_wochenende"]) == len(v["wochen"])
+    # Seite rendert
+    assert client.get(f"/mandanten/{mandant_id}/szenarien").status_code == 200
+
+
 def test_leser_darf_nicht_schreiben(client):
     _login(client)
     m1 = client.post("/api/mandanten", json={"name": "C", "kurzname": "c"}).json()["id"]

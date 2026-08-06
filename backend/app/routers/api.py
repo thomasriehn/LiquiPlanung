@@ -20,13 +20,14 @@ from ..security import (
     nur_schreibend,
     sichere_mandanten_liste,
 )
-from ..services import datev, export, insolvenzgeld
+from ..services import bank, datev, export, insolvenzgeld
 from ..services.feiertage import BUNDESLAENDER
 from ..services.kontenrahmen import lege_kontenrahmen_an, lege_standard_szenarien_an
 from ..services.liquiditaet import (
     berechne_plan,
     erstelle_snapshot,
     soll_ist_vergleich,
+    szenarien_vergleich,
     wochen_start,
 )
 from ..services.zahlungskalender import generiere_termine
@@ -193,6 +194,7 @@ def konten_liste(
                 "ust_satz": float(k.ust_satz) if k.ust_satz is not None else None,
                 "gruppe_id": k.gruppe_id,
                 "kreditlinie": float(k.kreditlinie or 0),
+                "iban": k.iban,
                 "liquiditaetswirksam": k.liquiditaetswirksam,
                 "aktiv": k.aktiv,
             }
@@ -271,6 +273,8 @@ def konto_aendern(
             konto.ust_satz = _dec(wert, feld) if wert is not None and wert != "" else None
         elif feld == "kreditlinie":
             konto.kreditlinie = _dec(wert, feld)
+        elif feld == "iban":
+            konto.iban = bank.normalisiere_iban(str(wert)) or None if wert else None
         elif feld == "typ":
             if wert not in [t.value for t in models.KontoTyp]:
                 raise HTTPException(422, "Unbekannter Kontotyp")
@@ -302,6 +306,12 @@ async def import_datei(
     mandant = mandant_oder_403(db, benutzer, mandant_id)
     daten = await datei.read()
     name = datei.filename or "import.csv"
+    if format == "auto" and bank.ist_bankformat(daten):
+        raise HTTPException(
+            422,
+            "Die Datei ist ein Kontoauszug (MT940/CAMT) – bitte den Bereich "
+            "„Kontoauszug importieren“ verwenden.",
+        )
     if format == "datev":
         erg = datev.parse_datev(daten)
     elif format == "csv":
@@ -405,10 +415,192 @@ def import_loeschen(
         raise HTTPException(404, "Import nicht gefunden")
     mandant_oder_403(db, benutzer, batch.mandant_id)
     db.execute(delete(models.Buchung).where(models.Buchung.batch_id == batch.id))
+    db.execute(
+        delete(models.BankTransaktion).where(models.BankTransaktion.batch_id == batch.id)
+    )
     audit(db, benutzer, batch.mandant_id, "IMPORT_GELOESCHT", batch.dateiname)
     db.delete(batch)
     db.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- Bankimport
+
+@router.post("/mandanten/{mandant_id}/bank-import")
+async def bank_import(
+    mandant_id: int,
+    datei: UploadFile,
+    konto_id: int | None = None,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Kontoauszugsimport (MT940/CAMT.053): Umsätze speichern, Endsalden als
+    Bestandsanker übernehmen. Zuordnung über IBAN am Bankkonto oder konto_id."""
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    _konto_pruefen(db, mandant.id, konto_id)
+    daten = await datei.read()
+    erg = bank.parse_bank_automatisch(daten)
+    if not erg.auszuege:
+        raise HTTPException(422, "; ".join(erg.warnungen) or "Keine Auszüge gefunden")
+
+    bankkonten = [
+        k
+        for k in db.scalars(
+            select(models.Konto).where(
+                models.Konto.mandant_id == mandant.id,
+                models.Konto.typ.in_([models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value]),
+                models.Konto.aktiv.is_(True),
+            )
+        )
+    ]
+    nach_iban = {bank.normalisiere_iban(k.iban): k for k in bankkonten if k.iban}
+    gewaehlt = db.get(models.Konto, konto_id) if konto_id else None
+
+    batch = models.ImportBatch(
+        mandant_id=mandant.id,
+        dateiname=datei.filename or "kontoauszug",
+        format=erg.format,
+        anzahl=0,
+        benutzer_id=benutzer.id,
+    )
+    db.add(batch)
+    db.flush()
+
+    warnungen = list(erg.warnungen)
+    anker: list[dict] = []
+    anzahl = 0
+    for auszug in erg.auszuege:
+        kennung = bank.normalisiere_iban(auszug.konto_kennung)
+        konto = nach_iban.get(kennung)
+        if konto is None and gewaehlt is not None:
+            konto = gewaehlt
+        if konto is None and len(bankkonten) == 1 and not nach_iban:
+            konto = bankkonten[0]
+            warnungen.append(
+                f"Auszug '{auszug.konto_kennung}' automatisch dem einzigen Bankkonto "
+                f"{konto.nummer} zugeordnet – IBAN am Konto hinterlegen."
+            )
+        if konto is None:
+            warnungen.append(
+                f"Auszug '{auszug.konto_kennung}' übersprungen: kein Bankkonto mit dieser "
+                "IBAN – IBAN unter „Konten“ hinterlegen oder Konto beim Import wählen."
+            )
+            continue
+        if auszug.umsaetze:
+            von = min(u.buchungstag for u in auszug.umsaetze)
+            bis = max(u.buchungstag for u in auszug.umsaetze)
+            vorhandene = db.scalar(
+                select(models.BankTransaktion.id)
+                .where(
+                    models.BankTransaktion.mandant_id == mandant.id,
+                    models.BankTransaktion.konto_id == konto.id,
+                    models.BankTransaktion.buchungstag >= von,
+                    models.BankTransaktion.buchungstag <= bis,
+                )
+                .limit(1)
+            )
+            if vorhandene:
+                warnungen.append(
+                    f"Konto {konto.nummer}: Zeitraum {von} – {bis} enthält bereits "
+                    "Bankumsätze – mögliche Dubletten (ggf. alten Import löschen)."
+                )
+        for u in auszug.umsaetze:
+            db.add(
+                models.BankTransaktion(
+                    mandant_id=mandant.id,
+                    batch_id=batch.id,
+                    konto_id=konto.id,
+                    buchungstag=u.buchungstag,
+                    valuta=u.valuta,
+                    betrag=u.betrag,
+                    partner=u.partner,
+                    verwendungszweck=u.verwendungszweck,
+                    referenz=u.referenz,
+                )
+            )
+            anzahl += 1
+        # Endsaldo als Bestandsanker übernehmen (Kontoauszug ist maßgeblich)
+        if auszug.endsaldo is not None and auszug.endsaldo_datum is not None:
+            bestand = db.scalar(
+                select(models.Bestand).where(
+                    models.Bestand.mandant_id == mandant.id,
+                    models.Bestand.konto_id == konto.id,
+                    models.Bestand.datum == auszug.endsaldo_datum,
+                )
+            )
+            if bestand is None:
+                db.add(
+                    models.Bestand(
+                        mandant_id=mandant.id,
+                        typ=konto.typ,
+                        konto_id=konto.id,
+                        datum=auszug.endsaldo_datum,
+                        wert=auszug.endsaldo,
+                    )
+                )
+            else:
+                bestand.wert = auszug.endsaldo
+            anker.append(
+                {
+                    "konto": f"{konto.nummer} {konto.bezeichnung}",
+                    "datum": auszug.endsaldo_datum.isoformat(),
+                    "wert": float(auszug.endsaldo),
+                }
+            )
+
+    batch.anzahl = anzahl
+    batch.warnungen = "\n".join(warnungen[:200]) or None
+    audit(db, benutzer, mandant.id, "BANK_IMPORT",
+          f"{batch.dateiname} ({anzahl} Umsätze, {len(anker)} Anker)")
+    db.commit()
+    return {
+        "batch_id": batch.id,
+        "format": erg.format,
+        "anzahl": anzahl,
+        "bestandsanker": anker,
+        "warnungen": warnungen[:50],
+    }
+
+
+@router.get("/mandanten/{mandant_id}/bank-umsaetze")
+def bank_umsaetze(
+    mandant_id: int,
+    von: str | None = None,
+    bis: str | None = None,
+    konto_id: int | None = None,
+    limit: int = 100,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    abfrage = select(models.BankTransaktion).where(
+        models.BankTransaktion.mandant_id == mandant.id
+    )
+    if von:
+        abfrage = abfrage.where(models.BankTransaktion.buchungstag >= _datum(von, "von"))
+    if bis:
+        abfrage = abfrage.where(models.BankTransaktion.buchungstag <= _datum(bis, "bis"))
+    if konto_id:
+        abfrage = abfrage.where(models.BankTransaktion.konto_id == konto_id)
+    umsaetze = db.scalars(
+        abfrage.order_by(
+            models.BankTransaktion.buchungstag.desc(), models.BankTransaktion.id.desc()
+        ).limit(max(1, min(limit, 500)))
+    )
+    return [
+        {
+            "id": u.id,
+            "konto_id": u.konto_id,
+            "buchungstag": u.buchungstag.isoformat(),
+            "valuta": u.valuta.isoformat() if u.valuta else None,
+            "betrag": float(u.betrag),
+            "partner": u.partner,
+            "verwendungszweck": u.verwendungszweck,
+            "referenz": u.referenz,
+        }
+        for u in umsaetze
+    ]
 
 
 # ---------------------------------------------------------------- Offene Posten
@@ -1303,6 +1495,22 @@ def export_plan_pdf(
             "Content-Disposition":
                 f'inline; filename="liquiplan_{mandant.kurzname}_{plan["start"]}.pdf"'
         },
+    )
+
+
+@router.get("/mandanten/{mandant_id}/szenarien-vergleich")
+def szenarien_vergleich_abrufen(
+    mandant_id: int,
+    start: str | None = None,
+    wochen: int = 13,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    if not (1 <= wochen <= 26):
+        raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    return szenarien_vergleich(
+        db, mandant, start=_datum(start, "start") if start else None, wochen=wochen
     )
 
 
