@@ -729,3 +729,43 @@ def test_mandant_loeschen(client):
     client.post("/login", data={"email": "ml@example.com", "passwort": "geheim123"})
     assert client.delete(
         f"/api/mandanten/{neu.json()['id']}?bestaetigung=wegfall").status_code == 403
+
+
+def test_dauer_import(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Dauer Import GmbH", "kurzname": "dauer-import"}
+    ).json()["id"]
+    csv_daten = (
+        "Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto\n"
+        "Miete Halle;Ausgabe;8900,00;monatlich;1;01.05.2026;;4210\n"
+        "Leasing Stapler;Ausgabe;450,00;monatlich;15;01.05.2026;31.12.2027;9999\n"
+        "Wartungspauschale;Einnahme;1250,00;vierteljährlich;10;01.05.2026;;8400\n"
+    ).encode("utf-8")
+    antwort = client.post(
+        f"/api/mandanten/{mandant_id}/dauerbuchungen/import",
+        files={"datei": ("dauer.csv", csv_daten, "text/csv")},
+    )
+    assert antwort.status_code == 200, antwort.text
+    erg = antwort.json()
+    assert erg["angelegt"] == 3
+    assert erg["uebersprungen"] == 0
+    assert any("9999" in w for w in erg["warnungen"])
+
+    dauer = {d["name"]: d for d in
+             client.get(f"/api/mandanten/{mandant_id}/dauerbuchungen").json()}
+    assert dauer["Miete Halle"]["art"] == "KREDITOR"
+    assert dauer["Miete Halle"]["konto_id"] is not None
+    assert dauer["Miete Halle"]["gueltig_von"] == "2026-05-01"
+    assert dauer["Leasing Stapler"]["konto_id"] is None         # 9999 unbekannt
+    assert dauer["Leasing Stapler"]["gueltig_bis"] == "2027-12-31"
+    assert dauer["Wartungspauschale"]["art"] == "DEBITOR"
+    assert dauer["Wartungspauschale"]["intervall"] == "QUARTAL"
+
+    # erneuter Import: alles Duplikate
+    erg = client.post(
+        f"/api/mandanten/{mandant_id}/dauerbuchungen/import",
+        files={"datei": ("dauer.csv", csv_daten, "text/csv")},
+    ).json()
+    assert erg["angelegt"] == 0
+    assert erg["uebersprungen"] == 3

@@ -148,3 +148,43 @@ def test_op_csv_kopfzeile_fehlt():
     erg = parse_op_csv(b"Datum;Konto;Betrag\n01.01.2026;4920;5,00\n")
     assert not erg.posten
     assert any("Kopfzeile" in w for w in erg.warnungen)
+
+
+def test_dauer_csv():
+    from app.services.datev import parse_dauer_csv
+
+    text = (
+        "Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto\n"
+        "Miete Werk;Ausgabe;8900,00;monatlich;1;01.05.2026;;4210\n"
+        "Zahllauf Buero;ER;-290,00;wöchentlich;Fr;2026-05-01;2026-12-31;4930\n"
+        "Wartungserloes;Einnahme;1.250,00;Q;15;01.05.2026;;8400\n"
+        "Kaputt;Ausgabe;100,00;täglich;1;;;4210\n"
+        "Falscher Tag;Ausgabe;100,00;monatlich;32;;;4210\n"
+    )
+    erg = parse_dauer_csv(text.encode("utf-8"))
+    assert len(erg.dauerbuchungen) == 3
+    miete = erg.dauerbuchungen[0]
+    assert miete["art"] == "KREDITOR"
+    assert miete["betrag_brutto"] == Decimal("8900.00")
+    assert miete["intervall"] == "MONATLICH"
+    assert miete["gueltig_von"] == date(2026, 5, 1)
+    assert miete["gueltig_bis"] is None
+    assert miete["konto_nr"] == "4210"
+    woche = erg.dauerbuchungen[1]
+    assert woche["intervall"] == "WOECHENTLICH"
+    assert woche["stichtag"] == 4                      # freitags
+    assert woche["betrag_brutto"] == Decimal("290.00")  # Absolutwert
+    assert woche["gueltig_bis"] == date(2026, 12, 31)
+    quartal = erg.dauerbuchungen[2]
+    assert quartal["art"] == "DEBITOR"
+    assert quartal["intervall"] == "QUARTAL"
+    assert quartal["betrag_brutto"] == Decimal("1250.00")
+    assert len(erg.warnungen) == 2
+
+
+def test_dauer_csv_kopfzeile_fehlt():
+    from app.services.datev import parse_dauer_csv
+
+    erg = parse_dauer_csv(b"Datum;Konto;Betrag\n01.01.2026;4920;5,00\n")
+    assert not erg.dauerbuchungen
+    assert any("Kopfzeile" in w for w in erg.warnungen)

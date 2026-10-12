@@ -12,7 +12,8 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
 - **Bestände & Liquiditätsentwicklung**: je Bank-/Kassenkonto, Gesamtliquidität,
   verfügbare Liquidität inkl. Kreditlinien, Warenbestand nachrichtlich.
 - **Import**: DATEV-Buchungsstapel (EXTF/DTVF), generisches CSV (Addison abbildbar),
-  BWA-/Saldenlisten; Meldung nicht angelegter Konten.
+  BWA-/Saldenlisten, OP-Listen und Dauerbuchungen (CSV mit toleranter Kopfzeile,
+  Duplikatprüfung); Meldung nicht angelegter Konten.
 - **Bankimport (MT940/CAMT.053)**: Kontoauszüge liefern tagesaktuelle Bestandsanker
   (Endsaldo je Auszug, IBAN-Zuordnung) und Bankumsätze zur Referenz – unabhängig vom
   Buchhaltungsexport, ohne Doppelzählung im Ist.

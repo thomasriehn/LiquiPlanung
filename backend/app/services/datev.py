@@ -34,6 +34,7 @@ class ImportErgebnis:
     buchungen: list[ImportBuchung] = field(default_factory=list)
     bwa_werte: list[dict] = field(default_factory=list)
     posten: list[dict] = field(default_factory=list)
+    dauerbuchungen: list[dict] = field(default_factory=list)
     warnungen: list[str] = field(default_factory=list)
 
 
@@ -400,6 +401,127 @@ def parse_op_csv(daten: bytes) -> ImportErgebnis:
                 if (i_konto is not None and len(felder) > i_konto) else None,
                 "notiz": (felder[i_notiz].strip() or None)
                 if (i_notiz is not None and len(felder) > i_notiz) else None,
+            }
+        )
+    return erg
+
+
+_DAUER_ARTEN = {
+    **_OP_ARTEN,
+    "AUSGABE": "KREDITOR", "VERBINDLICHKEIT": "KREDITOR",
+    "EINNAHME": "DEBITOR", "ERLOES": "DEBITOR", "ERLÖS": "DEBITOR",
+}
+
+_INTERVALLE = {
+    "MONATLICH": "MONATLICH", "M": "MONATLICH", "MONAT": "MONATLICH",
+    "WOECHENTLICH": "WOECHENTLICH", "WÖCHENTLICH": "WOECHENTLICH",
+    "W": "WOECHENTLICH", "WOCHE": "WOECHENTLICH",
+    "QUARTAL": "QUARTAL", "Q": "QUARTAL",
+    "VIERTELJAEHRLICH": "QUARTAL", "VIERTELJÄHRLICH": "QUARTAL",
+    "JAEHRLICH": "JAEHRLICH", "JÄHRLICH": "JAEHRLICH", "J": "JAEHRLICH",
+    "JAHR": "JAEHRLICH",
+}
+
+_WOCHENTAGE = {"MO": 0, "DI": 1, "MI": 2, "DO": 3, "FR": 4, "SA": 5, "SO": 6}
+
+
+def parse_dauer_csv(daten: bytes) -> ImportErgebnis:
+    """Dauerbuchungen: Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto.
+
+    Art: ER/Ausgabe/Verbindlichkeit bzw. FO/Einnahme/Erlös. Intervall:
+    monatlich/wöchentlich/vierteljährlich/jährlich (auch M/W/Q/J). Stichtag:
+    Kalendertag 1–31, bei wöchentlich 0=Mo..6=So oder Mo/Di/…; Datumsformate
+    TT.MM.JJJJ oder JJJJ-MM-TT; GueltigVon leer = heute.
+    """
+    text = _dekodiere(daten)
+    erg = ImportErgebnis(format="DAUER")
+    delimiter = ";" if text.count(";") >= text.count(",") else ","
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter, quotechar='"')
+    zeilen = [z for z in reader if any(f.strip() for f in z)]
+    if not zeilen:
+        erg.warnungen.append("Leere Datei.")
+        return erg
+    header = [f.strip().lower() for f in zeilen[0]]
+    i_name = _spalten_index(header, "name", "bezeichnung")
+    i_art = _spalten_index(header, "art", "typ")
+    i_betrag = _spalten_index(header, "betrag", "brutto")
+    i_intervall = _spalten_index(header, "intervall", "rhythmus", "turnus")
+    i_stichtag = _spalten_index(header, "stichtag", "tag")
+    i_von = _spalten_index(header, "von", "beginn", "start")
+    i_bis = _spalten_index(header, "bis", "ende")
+    i_konto = next(
+        (i for i, name in enumerate(header)
+         if "konto" in name and "gegen" not in name),
+        None,
+    )
+    if None in (i_name, i_art, i_betrag, i_intervall):
+        erg.warnungen.append(
+            "Kopfzeile nicht erkannt – benötigt mindestens: Name, Art, Betrag, "
+            "Intervall (optional Stichtag, GueltigVon, GueltigBis, Konto)."
+        )
+        return erg
+
+    def feld(zeile: list[str], index: int | None) -> str:
+        return zeile[index].strip() if index is not None and len(zeile) > index else ""
+
+    for nr, felder in enumerate(zeilen[1:], start=2):
+        name = feld(felder, i_name)
+        if not name:
+            erg.warnungen.append(f"Zeile {nr}: Name fehlt.")
+            continue
+        art = _DAUER_ARTEN.get(feld(felder, i_art).upper())
+        if art is None:
+            erg.warnungen.append(
+                f"Zeile {nr}: Art '{feld(felder, i_art)}' unbekannt (Ausgabe/Einnahme)."
+            )
+            continue
+        try:
+            betrag = abs(_betrag(feld(felder, i_betrag)))
+        except InvalidOperation:
+            erg.warnungen.append(f"Zeile {nr}: Betrag nicht lesbar.")
+            continue
+        intervall = _INTERVALLE.get(feld(felder, i_intervall).upper())
+        if intervall is None:
+            erg.warnungen.append(
+                f"Zeile {nr}: Intervall '{feld(felder, i_intervall)}' unbekannt "
+                "(monatlich/wöchentlich/vierteljährlich/jährlich)."
+            )
+            continue
+        roh_stichtag = feld(felder, i_stichtag)
+        if intervall == "WOECHENTLICH" and roh_stichtag[:2].upper() in _WOCHENTAGE:
+            stichtag = _WOCHENTAGE[roh_stichtag[:2].upper()]
+        else:
+            try:
+                stichtag = int(roh_stichtag) if roh_stichtag else 1
+            except ValueError:
+                erg.warnungen.append(f"Zeile {nr}: Stichtag '{roh_stichtag}' nicht lesbar.")
+                continue
+        grenze = (0, 6) if intervall == "WOECHENTLICH" else (1, 31)
+        if not grenze[0] <= stichtag <= grenze[1]:
+            erg.warnungen.append(
+                f"Zeile {nr}: Stichtag {stichtag} außerhalb {grenze[0]}–{grenze[1]} "
+                f"für Intervall {intervall}."
+            )
+            continue
+        gueltig_von = _datum_flexibel(feld(felder, i_von)) if feld(felder, i_von) else date.today()
+        if gueltig_von is None:
+            erg.warnungen.append(f"Zeile {nr}: GueltigVon nicht lesbar.")
+            continue
+        gueltig_bis = None
+        if feld(felder, i_bis):
+            gueltig_bis = _datum_flexibel(feld(felder, i_bis))
+            if gueltig_bis is None:
+                erg.warnungen.append(f"Zeile {nr}: GueltigBis nicht lesbar – ignoriert.")
+        erg.dauerbuchungen.append(
+            {
+                "name": name,
+                "art": art,
+                "betrag_brutto": betrag,
+                "intervall": intervall,
+                "stichtag": stichtag,
+                "gueltig_von": gueltig_von,
+                "gueltig_bis": gueltig_bis,
+                "konto_nr": feld(felder, i_konto) or None,
             }
         )
     return erg

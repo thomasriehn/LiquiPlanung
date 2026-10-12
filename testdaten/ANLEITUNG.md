@@ -66,9 +66,11 @@ bis 30.07. reicht – so soll es sein.
 Kasse (Konto 1000) und Warenbestand mit den Werten/Daten aus der Übersicht
 anlegen (Kasse **1.348,50 €**, Waren **68.500 €** per 05.08.2026).
 
-## 7. Dauerbuchungen und Budgets anlegen (Planbasis)
+## 7. Dauerbuchungen importieren und Budgets anlegen (Planbasis)
 
-„Posten → Dauerbuchungen“ (passend zum importierten Zahlungsverhalten):
+„Posten → Dauerbuchungen“ → `08_dauerbuchungen.csv` über „Dauerbuchungen
+importieren“ hochladen (5 Dauerbuchungen, passend zum importierten
+Zahlungsverhalten – zur Kontrolle):
 
 | Name | Konto | Betrag brutto | Intervall | Stichtag |
 |---|---|---|---|---|

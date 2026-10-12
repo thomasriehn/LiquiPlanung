@@ -384,6 +384,25 @@ def schreibe_op(pfad: Path, heute: date) -> int:
     return len(zeilen) - 1
 
 
+DAUERBUCHUNGEN = [
+    ("Miete Werk + Büro", "8900,00", 1, "4210"),
+    ("Versicherungspaket", "1180,00", 5, "4360"),
+    ("Darlehenszinsen Nordbank", "640,00", 15, "2100"),
+    ("Tilgung Darlehen Nordbank", "2100,00", 15, "0630"),
+    ("Buchführung StB Petersen", "980,00", 24, "4955"),
+]
+
+
+def schreibe_dauer(pfad: Path, monate: list[tuple[int, int]]) -> int:
+    """Dauerbuchungen passend zum Zahlungsverhalten der DATEV-Stapel."""
+    von = date(monate[0][0], monate[0][1], 1)
+    zeilen = ["Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto"]
+    for name, betrag, stichtag, konto in DAUERBUCHUNGEN:
+        zeilen.append(f"{name};Ausgabe;{betrag};monatlich;{stichtag};{von:%d.%m.%Y};;{konto}")
+    pfad.write_text("\n".join(zeilen) + "\n", encoding="utf-8")
+    return len(zeilen) - 1
+
+
 # ------------------------------------------------------------- Kontoauszüge
 
 def bank_umsaetze(bank_tage: list[date]) -> list[tuple]:
@@ -629,6 +648,9 @@ def main() -> None:
                               bank_tage[-1], camt)
     dateien["07_kontoauszug_camt053.xml"] = (
         f"Kontoauszug CAMT.053 ({camt_tag:%d.%m.})", len(camt))
+
+    anzahl = schreibe_dauer(ziel / "08_dauerbuchungen.csv", monate)
+    dateien["08_dauerbuchungen.csv"] = ("Dauerbuchungen (CSV-Import)", anzahl)
 
     schreibe_uebersicht(ziel / "UEBERSICHT.md", heute, antrag, buch_bis, monate,
                         kb, dateien, mt940_ende, camt_ende, bank_tage, camt_tag)

@@ -1497,6 +1497,77 @@ def dauer_anlegen(
     return {"id": d.id}
 
 
+@router.post("/mandanten/{mandant_id}/dauerbuchungen/import")
+async def dauer_import(
+    mandant_id: int,
+    datei: UploadFile,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Dauerbuchungs-Import (CSV): Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto.
+
+    Konten werden über die Kontonummer aufgelöst. Bereits vorhandene
+    Dauerbuchungen (gleicher Name, Art, Betrag, Intervall und Stichtag)
+    werden übersprungen."""
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    erg = datev.parse_dauer_csv(await datei.read())
+    konten_nach_nr = {
+        k.nummer: k
+        for k in db.scalars(
+            select(models.Konto).where(models.Konto.mandant_id == mandant.id)
+        )
+    }
+    vorhandene = {
+        (d.name.strip().lower(), d.art, d.betrag_brutto, d.intervall, d.stichtag)
+        for d in db.scalars(
+            select(models.Dauerbuchung).where(
+                models.Dauerbuchung.mandant_id == mandant.id
+            )
+        )
+    }
+    warnungen = list(erg.warnungen)
+    unbekannte_konten: set[str] = set()
+    angelegt, uebersprungen = 0, 0
+    for d in erg.dauerbuchungen:
+        schluessel = (d["name"].strip().lower(), d["art"], d["betrag_brutto"],
+                      d["intervall"], d["stichtag"])
+        if schluessel in vorhandene:
+            uebersprungen += 1
+            continue
+        vorhandene.add(schluessel)
+        konto = konten_nach_nr.get(d["konto_nr"]) if d["konto_nr"] else None
+        if d["konto_nr"] and konto is None:
+            unbekannte_konten.add(d["konto_nr"])
+        db.add(
+            models.Dauerbuchung(
+                mandant_id=mandant.id,
+                name=d["name"],
+                art=d["art"],
+                konto_id=konto.id if konto else None,
+                betrag_brutto=d["betrag_brutto"],
+                intervall=d["intervall"],
+                stichtag=d["stichtag"],
+                gueltig_von=d["gueltig_von"],
+                gueltig_bis=d["gueltig_bis"],
+            )
+        )
+        angelegt += 1
+    if unbekannte_konten:
+        warnungen.append(
+            "Konten nicht angelegt (Dauerbuchungen ohne Kontozuordnung übernommen): "
+            + ", ".join(sorted(unbekannte_konten))
+        )
+    audit(db, benutzer, mandant.id, "DAUER_IMPORT",
+          f"{datei.filename} ({angelegt} angelegt, {uebersprungen} übersprungen)")
+    db.commit()
+    return {
+        "angelegt": angelegt,
+        "uebersprungen": uebersprungen,
+        "warnungen": warnungen[:50],
+    }
+
+
 @router.patch("/dauerbuchungen/{dauer_id}")
 def dauer_aendern(
     dauer_id: int,

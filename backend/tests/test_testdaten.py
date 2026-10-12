@@ -84,6 +84,16 @@ def test_testdatensatz_kompletter_durchlauf(client, tmp_path):
     assert erg["format"] == "CAMT"
     assert erg["anzahl"] == 2
 
+    # Dauerbuchungen: Import statt manueller Erfassung
+    erg = client.post(
+        f"/api/mandanten/{mandant_id}/dauerbuchungen/import",
+        files={"datei": ("dauer.csv", (tmp_path / "08_dauerbuchungen.csv").read_bytes(), "text/csv")},
+    ).json()
+    assert erg["angelegt"] == 5
+    assert erg["warnungen"] == []
+    dauer = client.get(f"/api/mandanten/{mandant_id}/dauerbuchungen").json()
+    assert all(d["konto_id"] is not None for d in dauer)
+
     # Abgleichvorschläge: alle vier Arten mit erwarteter Konfidenz
     vorschlaege = client.get(
         f"/api/mandanten/{mandant_id}/op-ausgleich/vorschlaege"

@@ -91,6 +91,12 @@
       <button type="submit" id="dauer-submit">Anlegen</button>
       <button type="button" id="dauer-abbrechen" class="sekundaer" style="display:none">Abbrechen</button>
     </form>
+    <form id="dauer-import-form" class="formular-zeilen">
+      <label>Dauerbuchungen importieren (CSV: Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto)
+        <input type="file" name="datei" accept=".csv,.txt" required></label>
+      <button type="submit" class="sekundaer">Dauerbuchungen importieren</button>
+    </form>
+    <div id="dauer-import-ergebnis"></div>
     {% endif %}
     <table class="liste">
       <thead><tr><th>Name</th><th>Art</th><th class="zahl">Betrag</th><th>Intervall</th>
@@ -383,6 +389,23 @@ if (opImportForm) opImportForm.addEventListener("submit", async (e) => {
     }
     box.innerHTML = html;
     opImportForm.reset(); ladeOP();
+  } catch (err) { toast(err.message); }
+});
+
+const dauerImportForm = document.getElementById("dauer-import-form");
+if (dauerImportForm) dauerImportForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData(dauerImportForm);
+  try {
+    const erg = await apiDatei(`/api/mandanten/${MANDANT_ID}/dauerbuchungen/import`, fd);
+    const box = document.getElementById("dauer-import-ergebnis");
+    let html = `<div class="warnung" style="background:#e8f5ec;border-color:#9fd3ae;color:#1e5c38">
+      ${erg.angelegt} Dauerbuchungen angelegt${erg.uebersprungen ? `, ${erg.uebersprungen} bereits vorhanden (übersprungen)` : ""}.</div>`;
+    if (erg.warnungen.length) {
+      html += `<div class="warnung">${erg.warnungen.map(esc).join("<br>")}</div>`;
+    }
+    box.innerHTML = html;
+    dauerImportForm.reset(); ladeDauer();
   } catch (err) { toast(err.message); }
 });
 

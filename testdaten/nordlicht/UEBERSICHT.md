@@ -41,6 +41,7 @@ Der Bankbestand kommt automatisch aus den Kontoauszügen (Endsaldo je Auszug).
 | `05_op_liste.csv` | OP-Liste (offene Posten) | 20 |
 | `06_kontoauszug_mt940.sta` | Kontoauszug MT940 (03.08.–05.08.) | 7 |
 | `07_kontoauszug_camt053.xml` | Kontoauszug CAMT.053 (06.08.) | 2 |
+| `08_dauerbuchungen.csv` | Dauerbuchungen (CSV-Import) | 5 |
 
 Buchhaltung erfasst bis **30.07.2026** (bewusst ~1 Woche Rückstand –
 die aktuelle Woche kommt nur über die Kontoauszüge herein, wie in der Praxis).
