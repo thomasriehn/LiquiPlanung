@@ -144,3 +144,6 @@ a.knopf:hover { background: var(--blau-hell); }
 .tab-leiste { display: flex; gap: 4px; margin-bottom: 12px; }
 .tab-leiste button { background: #fff; color: var(--text); border: 1px solid var(--rand); }
 .tab-leiste button.aktiv { background: var(--blau); color: #fff; border-color: var(--blau); }
+
+/* Browser ohne <dialog>-Unterstützung: geschlossene Dialoge nie anzeigen */
+dialog:not([open]) { display: none; }

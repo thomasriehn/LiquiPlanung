@@ -10,7 +10,7 @@
   </p>
   {% if not leser %}
   <form id="upload-form" class="formular-zeilen">
-    <label>Datei<input type="file" name="datei" accept=".csv,.txt" required></label>
+    <label>Datei<input type="file" name="datei" required></label>
     <label>Format
       <select name="format">
         <option value="auto">automatisch erkennen</option>
@@ -32,7 +32,7 @@
   </p>
   {% if not leser %}
   <form id="bank-form" class="formular-zeilen">
-    <label>Datei<input type="file" name="datei" accept=".sta,.txt,.mt940,.xml,.camt" required></label>
+    <label>Datei<input type="file" name="datei" required></label>
     <label>Bankkonto (falls IBAN nicht zuordenbar)
       <select name="konto_id" id="bank-konto"><option value="">automatisch über IBAN</option></select>
     </label>

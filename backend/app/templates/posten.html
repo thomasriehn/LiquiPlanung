@@ -48,7 +48,7 @@
     </form>
     <form id="op-import-form" class="formular-zeilen">
       <label>OP-Liste importieren (CSV: Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz)
-        <input type="file" name="datei" accept=".csv,.txt" required></label>
+        <input type="file" name="datei" required></label>
       <button type="submit" class="sekundaer">OP-Liste importieren</button>
     </form>
     <div id="op-import-ergebnis"></div>
@@ -93,7 +93,7 @@
     </form>
     <form id="dauer-import-form" class="formular-zeilen">
       <label>Dauerbuchungen importieren (CSV: Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto)
-        <input type="file" name="datei" accept=".csv,.txt" required></label>
+        <input type="file" name="datei" required></label>
       <button type="submit" class="sekundaer">Dauerbuchungen importieren</button>
     </form>
     <div id="dauer-import-ergebnis"></div>
@@ -238,11 +238,17 @@ function oeffneZahlung(p) {
   document.getElementById("zahlung-betrag").value = p.restbetrag.toFixed(2);
   document.getElementById("zahlung-datum").value = new Date().toISOString().slice(0, 10);
   document.getElementById("zahlung-ausbuchen").checked = false;
-  document.getElementById("zahlung-dialog").showModal();
+  const dlg = document.getElementById("zahlung-dialog");
+  if (typeof dlg.showModal === "function") dlg.showModal();
+  else dlg.setAttribute("open", "");   // Browser ohne <dialog>-Unterstützung
 }
 
-document.getElementById("zahlung-schliessen").addEventListener("click", () =>
-  document.getElementById("zahlung-dialog").close());
+function schliesseZahlung() {
+  const dlg = document.getElementById("zahlung-dialog");
+  if (typeof dlg.close === "function") dlg.close();
+  else dlg.removeAttribute("open");
+}
+document.getElementById("zahlung-schliessen").addEventListener("click", schliesseZahlung);
 
 document.getElementById("zahlung-speichern").addEventListener("click", async () => {
   const betrag = parseFloat(document.getElementById("zahlung-betrag").value);
@@ -253,7 +259,7 @@ document.getElementById("zahlung-speichern").addEventListener("click", async () 
       datum: document.getElementById("zahlung-datum").value || null,
       ausbuchen: document.getElementById("zahlung-ausbuchen").checked,
     });
-    document.getElementById("zahlung-dialog").close();
+    schliesseZahlung();
     let meldung = erg.status === "BEZAHLT"
       ? "Posten bezahlt."
       : `Teilzahlung erfasst – Rest ${eur(erg.restbetrag)} € bleibt im Plan.`;
