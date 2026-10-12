@@ -1,5 +1,6 @@
 """JSON-API. Alle Routen erfordern Login; Mandantenrouten prüfen die Berechtigung."""
 
+import re
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -24,7 +25,11 @@ from ..security import (
 from ..config import get_settings
 from ..services import ausgleich, backup, bank, datev, export, insolvenzgeld
 from ..services.feiertage import BUNDESLAENDER
-from ..services.kontenrahmen import lege_kontenrahmen_an, lege_standard_szenarien_an
+from ..services.kontenrahmen import (
+    eingebaute_definition,
+    lege_kontenrahmen_an,
+    lege_standard_szenarien_an,
+)
 from ..services.liquiditaet import (
     berechne_plan,
     erstelle_snapshot,
@@ -98,8 +103,14 @@ def mandant_anlegen(
     benutzer=Depends(nur_admin),
     db: Session = Depends(get_db),
 ):
-    if daten.kontenrahmen not in ("SKR03", "SKR04", "EIGEN"):
-        raise HTTPException(422, "Kontenrahmen muss SKR03, SKR04 oder EIGEN sein")
+    if daten.kontenrahmen not in EINGEBAUTE_KONTENRAHMEN and not db.scalar(
+        select(models.KontenrahmenVorlage.id).where(
+            models.KontenrahmenVorlage.code == daten.kontenrahmen
+        )
+    ):
+        raise HTTPException(
+            422, "Unbekannter Kontenrahmen (SKR03, SKR04, EIGEN oder eigene Vorlage)"
+        )
     if daten.bundesland not in BUNDESLAENDER:
         raise HTTPException(422, "Unbekanntes Bundesland")
     _enum_pruefen(daten.ust_zeitraum, ["MONAT", "QUARTAL"], "ust_zeitraum")
@@ -159,6 +170,206 @@ def mandant_aendern(
     return {"ok": True}
 
 
+# ------------------------------------------------------ Kontenrahmen-Vorlagen
+
+EINGEBAUTE_KONTENRAHMEN = ("SKR03", "SKR04", "EIGEN")
+VORLAGE_CODE_MUSTER = r"^[A-Za-z0-9_\-]{2,16}$"
+
+
+class VorlageNeu(BaseModel):
+    code: str
+    name: str
+    basis: str | None = None  # SKR03/SKR04/EIGEN oder Code einer eigenen Vorlage
+
+
+class VorlageDefinition(BaseModel):
+    name: str | None = None
+    gruppen: list[dict] = []
+    konten: list[dict] = []
+
+
+def _vorlage_oder_404(db: Session, code: str) -> models.KontenrahmenVorlage:
+    vorlage = db.scalar(
+        select(models.KontenrahmenVorlage).where(models.KontenrahmenVorlage.code == code)
+    )
+    if vorlage is None:
+        raise HTTPException(404, "Kontenrahmen-Vorlage nicht gefunden")
+    return vorlage
+
+
+def _vorlage_json(v: models.KontenrahmenVorlage) -> dict:
+    return {
+        "code": v.code,
+        "name": v.name,
+        "fest": False,
+        "gruppen": [
+            {"code": g.code, "name": g.name, "richtung": g.richtung,
+             "sortierung": g.sortierung}
+            for g in v.gruppen
+        ],
+        "konten": [
+            {
+                "nummer": k.nummer, "bezeichnung": k.bezeichnung, "typ": k.typ,
+                "ust_satz": float(k.ust_satz) if k.ust_satz is not None else None,
+                "gruppe": k.gruppe_code,
+                "liquiditaetswirksam": k.liquiditaetswirksam,
+            }
+            for k in v.konten
+        ],
+    }
+
+
+def _vorlage_inhalt_pruefen(gruppen: list[dict], konten: list[dict]) -> None:
+    gruppen_codes: set[str] = set()
+    for g in gruppen:
+        code = str(g.get("code") or "").strip()
+        if not code:
+            raise HTTPException(422, "Gruppe ohne Code")
+        if code in gruppen_codes:
+            raise HTTPException(422, f"Gruppencode '{code}' doppelt")
+        gruppen_codes.add(code)
+        if not str(g.get("name") or "").strip():
+            raise HTTPException(422, f"Gruppe '{code}' ohne Namen")
+        _enum_pruefen(g.get("richtung", "AUS"), models.Richtung, "richtung")
+    nummern: set[str] = set()
+    for k in konten:
+        nummer = str(k.get("nummer") or "").strip()
+        if not nummer:
+            raise HTTPException(422, "Konto ohne Nummer")
+        if nummer in nummern:
+            raise HTTPException(422, f"Kontonummer '{nummer}' doppelt")
+        nummern.add(nummer)
+        if not str(k.get("bezeichnung") or "").strip():
+            raise HTTPException(422, f"Konto {nummer} ohne Bezeichnung")
+        _enum_pruefen(k.get("typ", "AUFWAND"), models.KontoTyp, "typ")
+        if k.get("gruppe") and k["gruppe"] not in gruppen_codes:
+            raise HTTPException(422, f"Konto {nummer}: Gruppe '{k['gruppe']}' nicht definiert")
+
+
+def _vorlage_inhalt_setzen(
+    vorlage: models.KontenrahmenVorlage, gruppen: list[dict], konten: list[dict]
+) -> None:
+    vorlage.gruppen = [
+        models.VorlageGruppe(
+            code=str(g["code"]).strip(),
+            name=str(g["name"]).strip(),
+            richtung=g.get("richtung", "AUS"),
+            sortierung=int(g.get("sortierung") or 0),
+        )
+        for g in gruppen
+    ]
+    vorlage.konten = [
+        models.VorlageKonto(
+            nummer=str(k["nummer"]).strip(),
+            bezeichnung=str(k["bezeichnung"]).strip(),
+            typ=k.get("typ", "AUFWAND"),
+            ust_satz=_dec(k["ust_satz"], "ust_satz")
+            if k.get("ust_satz") is not None else None,
+            gruppe_code=k.get("gruppe") or None,
+            liquiditaetswirksam=bool(k.get("liquiditaetswirksam", True)),
+        )
+        for k in konten
+    ]
+
+
+@router.get("/kontenrahmen")
+def kontenrahmen_liste(benutzer=Depends(nur_admin), db: Session = Depends(get_db)):
+    eigene = db.scalars(
+        select(models.KontenrahmenVorlage).order_by(models.KontenrahmenVorlage.code)
+    )
+    ergebnis = [
+        {"code": code, "name": eingebaute_definition(code)["name"], "fest": True}
+        for code in EINGEBAUTE_KONTENRAHMEN
+    ]
+    ergebnis += [
+        {"code": v.code, "name": v.name, "fest": False,
+         "gruppen_anzahl": len(v.gruppen), "konten_anzahl": len(v.konten)}
+        for v in eigene
+    ]
+    return ergebnis
+
+
+@router.get("/kontenrahmen/{code}")
+def kontenrahmen_lesen(
+    code: str, benutzer=Depends(nur_admin), db: Session = Depends(get_db)
+):
+    eingebaut = eingebaute_definition(code)
+    if eingebaut is not None:
+        return eingebaut
+    return _vorlage_json(_vorlage_oder_404(db, code))
+
+
+@router.post("/kontenrahmen", status_code=201)
+def kontenrahmen_anlegen(
+    daten: VorlageNeu, benutzer=Depends(nur_admin), db: Session = Depends(get_db)
+):
+    code = daten.code.strip()
+    if not re.match(VORLAGE_CODE_MUSTER, code):
+        raise HTTPException(
+            422, "Code: 2–16 Zeichen, nur Buchstaben, Ziffern, '-' und '_'"
+        )
+    if code in EINGEBAUTE_KONTENRAHMEN:
+        raise HTTPException(409, "Code ist für die eingebauten Vorlagen reserviert")
+    if not daten.name.strip():
+        raise HTTPException(422, "Name fehlt")
+    if db.scalar(
+        select(models.KontenrahmenVorlage.id).where(
+            models.KontenrahmenVorlage.code == code
+        )
+    ):
+        raise HTTPException(409, "Code bereits vergeben")
+
+    basis = daten.basis or "EIGEN"
+    definition = eingebaute_definition(basis)
+    if definition is None:
+        definition = _vorlage_json(_vorlage_oder_404(db, basis))
+    vorlage = models.KontenrahmenVorlage(code=code, name=daten.name.strip())
+    _vorlage_inhalt_setzen(vorlage, definition["gruppen"], definition["konten"])
+    db.add(vorlage)
+    audit(db, benutzer, None, "KONTENRAHMEN_ANGELEGT", f"{code} (Basis {basis})")
+    db.commit()
+    return {"code": vorlage.code}
+
+
+@router.put("/kontenrahmen/{code}")
+def kontenrahmen_speichern(
+    code: str,
+    daten: VorlageDefinition,
+    benutzer=Depends(nur_admin),
+    db: Session = Depends(get_db),
+):
+    """Ersetzt Gruppen und Konten der Vorlage vollständig. Wirkt nur auf danach
+    angelegte Mandanten – bestehende behalten ihre Kopie des Kontenrahmens."""
+    if code in EINGEBAUTE_KONTENRAHMEN:
+        raise HTTPException(409, "Eingebaute Kontenrahmen sind nicht änderbar")
+    vorlage = _vorlage_oder_404(db, code)
+    _vorlage_inhalt_pruefen(daten.gruppen, daten.konten)
+    if daten.name is not None and daten.name.strip():
+        vorlage.name = daten.name.strip()
+    # alte Zeilen erst entfernen (Flush), sonst kollidieren die Unique-Constraints
+    vorlage.gruppen.clear()
+    vorlage.konten.clear()
+    db.flush()
+    _vorlage_inhalt_setzen(vorlage, daten.gruppen, daten.konten)
+    audit(db, benutzer, None, "KONTENRAHMEN_GEAENDERT",
+          f"{code}: {len(daten.gruppen)} Gruppen, {len(daten.konten)} Konten")
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/kontenrahmen/{code}")
+def kontenrahmen_loeschen(
+    code: str, benutzer=Depends(nur_admin), db: Session = Depends(get_db)
+):
+    if code in EINGEBAUTE_KONTENRAHMEN:
+        raise HTTPException(409, "Eingebaute Kontenrahmen sind nicht löschbar")
+    vorlage = _vorlage_oder_404(db, code)
+    db.delete(vorlage)
+    audit(db, benutzer, None, "KONTENRAHMEN_GELOESCHT", code)
+    db.commit()
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- Konten
 
 @router.get("/mandanten/{mandant_id}/konten")
@@ -184,7 +395,8 @@ def konten_liste(
     )
     return {
         "gruppen": [
-            {"id": g.id, "code": g.code, "name": g.name, "richtung": g.richtung}
+            {"id": g.id, "code": g.code, "name": g.name, "richtung": g.richtung,
+             "sortierung": g.sortierung}
             for g in gruppen
         ],
         "konten": [
@@ -296,6 +508,121 @@ def konto_aendern(
         elif feld in KONTO_FELDER:
             setattr(konto, feld, wert)
     audit(db, benutzer, konto.mandant_id, "KONTO_GEAENDERT", konto.nummer)
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- BWA-Gruppen
+
+class GruppeNeu(BaseModel):
+    code: str
+    name: str
+    richtung: str = "AUS"
+    sortierung: int = 0
+
+
+def _gruppe_oder_404(db: Session, gruppe_id: int) -> models.KontoGruppe:
+    gruppe = db.get(models.KontoGruppe, gruppe_id)
+    if gruppe is None:
+        raise HTTPException(404, "Gruppe nicht gefunden")
+    return gruppe
+
+
+@router.post("/mandanten/{mandant_id}/gruppen", status_code=201)
+def gruppe_anlegen(
+    mandant_id: int,
+    daten: GruppeNeu,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    code = daten.code.strip()
+    if not code:
+        raise HTTPException(422, "Code fehlt")
+    _enum_pruefen(daten.richtung, models.Richtung, "richtung")
+    if db.scalar(
+        select(models.KontoGruppe.id).where(
+            models.KontoGruppe.mandant_id == mandant.id,
+            models.KontoGruppe.code == code,
+        )
+    ):
+        raise HTTPException(409, "Gruppencode bereits vorhanden")
+    gruppe = models.KontoGruppe(
+        mandant_id=mandant.id,
+        code=code,
+        name=daten.name.strip(),
+        richtung=daten.richtung,
+        sortierung=daten.sortierung,
+    )
+    db.add(gruppe)
+    audit(db, benutzer, mandant.id, "GRUPPE_ANGELEGT", code)
+    db.commit()
+    return {"id": gruppe.id}
+
+
+@router.patch("/gruppen/{gruppe_id}")
+def gruppe_aendern(
+    gruppe_id: int,
+    daten: dict,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    nur_schreibend(benutzer)
+    gruppe = _gruppe_oder_404(db, gruppe_id)
+    mandant_oder_403(db, benutzer, gruppe.mandant_id)
+    for feld, wert in daten.items():
+        if feld == "richtung":
+            _enum_pruefen(wert, models.Richtung, feld)
+            gruppe.richtung = wert
+        elif feld == "sortierung":
+            gruppe.sortierung = int(wert or 0)
+        elif feld == "code":
+            code = str(wert).strip()
+            if not code:
+                raise HTTPException(422, "Code fehlt")
+            doppelt = db.scalar(
+                select(models.KontoGruppe.id).where(
+                    models.KontoGruppe.mandant_id == gruppe.mandant_id,
+                    models.KontoGruppe.code == code,
+                    models.KontoGruppe.id != gruppe.id,
+                )
+            )
+            if doppelt:
+                raise HTTPException(409, "Gruppencode bereits vorhanden")
+            gruppe.code = code
+        elif feld == "name":
+            if not str(wert or "").strip():
+                raise HTTPException(422, "Name fehlt")
+            gruppe.name = str(wert).strip()
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/gruppen/{gruppe_id}")
+def gruppe_loeschen(
+    gruppe_id: int,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Gruppe entfernen: zugeordnete Konten bleiben (ohne Gruppe) erhalten,
+    Szenario-Detailregeln auf die Gruppe werden mitgelöscht."""
+    nur_schreibend(benutzer)
+    gruppe = _gruppe_oder_404(db, gruppe_id)
+    mandant_oder_403(db, benutzer, gruppe.mandant_id)
+    for konto in db.scalars(
+        select(models.Konto).where(models.Konto.gruppe_id == gruppe.id)
+    ):
+        konto.gruppe_id = None
+    for kind in db.scalars(
+        select(models.KontoGruppe).where(models.KontoGruppe.parent_id == gruppe.id)
+    ):
+        kind.parent_id = None
+    db.execute(
+        delete(models.SzenarioRegel).where(models.SzenarioRegel.gruppe_id == gruppe.id)
+    )
+    audit(db, benutzer, gruppe.mandant_id, "GRUPPE_GELOESCHT", gruppe.code)
+    db.delete(gruppe)
     db.commit()
     return {"ok": True}
 
@@ -721,6 +1048,7 @@ def posten_liste(
             "status": p.status,
             "bezahlt_am": p.bezahlt_am.isoformat() if p.bezahlt_am else None,
             "forderungsklasse": p.forderungsklasse,
+            "sammel": p.sammel,
             "notiz": p.notiz,
         }
         for p in posten
@@ -737,6 +1065,7 @@ class PostenNeu(BaseModel):
     betrag_brutto: float
     konto_id: int | None = None
     forderungsklasse: str | None = None
+    sammel: bool = False
     notiz: str | None = None
 
 
@@ -798,6 +1127,7 @@ def posten_anlegen(
         betrag_brutto=_dec(daten.betrag_brutto),
         konto_id=daten.konto_id,
         forderungsklasse=klasse,
+        sammel=daten.sammel,
         notiz=daten.notiz,
     )
     db.add(posten)
@@ -905,6 +1235,8 @@ def posten_aendern(
         elif feld == "konto_id":
             _konto_pruefen(db, posten.mandant_id, wert)
             posten.konto_id = wert
+        elif feld == "sammel":
+            posten.sammel = bool(wert)
         elif feld in POSTEN_FELDER:
             if feld == "status":
                 _enum_pruefen(wert, models.PostenStatus, feld)
@@ -915,6 +1247,100 @@ def posten_aendern(
             setattr(posten, feld, wert)
     db.commit()
     return {"ok": True}
+
+
+class ZahlungNeu(BaseModel):
+    betrag: float
+    datum: str | None = None
+    # Rest ausbuchen (z. B. Skonto/Erlass): Posten gilt trotz Restbetrag als bezahlt
+    ausbuchen: bool = False
+
+
+@router.post("/posten/{posten_id}/zahlungen")
+def zahlung_erfassen(
+    posten_id: int,
+    daten: ZahlungNeu,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Manuelle (Teil-)Zahlung auf einen offenen Posten erfassen.
+
+    Deckt die Zahlung den Restbetrag (oder ist `ausbuchen` gesetzt), wird der
+    Posten BEZAHLT; sonst bleibt er mit Restbetrag offen und die Planung
+    rechnet mit dem Rest. Auf Sammelposten sind Überzahlungen erlaubt: der
+    Überhang wird auf die nächsten offenen Sammelposten gleicher Art (nach
+    Fälligkeit) vorgetragen – spätere geplante Einzahlungen sinken entsprechend.
+    """
+    nur_schreibend(benutzer)
+    posten = db.get(models.OffenerPosten, posten_id)
+    if posten is None:
+        raise HTTPException(404, "Posten nicht gefunden")
+    mandant_oder_403(db, benutzer, posten.mandant_id)
+    if posten.status != models.PostenStatus.OFFEN.value:
+        raise HTTPException(422, "Zahlungen sind nur auf offene Posten möglich")
+    betrag = _dec(daten.betrag)
+    if betrag <= 0:
+        raise HTTPException(422, "Zahlungsbetrag muss größer 0 sein")
+    zahltag = _datum(daten.datum, "datum") if daten.datum else date.today()
+
+    rest = posten.betrag_brutto - (posten.bezahlt_betrag or Decimal("0"))
+    uebertrag = betrag - rest
+    if uebertrag > Decimal("0.01") and not posten.sammel:
+        raise HTTPException(
+            422,
+            f"Zahlung ({betrag:.2f} €) übersteigt den Restbetrag ({rest:.2f} €) – "
+            "Überzahlungen werden nur bei Sammelposten auf spätere Posten vorgetragen",
+        )
+    posten.bezahlt_betrag = (posten.bezahlt_betrag or Decimal("0")) + min(betrag, rest)
+    if daten.ausbuchen or posten.betrag_brutto - posten.bezahlt_betrag <= Decimal("0.01"):
+        posten.status = models.PostenStatus.BEZAHLT.value
+        posten.bezahlt_am = zahltag
+
+    verrechnet: list[dict] = []
+    if uebertrag > Decimal("0.01"):
+        folgende = db.scalars(
+            select(models.OffenerPosten)
+            .where(
+                models.OffenerPosten.mandant_id == posten.mandant_id,
+                models.OffenerPosten.sammel.is_(True),
+                models.OffenerPosten.status == models.PostenStatus.OFFEN.value,
+                models.OffenerPosten.art == posten.art,
+                models.OffenerPosten.id != posten.id,
+            )
+            .order_by(models.OffenerPosten.faellig_am, models.OffenerPosten.id)
+        )
+        for f in folgende:
+            if uebertrag <= Decimal("0.01"):
+                break
+            f_rest = f.betrag_brutto - (f.bezahlt_betrag or Decimal("0"))
+            if f_rest <= 0:
+                continue
+            anteil = min(uebertrag, f_rest)
+            f.bezahlt_betrag = (f.bezahlt_betrag or Decimal("0")) + anteil
+            if f.betrag_brutto - f.bezahlt_betrag <= Decimal("0.01"):
+                f.status = models.PostenStatus.BEZAHLT.value
+                f.bezahlt_am = zahltag
+            verrechnet.append(
+                {
+                    "posten_id": f.id,
+                    "partner": f.partner,
+                    "faellig_am": f.faellig_am.isoformat(),
+                    "betrag": float(anteil),
+                    "status": f.status,
+                }
+            )
+            uebertrag -= anteil
+
+    audit(db, benutzer, posten.mandant_id, "ZAHLUNG_ERFASST",
+          f"Posten {posten.id} ({posten.partner}): {betrag:.2f} €")
+    db.commit()
+    return {
+        "status": posten.status,
+        "bezahlt_betrag": float(posten.bezahlt_betrag),
+        "restbetrag": float(posten.betrag_brutto - posten.bezahlt_betrag),
+        "verrechnet": verrechnet,
+        "unverteilt": float(uebertrag) if uebertrag > Decimal("0.01") else 0.0,
+    }
 
 
 @router.delete("/posten/{posten_id}")

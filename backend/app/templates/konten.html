@@ -4,6 +4,30 @@
 <div class="seite">
   <h1>Kontenrahmen ({{ mandant.kontenrahmen }})</h1>
   <p class="hinweis">USt-Satz leer = nicht umsatzsteuerpflichtig. Änderungen werden sofort gespeichert.</p>
+
+  <h2>BWA-Gruppen</h2>
+  <p class="hinweis">
+    Gruppen sind die Aggregationszeilen des 13-Wochen-Plans (Reihenfolge über
+    „Sortierung“). Beim Löschen bleiben zugeordnete Konten ohne Gruppe erhalten.
+  </p>
+  {% if not leser %}
+  <form id="gruppe-form" class="formular-zeilen">
+    <label>Code<input name="code" required style="width:110px" placeholder="z. B. A_MASSE"></label>
+    <label>Name<input name="name" required></label>
+    <label>Richtung<select name="richtung">
+      <option value="AUS">Auszahlungen</option><option value="EIN">Einzahlungen</option>
+      <option value="INFO">nachrichtlich</option></select></label>
+    <label>Sortierung<input name="sortierung" type="number" value="0" style="width:80px"></label>
+    <button type="submit" class="sekundaer">Gruppe anlegen</button>
+  </form>
+  {% endif %}
+  <table class="liste" id="gruppen-tabelle">
+    <thead><tr><th>Code</th><th>Name</th><th>Richtung</th>
+      <th class="zahl">Sortierung</th><th class="zahl">Konten</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Konten</h2>
   {% if not leser %}
   <form id="neu-form" class="formular-zeilen">
     <label>Nummer<input name="nummer" required></label>
@@ -51,9 +75,59 @@ function verteilungSelect(wert) {
     `<option value="${w}" ${w===wert?"selected":""}>${name}</option>`).join("") + `</select>`;
 }
 
+const RICHTUNGEN = { EIN: "Einzahlungen", AUS: "Auszahlungen", INFO: "nachrichtlich" };
+
+function ladeGruppen(d) {
+  const tb = document.querySelector("#gruppen-tabelle tbody");
+  tb.innerHTML = "";
+  for (const g of d.gruppen) {
+    const anzahl = d.konten.filter(k => k.gruppe_id === g.id).length;
+    const tr = document.createElement("tr");
+    tr.dataset.id = g.id;
+    tr.innerHTML = `
+      <td><input data-gfeld="code" value="${esc(g.code)}" style="width:110px"></td>
+      <td><input data-gfeld="name" value="${esc(g.name)}"></td>
+      <td><select data-gfeld="richtung">${Object.entries(RICHTUNGEN).map(([w, n]) =>
+        `<option value="${w}" ${w === g.richtung ? "selected" : ""}>${n}</option>`).join("")}</select></td>
+      <td class="zahl"><input data-gfeld="sortierung" type="number" value="${g.sortierung ?? 0}" style="width:80px"></td>
+      <td class="zahl">${anzahl}</td>
+      <td>${LESER ? "" : `<button class="gefahr" data-gruppe-weg="${g.id}">✕</button>`}</td>`;
+    tb.appendChild(tr);
+  }
+  if (LESER) tb.querySelectorAll("input,select").forEach(el => el.disabled = true);
+  tb.querySelectorAll("button[data-gruppe-weg]").forEach(btn => btn.addEventListener("click", async () => {
+    if (!confirm("Gruppe löschen? Zugeordnete Konten bleiben ohne Gruppe erhalten.")) return;
+    try { await api("DELETE", `/api/gruppen/${btn.dataset.gruppeWeg}`); lade(); }
+    catch (e) { toast(e.message); }
+  }));
+}
+
+document.querySelector("#gruppen-tabelle").addEventListener("change", async (e) => {
+  const feld = e.target.dataset.gfeld;
+  if (!feld) return;
+  const id = e.target.closest("tr").dataset.id;
+  const wert = feld === "sortierung" ? parseInt(e.target.value) || 0 : e.target.value;
+  try { await api("PATCH", `/api/gruppen/${id}`, { [feld]: wert }); lade(); }
+  catch (err) { toast(err.message); lade(); }
+});
+
+const gruppeForm = document.getElementById("gruppe-form");
+if (gruppeForm) gruppeForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(gruppeForm);
+  try {
+    await api("POST", `/api/mandanten/${MANDANT_ID}/gruppen`, {
+      code: f.get("code"), name: f.get("name"), richtung: f.get("richtung"),
+      sortierung: parseInt(f.get("sortierung")) || 0,
+    });
+    gruppeForm.reset(); lade();
+  } catch (err) { toast(err.message); }
+});
+
 async function lade() {
   const d = await api("GET", `/api/mandanten/${MANDANT_ID}/konten`);
   gruppen = d.gruppen;
+  ladeGruppen(d);
   const ng = document.getElementById("neu-gruppe");
   if (ng) ng.innerHTML = `<option value="">–</option>` + gruppen.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join("");
   const nt = document.getElementById("neu-typ");

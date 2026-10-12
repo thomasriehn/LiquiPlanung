@@ -1,0 +1,227 @@
+{% extends "base.html" %}
+{% block titel %}Kontenrahmen – LiquiPlanung{% endblock %}
+{% block inhalt %}
+<div class="seite">
+  <h1>Kontenrahmen-Vorlagen</h1>
+  <p class="hinweis">
+    Vorlagen werden beim Anlegen eines Mandanten in dessen Kontenrahmen kopiert –
+    spätere Änderungen an einer Vorlage wirken nur auf danach angelegte Mandanten.
+    SKR03/SKR04 sind fest eingebaut und dienen als Kopiervorlage; eigene Vorlagen
+    sind frei editierbar. Den Kontenrahmen eines <em>bestehenden</em> Mandanten
+    pflegen Sie weiterhin auf dessen „Konten“-Seite.
+  </p>
+
+  <table class="liste" id="vorlagen-tabelle">
+    <thead><tr><th>Code</th><th>Name</th><th>Art</th><th class="zahl">Gruppen</th>
+      <th class="zahl">Konten</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Neue Vorlage anlegen</h2>
+  <form id="vorlage-form" class="formular-zeilen">
+    <label>Code<input name="code" required pattern="[A-Za-z0-9_\-]{2,16}"
+      title="2–16 Zeichen: Buchstaben, Ziffern, '-' und '_'" placeholder="z. B. SKR03-INSO"></label>
+    <label>Name<input name="name" required placeholder="z. B. SKR03 Insolvenz"></label>
+    <label>Basis (wird kopiert)<select name="basis" id="basis-auswahl"></select></label>
+    <button type="submit">Anlegen</button>
+  </form>
+
+  <div id="editor" style="display:none">
+    <h2 id="editor-titel"></h2>
+    <div class="formular-zeilen">
+      <label>Name<input id="editor-name" style="min-width:260px"></label>
+      <button id="speichern">Vorlage speichern</button>
+      <button id="verwerfen" class="sekundaer">Änderungen verwerfen</button>
+      <span class="hinweis" id="editor-status"></span>
+    </div>
+
+    <h3>BWA-Gruppen</h3>
+    <table class="liste" id="gruppen-tabelle">
+      <thead><tr><th>Code</th><th>Name</th><th>Richtung</th>
+        <th class="zahl">Sortierung</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <button id="gruppe-neu" class="sekundaer">+ Gruppe</button>
+
+    <h3>Konten</h3>
+    <table class="liste" id="konten-tabelle">
+      <thead><tr><th>Nummer</th><th>Bezeichnung</th><th>Typ</th>
+        <th class="zahl">USt %</th><th>Gruppe</th><th>liq.wirksam</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <button id="konto-neu" class="sekundaer">+ Konto</button>
+  </div>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+const TYPEN = ["BANK","KASSE","ERLOES","AUFWAND","PERSONAL","SV","STEUER","INVESTITION","FINANZIERUNG","INFO"];
+const RICHTUNGEN = { EIN: "Einzahlungen", AUS: "Auszahlungen", INFO: "nachrichtlich" };
+let aktuellerCode = null;
+let aktuellFest = false;
+
+async function ladeListe() {
+  const vorlagen = await api("GET", "/api/kontenrahmen");
+  const tb = document.querySelector("#vorlagen-tabelle tbody");
+  tb.innerHTML = "";
+  for (const v of vorlagen) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><code>${esc(v.code)}</code></td><td>${esc(v.name)}</td>
+      <td>${v.fest ? "eingebaut" : "eigene Vorlage"}</td>
+      <td class="zahl">${v.gruppen_anzahl ?? ""}</td>
+      <td class="zahl">${v.konten_anzahl ?? ""}</td>
+      <td><button class="sekundaer" data-aktion="oeffnen" data-code="${esc(v.code)}">${v.fest ? "ansehen" : "bearbeiten"}</button>
+        ${v.fest ? "" : `<button class="gefahr" data-aktion="loeschen" data-code="${esc(v.code)}">✕</button>`}</td>`;
+    tb.appendChild(tr);
+  }
+  const basis = document.getElementById("basis-auswahl");
+  basis.innerHTML = vorlagen.map(v =>
+    `<option value="${esc(v.code)}">${esc(v.code)} – ${esc(v.name)}</option>`).join("");
+  tb.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
+    if (btn.dataset.aktion === "oeffnen") { oeffne(btn.dataset.code); return; }
+    if (!confirm(`Vorlage '${btn.dataset.code}' löschen? Bestehende Mandanten behalten ihre Konten.`)) return;
+    try {
+      await api("DELETE", `/api/kontenrahmen/${btn.dataset.code}`);
+      if (aktuellerCode === btn.dataset.code) document.getElementById("editor").style.display = "none";
+      ladeListe();
+    } catch (e) { toast(e.message); }
+  }));
+}
+
+function typSelect(wert, fest) {
+  return `<select data-feld="typ" ${fest ? "disabled" : ""}>` + TYPEN.map(t =>
+    `<option value="${t}" ${t === wert ? "selected" : ""}>${t}</option>`).join("") + `</select>`;
+}
+
+function gruppenCodes() {
+  return [...document.querySelectorAll("#gruppen-tabelle tbody [data-feld=code]")]
+    .map(el => el.value.trim()).filter(Boolean);
+}
+
+function gruppeSelect(wert, fest) {
+  const optionen = `<option value="">–</option>` + gruppenCodes().map(c =>
+    `<option value="${esc(c)}" ${c === wert ? "selected" : ""}>${esc(c)}</option>`).join("");
+  return `<select data-feld="gruppe" ${fest ? "disabled" : ""}>${optionen}</select>`;
+}
+
+function aktualisiereGruppenAuswahl() {
+  document.querySelectorAll("#konten-tabelle tbody [data-feld=gruppe]").forEach(sel => {
+    const wert = sel.value;
+    sel.innerHTML = `<option value="">–</option>` + gruppenCodes().map(c =>
+      `<option value="${esc(c)}" ${c === wert ? "selected" : ""}>${esc(c)}</option>`).join("");
+  });
+}
+
+function gruppenZeile(g, fest) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input data-feld="code" value="${esc(g.code)}" style="width:110px" ${fest ? "disabled" : ""}></td>
+    <td><input data-feld="name" value="${esc(g.name)}" ${fest ? "disabled" : ""}></td>
+    <td><select data-feld="richtung" ${fest ? "disabled" : ""}>${Object.entries(RICHTUNGEN).map(([w, n]) =>
+      `<option value="${w}" ${w === g.richtung ? "selected" : ""}>${n}</option>`).join("")}</select></td>
+    <td class="zahl"><input data-feld="sortierung" type="number" value="${g.sortierung ?? 0}" style="width:80px" ${fest ? "disabled" : ""}></td>
+    <td>${fest ? "" : `<button class="gefahr" data-aktion="zeile-weg">✕</button>`}</td>`;
+  return tr;
+}
+
+function kontenZeile(k, fest) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input data-feld="nummer" value="${esc(k.nummer)}" style="width:90px" ${fest ? "disabled" : ""}></td>
+    <td><input data-feld="bezeichnung" value="${esc(k.bezeichnung)}" ${fest ? "disabled" : ""}></td>
+    <td>${typSelect(k.typ, fest)}</td>
+    <td class="zahl"><input data-feld="ust_satz" type="number" step="0.01" min="0" max="100"
+      value="${k.ust_satz ?? ""}" placeholder="–" style="width:70px" ${fest ? "disabled" : ""}></td>
+    <td>${gruppeSelect(k.gruppe, fest)}</td>
+    <td><input data-feld="liquiditaetswirksam" type="checkbox" ${k.liquiditaetswirksam !== false ? "checked" : ""} ${fest ? "disabled" : ""}></td>
+    <td>${fest ? "" : `<button class="gefahr" data-aktion="zeile-weg">✕</button>`}</td>`;
+  return tr;
+}
+
+async function oeffne(code) {
+  let def;
+  try { def = await api("GET", `/api/kontenrahmen/${code}`); }
+  catch (e) { toast(e.message); return; }
+  aktuellerCode = code;
+  aktuellFest = !!def.fest;
+  document.getElementById("editor").style.display = "";
+  document.getElementById("editor-titel").textContent =
+    `${code}${aktuellFest ? " (eingebaut, nur ansehen)" : ""}`;
+  const nameFeld = document.getElementById("editor-name");
+  nameFeld.value = def.name;
+  nameFeld.disabled = aktuellFest;
+  document.getElementById("speichern").style.display = aktuellFest ? "none" : "";
+  document.getElementById("gruppe-neu").style.display = aktuellFest ? "none" : "";
+  document.getElementById("konto-neu").style.display = aktuellFest ? "none" : "";
+  document.getElementById("editor-status").textContent = "";
+  const gt = document.querySelector("#gruppen-tabelle tbody");
+  gt.innerHTML = "";
+  def.gruppen.forEach(g => gt.appendChild(gruppenZeile(g, aktuellFest)));
+  const kt = document.querySelector("#konten-tabelle tbody");
+  kt.innerHTML = "";
+  def.konten.forEach(k => kt.appendChild(kontenZeile(k, aktuellFest)));
+  document.getElementById("editor").scrollIntoView({ behavior: "smooth" });
+}
+
+document.getElementById("gruppe-neu").addEventListener("click", () => {
+  document.querySelector("#gruppen-tabelle tbody").appendChild(
+    gruppenZeile({ code: "", name: "", richtung: "AUS", sortierung: 0 }, false));
+});
+document.getElementById("konto-neu").addEventListener("click", () => {
+  document.querySelector("#konten-tabelle tbody").appendChild(
+    kontenZeile({ nummer: "", bezeichnung: "", typ: "AUFWAND", ust_satz: null, gruppe: "" }, false));
+});
+document.getElementById("editor").addEventListener("click", (e) => {
+  if (e.target.dataset.aktion === "zeile-weg") {
+    e.target.closest("tr").remove();
+    aktualisiereGruppenAuswahl();
+  }
+});
+document.querySelector("#gruppen-tabelle").addEventListener("change", (e) => {
+  if (e.target.dataset.feld === "code") aktualisiereGruppenAuswahl();
+});
+
+document.getElementById("speichern").addEventListener("click", async () => {
+  const gruppen = [...document.querySelectorAll("#gruppen-tabelle tbody tr")].map(tr => ({
+    code: tr.querySelector("[data-feld=code]").value.trim(),
+    name: tr.querySelector("[data-feld=name]").value.trim(),
+    richtung: tr.querySelector("[data-feld=richtung]").value,
+    sortierung: parseInt(tr.querySelector("[data-feld=sortierung]").value) || 0,
+  }));
+  const konten = [...document.querySelectorAll("#konten-tabelle tbody tr")].map(tr => ({
+    nummer: tr.querySelector("[data-feld=nummer]").value.trim(),
+    bezeichnung: tr.querySelector("[data-feld=bezeichnung]").value.trim(),
+    typ: tr.querySelector("[data-feld=typ]").value,
+    ust_satz: tr.querySelector("[data-feld=ust_satz]").value === ""
+      ? null : parseFloat(tr.querySelector("[data-feld=ust_satz]").value),
+    gruppe: tr.querySelector("[data-feld=gruppe]").value || null,
+    liquiditaetswirksam: tr.querySelector("[data-feld=liquiditaetswirksam]").checked,
+  }));
+  try {
+    await api("PUT", `/api/kontenrahmen/${aktuellerCode}`, {
+      name: document.getElementById("editor-name").value, gruppen, konten,
+    });
+    document.getElementById("editor-status").textContent =
+      `Gespeichert (${gruppen.length} Gruppen, ${konten.length} Konten).`;
+    ladeListe();
+  } catch (e) { toast(e.message); }
+});
+document.getElementById("verwerfen").addEventListener("click", () => oeffne(aktuellerCode));
+
+document.getElementById("vorlage-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  try {
+    const erg = await api("POST", "/api/kontenrahmen", {
+      code: f.get("code"), name: f.get("name"), basis: f.get("basis"),
+    });
+    e.target.reset();
+    await ladeListe();
+    oeffne(erg.code);
+  } catch (err) { toast(err.message); }
+});
+
+ladeListe();
+</script>
+{% endblock %}

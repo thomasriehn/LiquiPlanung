@@ -41,15 +41,19 @@ def test_testdatensatz_kompletter_durchlauf(client, tmp_path):
     client.patch(f"/api/konten/{k1200['id']}",
                  json={"iban": "DE02 1203 0000 0000 2020 51"})
 
-    # DATEV-Stapel (drei Monate) – alle Konten der Vorlage, keine unbekannten
+    # DATEV-Stapel (drei Monate) – alle Konten der Vorlage, keine unbekannten.
+    # Der letzte Monat kann je nach Stichtag fast leer sein (Buchhaltung bis
+    # Stichtag − 7), daher zählt die Summe über alle Stapel.
+    gesamt = 0
     for datei in sorted(tmp_path.glob("0[1-3]_buchungen_*.csv")):
         erg = client.post(
             f"/api/mandanten/{mandant_id}/import",
             files={"datei": (datei.name, datei.read_bytes(), "text/csv")},
         ).json()
         assert erg["format"] == "DATEV", erg
-        assert erg["anzahl"] > 40
         assert erg["unbekannte_konten"] == []
+        gesamt += erg["anzahl"]
+    assert gesamt > 90
 
     erg = client.post(
         f"/api/mandanten/{mandant_id}/import?format=bwa",

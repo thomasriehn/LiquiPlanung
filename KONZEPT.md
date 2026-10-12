@@ -86,6 +86,15 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
    die Aufhebung löst alle Anteile wieder. Reine Überzahlungen ohne passende
    Postenkombination werden abgelehnt.
 
+   Unabhängig vom Bankabgleich lassen sich Zahlungen auch **manuell erfassen**
+   (Betrag und Datum je Posten): Teilzahlungen lassen den Posten mit Restbetrag
+   offen, optional wird der Rest ausgebucht (Skonto/Erlass). Für kleinere
+   Verfahren ohne Einzel-OPs gibt es **Sammelposten** (erwartete
+   Sammelzahlungseingänge über mehrere Debitoren, z. B. je Kalenderwoche):
+   Zahlungen über den Restbetrag hinaus werden automatisch auf die nächsten
+   offenen Sammelposten (nach Fälligkeit) vorgetragen – zahlen Debitoren früher
+   als erwartet, sinken die später geplanten Einzahlungen entsprechend.
+
 **Steuer-/SV-Regeln**
 
 10. ✔ **Bankarbeitstage & Feiertage je Bundesland:** SV-Beiträge sind am drittletzten
@@ -246,6 +255,16 @@ SKR03 und SKR04 werden als Vorlage mit den planungsrelevanten Konten (inkl. USt-
 BWA-Gruppenzuordnung) je Mandant eingespielt und sind danach frei editier- und erweiterbar
 (auch als CSV-Import). Ein leerer, eigener Kontenrahmen ist ebenfalls möglich. Die
 Vorbelegungen (USt-Sätze, Gruppenzuordnung) sind Vorschlagswerte und je Mandant zu prüfen.
+
+Zusätzlich können Administratoren **eigene Kontenrahmen-Vorlagen** definieren (Seite
+„Kontenrahmen“): neu oder als Kopie von SKR03/SKR04 bzw. einer anderen Vorlage, mit
+eigenen BWA-Gruppen und Konten. Beim Anlegen eines Mandanten steht jede Vorlage zur
+Auswahl und wird – wie die festen – in den Mandanten kopiert; spätere Änderungen an der
+Vorlage wirken nur auf danach angelegte Mandanten. Terminregeln neuer Mandanten aus
+eigenen Vorlagen starten ohne Konto­verknüpfung (für die Historienschätzung das Konto an
+der Regel nachtragen). Je Mandant sind auch die **BWA-Gruppen** selbst editierbar
+(Konten-Seite): anlegen, umbenennen, Richtung/Sortierung ändern, löschen – zugeordnete
+Konten bleiben dann ohne Gruppe erhalten.
 
 ## 9. Sicherheit & Mandantentrennung
 

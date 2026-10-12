@@ -519,3 +519,158 @@ def test_op_import(client):
     erg = antwort.json()
     assert erg["angelegt"] == 0
     assert erg["uebersprungen"] == 4
+
+
+def test_kontenrahmen_vorlagen(client):
+    _login(client)
+    liste = client.get("/api/kontenrahmen").json()
+    assert {v["code"] for v in liste} >= {"SKR03", "SKR04", "EIGEN"}
+
+    antwort = client.post(
+        "/api/kontenrahmen",
+        json={"code": "SKR03-INSO", "name": "SKR03 Insolvenz", "basis": "SKR03"},
+    )
+    assert antwort.status_code == 201, antwort.text
+    definition = client.get("/api/kontenrahmen/SKR03-INSO").json()
+    assert definition["fest"] is False
+    assert len(definition["konten"]) > 40          # Kopie der SKR03-Vorlage
+
+    # Vorlage erweitern: eigene Gruppe + Konto mit Gruppenzuordnung
+    definition["gruppen"].append(
+        {"code": "A_MASSE", "name": "Massekosten", "richtung": "AUS", "sortierung": 125}
+    )
+    definition["konten"].append(
+        {"nummer": "4999", "bezeichnung": "Massekosten Verfahren", "typ": "AUFWAND",
+         "ust_satz": 19.0, "gruppe": "A_MASSE"}
+    )
+    assert client.put("/api/kontenrahmen/SKR03-INSO", json=definition).status_code == 200
+
+    # Mandant aus der eigenen Vorlage
+    mandant_id = client.post(
+        "/api/mandanten",
+        json={"name": "Vorlagen GmbH", "kurzname": "vorlagen", "kontenrahmen": "SKR03-INSO"},
+    ).json()["id"]
+    konten = client.get(f"/api/mandanten/{mandant_id}/konten").json()
+    gruppe = next(g for g in konten["gruppen"] if g["code"] == "A_MASSE")
+    k4999 = next(k for k in konten["konten"] if k["nummer"] == "4999")
+    assert k4999["gruppe_id"] == gruppe["id"]
+    assert k4999["ust_satz"] == 19.0
+
+    # eingebaute Vorlagen sind geschützt, Unbekanntes wird abgelehnt
+    assert client.put("/api/kontenrahmen/SKR03", json=definition).status_code == 409
+    assert client.delete("/api/kontenrahmen/SKR03").status_code == 409
+    assert client.post(
+        "/api/mandanten",
+        json={"name": "X", "kurzname": "x-kr", "kontenrahmen": "GIBTSNICHT"},
+    ).status_code == 422
+    kaputt = {"gruppen": [], "konten": [
+        {"nummer": "100", "bezeichnung": "A", "typ": "AUFWAND"},
+        {"nummer": "100", "bezeichnung": "B", "typ": "AUFWAND"},
+    ]}
+    assert client.put("/api/kontenrahmen/SKR03-INSO", json=kaputt).status_code == 422
+
+    assert client.delete("/api/kontenrahmen/SKR03-INSO").json()["ok"] is True
+    # Vorlagenverwaltung ist Admin-Sache
+    client.post("/api/benutzer", json={
+        "email": "kr@example.com", "name": "K", "passwort": "geheim123",
+        "rolle": "BEARBEITER", "mandanten_ids": []})
+    client.get("/logout")
+    client.post("/login", data={"email": "kr@example.com", "passwort": "geheim123"})
+    assert client.get("/api/kontenrahmen").status_code == 403
+
+
+def test_gruppen_crud(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Gruppen GmbH", "kurzname": "gruppen"}
+    ).json()["id"]
+    gid = client.post(
+        f"/api/mandanten/{mandant_id}/gruppen",
+        json={"code": "A_MASSE", "name": "Massekosten", "richtung": "AUS", "sortierung": 125},
+    ).json()["id"]
+    assert client.post(
+        f"/api/mandanten/{mandant_id}/gruppen",
+        json={"code": "A_MASSE", "name": "Doppelt"},
+    ).status_code == 409
+    assert client.patch(
+        f"/api/gruppen/{gid}", json={"name": "Masseverbindlichkeiten", "sortierung": 10}
+    ).json()["ok"] is True
+
+    konten = client.get(f"/api/mandanten/{mandant_id}/konten").json()
+    gruppe = next(g for g in konten["gruppen"] if g["id"] == gid)
+    assert gruppe["name"] == "Masseverbindlichkeiten"
+    assert gruppe["sortierung"] == 10
+
+    # Konto zuordnen, Gruppe löschen -> Konto bleibt ohne Gruppe
+    k4210 = next(k for k in konten["konten"] if k["nummer"] == "4210")
+    client.patch(f"/api/konten/{k4210['id']}", json={"gruppe_id": gid})
+    assert client.delete(f"/api/gruppen/{gid}").json()["ok"] is True
+    konten = client.get(f"/api/mandanten/{mandant_id}/konten").json()
+    assert gid not in {g["id"] for g in konten["gruppen"]}
+    assert next(k for k in konten["konten"] if k["nummer"] == "4210")["gruppe_id"] is None
+
+
+def test_zahlung_erfassen(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Zahlung GmbH", "kurzname": "zahlung"}
+    ).json()["id"]
+    pid = client.post(
+        f"/api/mandanten/{mandant_id}/posten",
+        json={"art": "DEBITOR", "partner": "Kunde Nord", "faellig_am": "2026-11-20",
+              "betrag_brutto": 10000},
+    ).json()["id"]
+
+    # Teilzahlung: Posten bleibt offen, Planung rechnet mit dem Rest
+    erg = client.post(f"/api/posten/{pid}/zahlungen",
+                      json={"betrag": 4000, "datum": "2026-11-18"}).json()
+    assert erg["status"] == "OFFEN"
+    assert erg["restbetrag"] == 6000.0
+    # Überzahlung auf normalem Posten wird abgelehnt
+    assert client.post(f"/api/posten/{pid}/zahlungen",
+                       json={"betrag": 9000}).status_code == 422
+    # Skonto: Rest ausbuchen
+    erg = client.post(f"/api/posten/{pid}/zahlungen",
+                      json={"betrag": 5800, "ausbuchen": True}).json()
+    assert erg["status"] == "BEZAHLT"
+    posten = client.get(f"/api/mandanten/{mandant_id}/posten").json()
+    assert posten[0]["status"] == "BEZAHLT"
+    assert posten[0]["bezahlt_betrag"] == 9800.0
+    # Zahlung auf bezahlten Posten abgelehnt
+    assert client.post(f"/api/posten/{pid}/zahlungen",
+                       json={"betrag": 1}).status_code == 422
+
+
+def test_sammelposten_ueberzahlung_vortrag(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Sammel GmbH", "kurzname": "sammel"}
+    ).json()["id"]
+    wochen = [("Debitoren KW 46", "2026-11-13", 10000),
+              ("Debitoren KW 47", "2026-11-20", 8000),
+              ("Debitoren KW 48", "2026-11-27", 6000)]
+    ids = []
+    for partner, faellig, betrag in wochen:
+        ids.append(client.post(
+            f"/api/mandanten/{mandant_id}/posten",
+            json={"art": "DEBITOR", "partner": partner, "faellig_am": faellig,
+                  "betrag_brutto": betrag, "sammel": True},
+        ).json()["id"])
+
+    # Mehr eingezahlt als erwartet: 15.000 auf KW 46 -> 5.000 auf KW 47 vorgetragen
+    erg = client.post(f"/api/posten/{ids[0]}/zahlungen", json={"betrag": 15000}).json()
+    assert erg["status"] == "BEZAHLT"
+    assert erg["verrechnet"] == [{
+        "posten_id": ids[1], "partner": "Debitoren KW 47", "faellig_am": "2026-11-20",
+        "betrag": 5000.0, "status": "OFFEN"}]
+    assert erg["unverteilt"] == 0.0
+    posten = {p["partner"]: p for p in client.get(f"/api/mandanten/{mandant_id}/posten").json()}
+    assert posten["Debitoren KW 47"]["restbetrag"] == 3000.0    # spätere Einzahlung sinkt
+
+    # 12.000 auf KW 47 (Rest 3.000): KW 47 und KW 48 bezahlt, 3.000 nicht verteilbar
+    erg = client.post(f"/api/posten/{ids[1]}/zahlungen", json={"betrag": 12000}).json()
+    assert erg["status"] == "BEZAHLT"
+    assert [v["posten_id"] for v in erg["verrechnet"]] == [ids[2]]
+    assert erg["verrechnet"][0]["betrag"] == 6000.0
+    assert erg["verrechnet"][0]["status"] == "BEZAHLT"
+    assert erg["unverteilt"] == 3000.0

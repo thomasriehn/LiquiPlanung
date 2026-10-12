@@ -178,16 +178,63 @@ def lege_standard_szenarien_an(db: Session, mandant: models.Mandant) -> None:
     )
 
 
+def eingebaute_definition(code: str) -> dict | None:
+    """SKR03/SKR04 (bzw. EIGEN = leer) im selben Format wie eigene Vorlagen."""
+    if code == "EIGEN":
+        konten: list = []
+    elif code in ("SKR03", "SKR04"):
+        konten = [
+            {
+                "nummer": nummer, "bezeichnung": bezeichnung, "typ": typ,
+                "ust_satz": float(ust) if ust is not None else None,
+                "gruppe": gruppe_code,
+                "liquiditaetswirksam": typ != KontoTyp.INFO.value,
+            }
+            for nummer, bezeichnung, typ, ust, gruppe_code in
+            {"SKR03": SKR03, "SKR04": SKR04}[code]
+        ]
+    else:
+        return None
+    return {
+        "code": code,
+        "name": {"SKR03": "DATEV SKR03", "SKR04": "DATEV SKR04",
+                 "EIGEN": "Eigener (leer)"}[code],
+        "fest": True,
+        "gruppen": [
+            {"code": c, "name": n, "richtung": r, "sortierung": s}
+            for c, n, r, s in GRUPPEN
+        ],
+        "konten": konten,
+    }
+
+
 def lege_kontenrahmen_an(db: Session, mandant: models.Mandant) -> None:
-    """Erzeugt Gruppen, Konten und Terminregeln für einen neuen Mandanten."""
+    """Erzeugt Gruppen, Konten und Terminregeln für einen neuen Mandanten.
+
+    SKR03/SKR04/EIGEN kommen aus dem Code; jeder andere Wert bezeichnet eine
+    admin-definierte Vorlage (KontenrahmenVorlage), die kopiert wird.
+    """
     vorhanden = db.scalar(
         select(models.Konto.id).where(models.Konto.mandant_id == mandant.id).limit(1)
     )
     if vorhanden:
         return
 
+    eigene = None
+    if mandant.kontenrahmen not in ("SKR03", "SKR04", "EIGEN"):
+        eigene = db.scalar(
+            select(models.KontenrahmenVorlage).where(
+                models.KontenrahmenVorlage.code == mandant.kontenrahmen
+            )
+        )
+
+    gruppen_quelle = (
+        [(g.code, g.name, g.richtung, g.sortierung) for g in eigene.gruppen]
+        if eigene is not None
+        else GRUPPEN
+    )
     gruppen_by_code: dict[str, models.KontoGruppe] = {}
-    for code, name, richtung, sort in GRUPPEN:
+    for code, name, richtung, sort in gruppen_quelle:
         g = models.KontoGruppe(
             mandant_id=mandant.id, code=code, name=name, richtung=richtung, sortierung=sort
         )
@@ -195,20 +242,36 @@ def lege_kontenrahmen_an(db: Session, mandant: models.Mandant) -> None:
         gruppen_by_code[code] = g
     db.flush()
 
-    vorlage = {"SKR03": SKR03, "SKR04": SKR04}.get(mandant.kontenrahmen, [])
     konten_by_nr: dict[str, models.Konto] = {}
-    for nummer, bezeichnung, typ, ust, gruppe_code in vorlage:
-        k = models.Konto(
-            mandant_id=mandant.id,
-            nummer=nummer,
-            bezeichnung=bezeichnung,
-            typ=typ,
-            ust_satz=ust,
-            gruppe_id=gruppen_by_code[gruppe_code].id if gruppe_code else None,
-            liquiditaetswirksam=typ != KontoTyp.INFO.value,
-        )
-        db.add(k)
-        konten_by_nr[nummer] = k
+    if eigene is not None:
+        for vk in eigene.konten:
+            k = models.Konto(
+                mandant_id=mandant.id,
+                nummer=vk.nummer,
+                bezeichnung=vk.bezeichnung,
+                typ=vk.typ,
+                ust_satz=vk.ust_satz,
+                gruppe_id=gruppen_by_code[vk.gruppe_code].id
+                if vk.gruppe_code and vk.gruppe_code in gruppen_by_code
+                else None,
+                liquiditaetswirksam=vk.liquiditaetswirksam,
+            )
+            db.add(k)
+            konten_by_nr[vk.nummer] = k
+    else:
+        vorlage = {"SKR03": SKR03, "SKR04": SKR04}.get(mandant.kontenrahmen, [])
+        for nummer, bezeichnung, typ, ust, gruppe_code in vorlage:
+            k = models.Konto(
+                mandant_id=mandant.id,
+                nummer=nummer,
+                bezeichnung=bezeichnung,
+                typ=typ,
+                ust_satz=ust,
+                gruppe_id=gruppen_by_code[gruppe_code].id if gruppe_code else None,
+                liquiditaetswirksam=typ != KontoTyp.INFO.value,
+            )
+            db.add(k)
+            konten_by_nr[nummer] = k
     db.flush()
 
     regel_konten = REGEL_KONTEN.get(mandant.kontenrahmen, {})

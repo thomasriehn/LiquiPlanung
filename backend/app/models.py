@@ -165,6 +165,67 @@ class Mandant(Base):
     konten: Mapped[list["Konto"]] = relationship(back_populates="mandant")
 
 
+class KontenrahmenVorlage(Base):
+    """Admin-definierter Kontenrahmen als Vorlage für neue Mandanten.
+
+    SKR03/SKR04 sind fest im Code hinterlegt (services/kontenrahmen.py); eigene
+    Vorlagen liegen hier und werden beim Anlegen eines Mandanten – wie die
+    festen – in dessen KontoGruppen/Konten kopiert. Spätere Änderungen an der
+    Vorlage wirken daher nur auf danach angelegte Mandanten.
+    """
+
+    __tablename__ = "kontenrahmen_vorlagen"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(16), unique=True)
+    name: Mapped[str] = mapped_column(String(255))
+    erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    gruppen: Mapped[list["VorlageGruppe"]] = relationship(
+        back_populates="vorlage", cascade="all, delete-orphan",
+        order_by="VorlageGruppe.sortierung",
+    )
+    konten: Mapped[list["VorlageKonto"]] = relationship(
+        back_populates="vorlage", cascade="all, delete-orphan",
+        order_by="VorlageKonto.nummer",
+    )
+
+
+class VorlageGruppe(Base):
+    __tablename__ = "vorlage_gruppen"
+    __table_args__ = (UniqueConstraint("vorlage_id", "code"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vorlage_id: Mapped[int] = mapped_column(
+        ForeignKey("kontenrahmen_vorlagen.id", ondelete="CASCADE"), index=True
+    )
+    code: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(255))
+    richtung: Mapped[str] = mapped_column(String(10), default=Richtung.AUS.value)
+    sortierung: Mapped[int] = mapped_column(Integer, default=0)
+
+    vorlage: Mapped[KontenrahmenVorlage] = relationship(back_populates="gruppen")
+
+
+class VorlageKonto(Base):
+    __tablename__ = "vorlage_konten"
+    __table_args__ = (UniqueConstraint("vorlage_id", "nummer"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vorlage_id: Mapped[int] = mapped_column(
+        ForeignKey("kontenrahmen_vorlagen.id", ondelete="CASCADE"), index=True
+    )
+    nummer: Mapped[str] = mapped_column(String(16))
+    bezeichnung: Mapped[str] = mapped_column(String(255))
+    typ: Mapped[str] = mapped_column(String(20), default=KontoTyp.AUFWAND.value)
+    ust_satz: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    # Gruppenzuordnung über den Gruppencode der Vorlage (None = ohne Gruppe)
+    gruppe_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    liquiditaetswirksam: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    vorlage: Mapped[KontenrahmenVorlage] = relationship(back_populates="konten")
+
+
 class KontoGruppe(Base):
     __tablename__ = "konto_gruppen"
     __table_args__ = (UniqueConstraint("mandant_id", "code"),)
@@ -326,6 +387,10 @@ class OffenerPosten(Base):
     bezahlt_am: Mapped[date | None] = mapped_column(Date, nullable=True)
     # Insolvenzrechtliche Einordnung (Ausbaustufe: Zahlungssperre)
     forderungsklasse: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Sammelposten: erwarteter Sammelzahlungseingang über mehrere Debitoren
+    # (kleinere Verfahren ohne Einzel-OPs). Zahlungen über den Restbetrag hinaus
+    # werden auf den nächsten offenen Sammelposten vorgetragen.
+    sammel: Mapped[bool] = mapped_column(Boolean, default=False)
     notiz: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     konto: Mapped[Konto | None] = relationship()

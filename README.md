@@ -22,11 +22,19 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   (nur bei starkem Signal, nie vorausgewählt) lassen den Posten mit Restbetrag offen –
   die Planung rechnet automatisch mit dem Rest. Sammelüberweisungen (1:n) werden
   erkannt, wenn eine Postenkombination die Zahlung exakt ergibt.
+- **Manuelle Zahlungserfassung** je Posten (Betrag/Datum): Teilzahlung mit
+  Restbetrag im Plan, optional Rest ausbuchen (Skonto/Erlass). **Sammelposten**
+  bilden erwartete Sammelzahlungseingänge mehrerer Debitoren ab (z. B. je
+  Kalenderwoche); Überzahlungen werden automatisch auf die nächsten offenen
+  Sammelposten vorgetragen – spätere geplante Einzahlungen sinken entsprechend.
+  Offene Posten und Dauerbuchungen sind vollständig bearbeitbar.
 - **Integrierte Sicherungen**: automatische Voll-Backups (Intervall/Aufbewahrung
   konfigurierbar, Docker-Volume), manuelle Sicherung, Download und geführte
   Wiederherstellung in der Admin-Oberfläche – datenbankunabhängig (PostgreSQL/SQLite),
   an die Schema-Revision gebunden, mit automatischer Vorab-Sicherung.
-- **Kontenrahmen** SKR03/SKR04 als editierbare Vorlage je Mandant, USt-Satz je Konto.
+- **Kontenrahmen** SKR03/SKR04 als editierbare Vorlage je Mandant, USt-Satz je Konto;
+  Administratoren definieren eigene Kontenrahmen-Vorlagen (neu oder als Kopie),
+  BWA-Gruppen sind je Mandant frei anpassbar.
 - **Planbasis**: offene Eingangsrechnungen/Forderungen, Dauerverbindlichkeiten,
   Budget je Konto/Monat (Restbudget-Logik, Netto→Brutto über USt-Satz) mit
   Verteilungsprofil je Konto (gleichmäßig, Monatsanfang/-mitte/-ende,

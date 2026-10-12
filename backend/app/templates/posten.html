@@ -40,7 +40,11 @@
           <option value="ABSONDERUNG">Absonderung (§§ 49 ff.)</option>
         </select>
       </label>
-      <button type="submit">Anlegen</button>
+      <label>Notiz<input name="notiz"></label>
+      <label class="cb" title="Erwarteter Sammelzahlungseingang über mehrere Debitoren/Kreditoren ohne Einzel-OPs. Überzahlungen werden auf den nächsten offenen Sammelposten vorgetragen.">
+        <input type="checkbox" name="sammel"> Sammelposten</label>
+      <button type="submit" id="op-submit">Anlegen</button>
+      <button type="button" id="op-abbrechen" class="sekundaer" style="display:none">Abbrechen</button>
     </form>
     <form id="op-import-form" class="formular-zeilen">
       <label>OP-Liste importieren (CSV: Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz)
@@ -56,6 +60,21 @@
     </table>
   </div>
 
+  <dialog id="zahlung-dialog" style="border:1px solid #c9d4e0;border-radius:8px;padding:18px 22px;max-width:520px">
+    <h3 style="margin-top:0">Zahlung erfassen</h3>
+    <p class="hinweis" id="zahlung-info"></p>
+    <div class="formular-zeilen">
+      <label>Betrag<input id="zahlung-betrag" type="number" step="0.01" min="0.01" required></label>
+      <label>Datum<input id="zahlung-datum" type="date"></label>
+    </div>
+    <label class="cb" style="display:flex;gap:8px;align-items:baseline"><input type="checkbox" id="zahlung-ausbuchen">
+      <span>Restbetrag ausbuchen (z. B. Skonto/Erlass) – Posten gilt als bezahlt</span></label>
+    <div class="werkzeuge" style="margin-top:12px">
+      <button id="zahlung-speichern">Zahlung erfassen</button>
+      <button id="zahlung-schliessen" class="sekundaer" type="button">Abbrechen</button>
+    </div>
+  </dialog>
+
   <div id="bereich-dauer" style="display:none">
     {% if not leser %}
     <form id="dauer-form" class="formular-zeilen">
@@ -69,7 +88,8 @@
       <label>Gültig von<input type="date" name="gueltig_von" required></label>
       <label>Gültig bis<input type="date" name="gueltig_bis"></label>
       <label>Konto<select name="konto_id" class="konto-auswahl"></select></label>
-      <button type="submit">Anlegen</button>
+      <button type="submit" id="dauer-submit">Anlegen</button>
+      <button type="button" id="dauer-abbrechen" class="sekundaer" style="display:none">Abbrechen</button>
     </form>
     {% endif %}
     <table class="liste">
@@ -164,7 +184,7 @@ async function ladeOP() {
     if (p.status !== "OFFEN") tr.style.opacity = ".5";
     tr.innerHTML = `
       <td>${p.art === "KREDITOR" ? "ER" : "FO"}</td>
-      <td>${esc(p.partner)}</td><td>${esc(p.belegnr)}</td>
+      <td>${esc(p.partner)}${p.sammel ? ` <span class="badge-gesperrt" style="background:#eaf1fa;color:#1d4e89;border-color:#9db4d0" title="Sammelposten: Überzahlungen werden auf den nächsten offenen Sammelposten vorgetragen">Sammel</span>` : ""}${p.notiz ? ` <span title="${esc(p.notiz)}">📝</span>` : ""}</td><td>${esc(p.belegnr)}</td>
       <td>${p.rechnungsdatum || ""}</td>
       <td>${p.faellig_am}</td><td>${p.zahlung_geplant_am || ""}</td>
       <td class="zahl">${eur(p.betrag_brutto)}${p.status === "OFFEN" && p.bezahlt_betrag > 0
@@ -173,7 +193,8 @@ async function ladeOP() {
       <td>${klasseSelect(p)}</td>
       <td>${p.status}${p.status === "OFFEN" && p.bezahlt_betrag > 0 ? `<br><span class="klein">teilbezahlt</span>` : ""}</td>
       <td>${LESER ? "" : `
-        ${p.status === "OFFEN" ? `<button class="sekundaer" data-aktion="bezahlt" data-id="${p.id}">bezahlt</button>` : ""}
+        ${p.status === "OFFEN" ? `<button class="sekundaer" data-aktion="zahlung" data-id="${p.id}" title="Zahlung mit Betrag und Datum erfassen">Zahlung</button>` : ""}
+        <button class="sekundaer" data-aktion="bearbeiten" data-id="${p.id}" title="Posten bearbeiten">✎</button>
         <button class="gefahr" data-aktion="loeschen" data-id="${p.id}">✕</button>`}</td>`;
     tb.appendChild(tr);
   }
@@ -184,18 +205,63 @@ async function ladeOP() {
       : "";
   }
   tb.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
+    const p = postenById[btn.dataset.id];
     try {
-      if (btn.dataset.aktion === "bezahlt") {
-        await api("PATCH", `/api/posten/${btn.dataset.id}`,
-          { status: "BEZAHLT", bezahlt_am: new Date().toISOString().slice(0, 10) });
-      } else {
-        if (!confirm("Posten löschen?")) return;
-        await api("DELETE", `/api/posten/${btn.dataset.id}`);
-      }
+      if (btn.dataset.aktion === "zahlung") { oeffneZahlung(p); return; }
+      if (btn.dataset.aktion === "bearbeiten") { opBearbeiten(p); return; }
+      if (!confirm("Posten löschen?")) return;
+      await api("DELETE", `/api/posten/${btn.dataset.id}`);
       ladeOP();
     } catch (e) { toast(e.message); }
   }));
 }
+
+// ---- Zahlung erfassen (Betrag/Datum, Teilzahlung, Skonto-Ausbuchung) ----
+let zahlungPosten = null;
+
+function oeffneZahlung(p) {
+  zahlungPosten = p;
+  document.getElementById("zahlung-info").innerHTML =
+    `${p.art === "KREDITOR" ? "ER" : "FO"} · <strong>${esc(p.partner)}</strong>` +
+    `${p.belegnr ? " · " + esc(p.belegnr) : ""} – Betrag ${eur(p.betrag_brutto)} €` +
+    `${p.bezahlt_betrag > 0 ? `, bereits bezahlt ${eur(p.bezahlt_betrag)} €` : ""}` +
+    `, offen <strong>${eur(p.restbetrag)} €</strong>.` +
+    (p.sammel ? `<br>Sammelposten: eine Zahlung über den Restbetrag hinaus wird auf
+      den nächsten offenen Sammelposten vorgetragen (spätere geplante
+      ${p.art === "DEBITOR" ? "Einzahlungen" : "Auszahlungen"} sinken).` : "");
+  document.getElementById("zahlung-betrag").value = p.restbetrag.toFixed(2);
+  document.getElementById("zahlung-datum").value = new Date().toISOString().slice(0, 10);
+  document.getElementById("zahlung-ausbuchen").checked = false;
+  document.getElementById("zahlung-dialog").showModal();
+}
+
+document.getElementById("zahlung-schliessen").addEventListener("click", () =>
+  document.getElementById("zahlung-dialog").close());
+
+document.getElementById("zahlung-speichern").addEventListener("click", async () => {
+  const betrag = parseFloat(document.getElementById("zahlung-betrag").value);
+  if (!betrag || betrag <= 0) { toast("Bitte einen Betrag größer 0 angeben."); return; }
+  try {
+    const erg = await api("POST", `/api/posten/${zahlungPosten.id}/zahlungen`, {
+      betrag,
+      datum: document.getElementById("zahlung-datum").value || null,
+      ausbuchen: document.getElementById("zahlung-ausbuchen").checked,
+    });
+    document.getElementById("zahlung-dialog").close();
+    let meldung = erg.status === "BEZAHLT"
+      ? "Posten bezahlt."
+      : `Teilzahlung erfasst – Rest ${eur(erg.restbetrag)} € bleibt im Plan.`;
+    if (erg.verrechnet.length) {
+      meldung += " Überzahlung vorgetragen auf: " + erg.verrechnet.map(v =>
+        `${v.partner} (${eur(v.betrag)} €)`).join(", ") + ".";
+    }
+    if (erg.unverteilt > 0) {
+      meldung += ` ${eur(erg.unverteilt)} € konnten keinem Sammelposten zugeordnet werden.`;
+    }
+    toast(meldung, false);
+    ladeOP();
+  } catch (e) { toast(e.message); }
+});
 
 // Ein Listener am Tbody für Inline-Änderungen (Forderungsklasse)
 document.getElementById("op-tabelle").addEventListener("change", async (e) => {
@@ -207,8 +273,11 @@ document.getElementById("op-tabelle").addEventListener("change", async (e) => {
   catch (err) { toast(err.message); ladeOP(); }
 });
 
+let dauerById = {};
+
 async function ladeDauer() {
   const dauer = await api("GET", `/api/mandanten/${MANDANT_ID}/dauerbuchungen`);
+  dauerById = Object.fromEntries(dauer.map(d => [d.id, d]));
   const tb = document.getElementById("dauer-tabelle");
   tb.innerHTML = "";
   for (const d of dauer) {
@@ -220,12 +289,14 @@ async function ladeDauer() {
       <td>${d.stichtag}</td><td>${d.gueltig_von}${d.gueltig_bis ? " – " + d.gueltig_bis : ""}</td>
       <td>${kontoName(d.konto_id)}</td><td>${d.aktiv ? "✓" : "–"}</td>
       <td>${LESER ? "" : `
+        <button class="sekundaer" data-aktion="bearbeiten" data-id="${d.id}" title="Dauerbuchung bearbeiten">✎</button>
         <button class="sekundaer" data-aktion="toggle" data-id="${d.id}" data-aktiv="${d.aktiv}">${d.aktiv ? "deaktivieren" : "aktivieren"}</button>
         <button class="gefahr" data-aktion="loeschen" data-id="${d.id}">✕</button>`}</td>`;
     tb.appendChild(tr);
   }
   tb.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
     try {
+      if (btn.dataset.aktion === "bearbeiten") { dauerBearbeiten(dauerById[btn.dataset.id]); return; }
       if (btn.dataset.aktion === "toggle") {
         await api("PATCH", `/api/dauerbuchungen/${btn.dataset.id}`, { aktiv: btn.dataset.aktiv !== "true" });
       } else {
@@ -237,22 +308,59 @@ async function ladeDauer() {
   }));
 }
 
+// ---- Posten anlegen / bearbeiten (ein Formular für beides) ----
 const opForm = document.getElementById("op-form");
+let opBearbeitet = null;
+
+function opBearbeiten(p) {
+  opBearbeitet = p.id;
+  opForm.art.value = p.art;
+  opForm.partner.value = p.partner;
+  opForm.belegnr.value = p.belegnr || "";
+  opForm.rechnungsdatum.value = p.rechnungsdatum || "";
+  opForm.faellig_am.value = p.faellig_am;
+  opForm.zahlung_geplant_am.value = p.zahlung_geplant_am || "";
+  opForm.betrag_brutto.value = p.betrag_brutto;
+  opForm.konto_id.value = p.konto_id || "";
+  opForm.forderungsklasse.value = p.forderungsklasse || "";
+  opForm.notiz.value = p.notiz || "";
+  opForm.sammel.checked = !!p.sammel;
+  document.getElementById("op-submit").textContent = "Speichern";
+  document.getElementById("op-abbrechen").style.display = "";
+  opForm.scrollIntoView({ behavior: "smooth" });
+}
+
+function opFormZuruecksetzen() {
+  opBearbeitet = null;
+  opForm.reset();
+  document.getElementById("op-submit").textContent = "Anlegen";
+  document.getElementById("op-abbrechen").style.display = "none";
+}
+
+const opAbbrechen = document.getElementById("op-abbrechen");
+if (opAbbrechen) opAbbrechen.addEventListener("click", opFormZuruecksetzen);
+
 if (opForm) opForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = new FormData(opForm);
   const daten = Object.fromEntries(f.entries());
   daten.betrag_brutto = parseFloat(daten.betrag_brutto);
   daten.konto_id = daten.konto_id ? parseInt(daten.konto_id) : null;
-  for (const feld of ["belegnr", "rechnungsdatum", "zahlung_geplant_am", "forderungsklasse"]) {
+  daten.sammel = f.get("sammel") === "on";
+  for (const feld of ["belegnr", "rechnungsdatum", "zahlung_geplant_am", "forderungsklasse", "notiz"]) {
     if (!daten[feld]) daten[feld] = null;
   }
   try {
-    const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/posten`, daten);
-    if (erg.forderungsklasse === "INSOLVENZFORDERUNG" && !f.get("forderungsklasse")) {
-      toast("Automatisch als Insolvenzforderung (§ 38) eingestuft – Zahlungssperre aktiv.", false);
+    if (opBearbeitet !== null) {
+      await api("PATCH", `/api/posten/${opBearbeitet}`, daten);
+      toast("Posten gespeichert.", false);
+    } else {
+      const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/posten`, daten);
+      if (erg.forderungsklasse === "INSOLVENZFORDERUNG" && !f.get("forderungsklasse")) {
+        toast("Automatisch als Insolvenzforderung (§ 38) eingestuft – Zahlungssperre aktiv.", false);
+      }
     }
-    opForm.reset(); ladeOP();
+    opFormZuruecksetzen(); ladeOP();
   }
   catch (err) { toast(err.message); }
 });
@@ -278,7 +386,35 @@ if (opImportForm) opImportForm.addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message); }
 });
 
+// ---- Dauerbuchung anlegen / bearbeiten ----
 const dauerForm = document.getElementById("dauer-form");
+let dauerBearbeitet = null;
+
+function dauerBearbeiten(d) {
+  dauerBearbeitet = d.id;
+  dauerForm.name.value = d.name;
+  dauerForm.art.value = d.art;
+  dauerForm.betrag_brutto.value = d.betrag_brutto;
+  dauerForm.intervall.value = d.intervall;
+  dauerForm.stichtag.value = d.stichtag;
+  dauerForm.gueltig_von.value = d.gueltig_von;
+  dauerForm.gueltig_bis.value = d.gueltig_bis || "";
+  dauerForm.konto_id.value = d.konto_id || "";
+  document.getElementById("dauer-submit").textContent = "Speichern";
+  document.getElementById("dauer-abbrechen").style.display = "";
+  dauerForm.scrollIntoView({ behavior: "smooth" });
+}
+
+function dauerFormZuruecksetzen() {
+  dauerBearbeitet = null;
+  dauerForm.reset();
+  document.getElementById("dauer-submit").textContent = "Anlegen";
+  document.getElementById("dauer-abbrechen").style.display = "none";
+}
+
+const dauerAbbrechen = document.getElementById("dauer-abbrechen");
+if (dauerAbbrechen) dauerAbbrechen.addEventListener("click", dauerFormZuruecksetzen);
+
 if (dauerForm) dauerForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = new FormData(dauerForm);
@@ -287,7 +423,15 @@ if (dauerForm) dauerForm.addEventListener("submit", async (e) => {
   daten.stichtag = parseInt(daten.stichtag);
   daten.konto_id = daten.konto_id ? parseInt(daten.konto_id) : null;
   if (!daten.gueltig_bis) daten.gueltig_bis = null;
-  try { await api("POST", `/api/mandanten/${MANDANT_ID}/dauerbuchungen`, daten); dauerForm.reset(); ladeDauer(); }
+  try {
+    if (dauerBearbeitet !== null) {
+      await api("PATCH", `/api/dauerbuchungen/${dauerBearbeitet}`, daten);
+      toast("Dauerbuchung gespeichert.", false);
+    } else {
+      await api("POST", `/api/mandanten/${MANDANT_ID}/dauerbuchungen`, daten);
+    }
+    dauerFormZuruecksetzen(); ladeDauer();
+  }
   catch (err) { toast(err.message); }
 });
 
