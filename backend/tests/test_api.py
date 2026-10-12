@@ -769,3 +769,29 @@ def test_dauer_import(client):
     ).json()
     assert erg["angelegt"] == 0
     assert erg["uebersprungen"] == 3
+
+
+def test_op_import_sammelspalte(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "OP Sammel GmbH", "kurzname": "op-sammel"}
+    ).json()["id"]
+    csv_daten = (
+        "Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz;Sammel\n"
+        "FO;Debitoren-Sammeleingang KW 46;;;13.11.2026;10000,00;8400;je KW;ja\n"
+        "FO;Kunde Einzeln;RE-2026-77;01.11.2026;20.11.2026;2500,00;8400;;\n"
+    ).encode("utf-8")
+    erg = client.post(
+        f"/api/mandanten/{mandant_id}/posten/import",
+        files={"datei": ("op.csv", csv_daten, "text/csv")},
+    ).json()
+    assert erg["angelegt"] == 2
+    posten = {p["partner"]: p for p in client.get(f"/api/mandanten/{mandant_id}/posten").json()}
+    assert posten["Debitoren-Sammeleingang KW 46"]["sammel"] is True
+    assert posten["Kunde Einzeln"]["sammel"] is False
+
+    # Überzahlung auf dem importierten Sammelposten funktioniert direkt
+    pid = posten["Debitoren-Sammeleingang KW 46"]["id"]
+    erg = client.post(f"/api/posten/{pid}/zahlungen", json={"betrag": 10500}).json()
+    assert erg["status"] == "BEZAHLT"
+    assert erg["unverteilt"] == 500.0   # kein weiterer Sammelposten vorhanden

@@ -38,7 +38,7 @@ Der Bankbestand kommt automatisch aus den Kontoauszügen (Endsaldo je Auszug).
 | `02_buchungen_2026-06_datev.csv` | DATEV-Buchungsstapel Juni 2026 | 48 |
 | `03_buchungen_2026-07_datev.csv` | DATEV-Buchungsstapel Juli 2026 | 44 |
 | `04_bwa_saldenliste_12monate.csv` | BWA-/Saldenliste 12 Monate | 144 |
-| `05_op_liste.csv` | OP-Liste (offene Posten) | 20 |
+| `05_op_liste.csv` | OP-Liste (offene Posten) | 21 |
 | `06_kontoauszug_mt940.sta` | Kontoauszug MT940 (03.08.–05.08.) | 7 |
 | `07_kontoauszug_camt053.xml` | Kontoauszug CAMT.053 (06.08.) | 2 |
 | `08_dauerbuchungen.csv` | Dauerbuchungen (CSV-Import) | 5 |
@@ -56,7 +56,10 @@ die aktuelle Woche kommt nur über die Kontoauszüge herein, wie in der Praxis).
 
 ## Offene Posten (Import der OP-Liste)
 
-- 20 Posten: 12 Eingangsrechnungen (40025,00 €), 8 Forderungen (78255,00 €).
+- 21 Posten: 12 Eingangsrechnungen
+  (40025,00 €), 9 Forderungen (82455,00 €) –
+  darunter ein **Sammelposten** („Diverse Kleinkunden“, Spalte „Sammel“ der CSV):
+  Überzahlungen darauf werden auf spätere offene Sammelposten vorgetragen.
 - **2 Posten** (Lackierwerk Brandt, Maschinenfabrik Otte; Rechnungsdatum vor dem
   16.07.2026) werden automatisch als **Insolvenzforderung (§ 38)** eingestuft
   und gesperrt: zusammen **19820,00 €**.

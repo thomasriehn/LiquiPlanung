@@ -188,3 +188,20 @@ def test_dauer_csv_kopfzeile_fehlt():
     erg = parse_dauer_csv(b"Datum;Konto;Betrag\n01.01.2026;4920;5,00\n")
     assert not erg.dauerbuchungen
     assert any("Kopfzeile" in w for w in erg.warnungen)
+
+
+def test_op_csv_sammelspalte():
+    from app.services.datev import parse_op_csv
+
+    text = (
+        "Art;Partner;Faellig;Betrag;Sammel\n"
+        "FO;Debitoren KW 46;13.11.2026;10000,00;ja\n"
+        "FO;Debitoren KW 47;20.11.2026;8000,00;X\n"
+        "FO;Einzelkunde Nord;27.11.2026;2500,00;\n"
+        "ER;Lieferant Sued;30.11.2026;900,00;nein\n"
+    )
+    erg = parse_op_csv(text.encode("utf-8"))
+    assert [p["sammel"] for p in erg.posten] == [True, True, False, False]
+    # ohne Sammel-Spalte: immer False
+    erg = parse_op_csv(b"Art;Partner;Faellig;Betrag\nFO;Kunde;01.12.2026;100,00\n")
+    assert erg.posten[0]["sammel"] is False

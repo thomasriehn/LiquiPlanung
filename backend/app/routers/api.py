@@ -1256,6 +1256,7 @@ async def posten_import(
                 betrag_brutto=p["betrag_brutto"],
                 konto_id=konto.id if konto else None,
                 forderungsklasse=klasse,
+                sammel=p["sammel"],
                 notiz=p["notiz"],
             )
         )

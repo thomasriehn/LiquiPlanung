@@ -325,11 +325,16 @@ _OP_ARTEN = {
 }
 
 
+_SAMMEL_WAHR = {"1", "X", "JA", "J", "TRUE", "WAHR", "SAMMEL"}
+
+
 def parse_op_csv(daten: bytes) -> ImportErgebnis:
-    """OP-Liste: Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz.
+    """OP-Liste: Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz;Sammel.
 
     Art: ER/Kreditor/Eingangsrechnung bzw. FO/Debitor/Forderung. Datumsformate
-    TT.MM.JJJJ oder JJJJ-MM-TT; Beträge mit Dezimalkomma oder -punkt.
+    TT.MM.JJJJ oder JJJJ-MM-TT; Beträge mit Dezimalkomma oder -punkt. Die
+    optionale Spalte „Sammel“ kennzeichnet Sammelposten (erwartete
+    Sammelzahlungen) mit 1/x/ja – alles andere bzw. leer zählt als nein.
     """
     text = _dekodiere(daten)
     erg = ImportErgebnis(format="OP")
@@ -356,10 +361,11 @@ def parse_op_csv(daten: bytes) -> ImportErgebnis:
         None,
     )
     i_notiz = _spalten_index(header, "notiz", "bemerkung", "kommentar")
+    i_sammel = _spalten_index(header, "sammel")
     if None in (i_art, i_partner, i_faellig, i_betrag):
         erg.warnungen.append(
             "Kopfzeile nicht erkannt – benötigt mindestens: Art, Partner, Faellig, "
-            "Betrag (optional Belegnummer, Rechnungsdatum, Konto, Notiz)."
+            "Betrag (optional Belegnummer, Rechnungsdatum, Konto, Notiz, Sammel)."
         )
         return erg
     for nr, felder in enumerate(zeilen[1:], start=2):
@@ -401,6 +407,8 @@ def parse_op_csv(daten: bytes) -> ImportErgebnis:
                 if (i_konto is not None and len(felder) > i_konto) else None,
                 "notiz": (felder[i_notiz].strip() or None)
                 if (i_notiz is not None and len(felder) > i_notiz) else None,
+                "sammel": felder[i_sammel].strip().upper() in _SAMMEL_WAHR
+                if (i_sammel is not None and len(felder) > i_sammel) else False,
             }
         )
     return erg

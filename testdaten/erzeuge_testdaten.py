@@ -368,17 +368,21 @@ def op_liste(heute: date) -> list[tuple]:
          "Export Dänemark – steuerfrei § 4 Nr. 1a"),
         ("FO", "Wohnwelt Harms", "RE-2026-0988", -60, -30, "5950.00", "8400",
          "Ausstellungsstücke – überfällig, mahnen"),
+        # Sammelposten: erwartete Sammelzahlung mehrerer Kleinkunden (Spalte „Sammel“)
+        ("FO", "Diverse Kleinkunden", "", None, 20, "4200.00", "8400",
+         "Erwartete Sammelzahlung Kleinaufträge", True),
     ]
 
 
 def schreibe_op(pfad: Path, heute: date) -> int:
-    zeilen = ["Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz"]
-    for art, partner, beleg, r_off, f_off, betrag, konto, notiz in op_liste(heute):
-        rechnung = heute + timedelta(days=r_off)
+    zeilen = ["Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz;Sammel"]
+    for art, partner, beleg, r_off, f_off, betrag, konto, notiz, *rest in op_liste(heute):
+        rechnung = f"{heute + timedelta(days=r_off):%d.%m.%Y}" if r_off is not None else ""
         faellig = heute + timedelta(days=f_off)
+        sammel = "ja" if rest and rest[0] else ""
         zeilen.append(
-            f"{art};{partner};{beleg};{rechnung:%d.%m.%Y};{faellig:%d.%m.%Y};"
-            f"{g(D(betrag))};{konto};{notiz}"
+            f"{art};{partner};{beleg};{rechnung};{faellig:%d.%m.%Y};"
+            f"{g(D(betrag))};{konto};{notiz};{sammel}"
         )
     pfad.write_text("\n".join(zeilen) + "\n", encoding="utf-8")
     return len(zeilen) - 1
@@ -571,7 +575,10 @@ die aktuelle Woche kommt nur über die Kontoauszüge herein, wie in der Praxis).
 
 ## Offene Posten (Import der OP-Liste)
 
-- 20 Posten: 12 Eingangsrechnungen ({g(er_summe)} €), 8 Forderungen ({g(fo_summe)} €).
+- {len(posten)} Posten: {sum(1 for p in posten if p[0] == "ER")} Eingangsrechnungen
+  ({g(er_summe)} €), {sum(1 for p in posten if p[0] == "FO")} Forderungen ({g(fo_summe)} €) –
+  darunter ein **Sammelposten** („Diverse Kleinkunden“, Spalte „Sammel“ der CSV):
+  Überzahlungen darauf werden auf spätere offene Sammelposten vorgetragen.
 - **2 Posten** (Lackierwerk Brandt, Maschinenfabrik Otte; Rechnungsdatum vor dem
   {antrag:%d.%m.%Y}) werden automatisch als **Insolvenzforderung (§ 38)** eingestuft
   und gesperrt: zusammen **{g(inso_summe)} €**.

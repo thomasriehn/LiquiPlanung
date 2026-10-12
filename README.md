@@ -26,8 +26,9 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
 - **Manuelle Zahlungserfassung** je Posten (Betrag/Datum): Teilzahlung mit
   Restbetrag im Plan, optional Rest ausbuchen (Skonto/Erlass). **Sammelposten**
   bilden erwartete Sammelzahlungseingänge mehrerer Debitoren ab (z. B. je
-  Kalenderwoche); Überzahlungen werden automatisch auf die nächsten offenen
-  Sammelposten vorgetragen – spätere geplante Einzahlungen sinken entsprechend.
+  Kalenderwoche, auch per OP-CSV-Import über die Spalte „Sammel“); Überzahlungen
+  werden automatisch auf die nächsten offenen Sammelposten vorgetragen – spätere
+  geplante Einzahlungen sinken entsprechend.
   Offene Posten und Dauerbuchungen sind vollständig bearbeitbar.
 - **Integrierte Sicherungen**: automatische Voll-Backups (Intervall/Aufbewahrung
   konfigurierbar, Docker-Volume), manuelle Sicherung, Download und geführte

@@ -47,9 +47,12 @@ Konto 4930 auf „Zahllauf freitags“ stellen.
 ## 4. OP-Liste importieren („Posten“-Seite, Reiter „Offene Posten“)
 
 `05_op_liste.csv` über „OP-Liste importieren“ hochladen. Erwartung:
-**20 Posten angelegt**, davon **2 automatisch als Insolvenzforderung (§ 38)**
+**21 Posten angelegt**, davon **2 automatisch als Insolvenzforderung (§ 38)**
 eingestuft (Lackierwerk Brandt 12.680 €, Maschinenfabrik Otte 7.140 € –
-Rechnungsdatum vor dem Stichtag). Die gesperrte Summe von **19.820 €**
+Rechnungsdatum vor dem Stichtag). Die Spalte „Sammel“ (1/x/ja) kennzeichnet
+Sammelposten – in der Liste der Posten „Diverse Kleinkunden“ (4.200 €,
+erwartete Sammelzahlung mehrerer Kleinkunden; Überzahlungen darauf werden auf
+spätere offene Sammelposten vorgetragen). Die gesperrte Summe von **19.820 €**
 erscheint als Hinweis auf der Posten- und der Plan-Seite und wird nicht als
 Auszahlung geplant.
 

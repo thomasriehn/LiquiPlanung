@@ -66,8 +66,11 @@ def test_testdatensatz_kompletter_durchlauf(client, tmp_path):
         f"/api/mandanten/{mandant_id}/posten/import",
         files={"datei": ("op.csv", (tmp_path / "05_op_liste.csv").read_bytes(), "text/csv")},
     ).json()
-    assert erg["angelegt"] == 20
+    assert erg["angelegt"] == 21
     assert erg["insolvenzforderungen"] == 2
+    posten_liste = client.get(f"/api/mandanten/{mandant_id}/posten").json()
+    sammelposten = [p for p in posten_liste if p["sammel"]]
+    assert [p["partner"] for p in sammelposten] == ["Diverse Kleinkunden"]
 
     # Kontoauszüge: Umsätze + Bestandsanker über die IBAN
     erg = client.post(
