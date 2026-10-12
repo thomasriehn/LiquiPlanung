@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from .. import database, models
@@ -166,6 +166,72 @@ def mandant_aendern(
                 _enum_pruefen(wert, VERFAHRENSSTATUS, feld)
             setattr(mandant, feld, wert)
     audit(db, benutzer, mandant.id, "MANDANT_GEAENDERT", str(sorted(daten.keys())))
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/mandanten/{mandant_id}")
+def mandant_loeschen(
+    mandant_id: int,
+    bestaetigung: str = "",
+    benutzer=Depends(nur_admin),
+    db: Session = Depends(get_db),
+):
+    """Mandanten mit sämtlichen Daten endgültig löschen (nur Admin).
+
+    Zur Bestätigung muss der Kurzname mitgegeben werden
+    (`?bestaetigung=<kurzname>`). Das Audit-Log bleibt erhalten, verliert aber
+    den Mandantenbezug. Nicht umkehrbar – vorher ggf. Sicherung erstellen.
+    """
+    mandant = db.get(models.Mandant, mandant_id)
+    if mandant is None:
+        raise HTTPException(404, "Mandant nicht gefunden")
+    if bestaetigung.strip() != mandant.kurzname:
+        raise HTTPException(
+            422,
+            f"Zur Bestätigung den Kurznamen '{mandant.kurzname}' mitgeben "
+            "(?bestaetigung=…)",
+        )
+    mid = mandant.id
+    name = f"{mandant.name} ({mandant.kurzname})"
+
+    # Kinder in Fremdschlüssel-Reihenfolge löschen – bewusst ohne DB-Kaskaden,
+    # damit es auf PostgreSQL und SQLite gleichermaßen funktioniert.
+    fuer_mandant = [
+        models.AusgleichZuordnung,
+        models.BankTransaktion,
+        models.Buchung,
+        models.BWAWert,
+        models.OffenerPosten,
+        models.Dauerbuchung,
+        models.BudgetWoche,
+        models.Budget,
+        models.Zahlungstermin,
+        models.TerminRegel,
+        models.Bestand,
+        models.ImportBatch,
+    ]
+    for modell in fuer_mandant:
+        db.execute(delete(modell).where(modell.mandant_id == mid))
+    snapshot_ids = select(models.PlanSnapshot.id).where(
+        models.PlanSnapshot.mandant_id == mid
+    )
+    db.execute(delete(models.PlanSnapshotWert).where(
+        models.PlanSnapshotWert.snapshot_id.in_(snapshot_ids)))
+    db.execute(delete(models.PlanSnapshot).where(models.PlanSnapshot.mandant_id == mid))
+    szenario_ids = select(models.Szenario.id).where(models.Szenario.mandant_id == mid)
+    db.execute(delete(models.SzenarioRegel).where(
+        models.SzenarioRegel.szenario_id.in_(szenario_ids)))
+    db.execute(delete(models.Szenario).where(models.Szenario.mandant_id == mid))
+    db.execute(delete(models.benutzer_mandanten).where(
+        models.benutzer_mandanten.c.mandant_id == mid))
+    db.execute(delete(models.Konto).where(models.Konto.mandant_id == mid))
+    db.execute(delete(models.KontoGruppe).where(models.KontoGruppe.mandant_id == mid))
+    # Audit-Historie behalten, nur den Mandantenverweis lösen
+    db.execute(update(models.AuditLog).where(models.AuditLog.mandant_id == mid)
+               .values(mandant_id=None))
+    db.execute(delete(models.Mandant).where(models.Mandant.id == mid))
+    audit(db, benutzer, None, "MANDANT_GELOESCHT", name)
     db.commit()
     return {"ok": True}
 

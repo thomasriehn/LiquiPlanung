@@ -674,3 +674,58 @@ def test_sammelposten_ueberzahlung_vortrag(client):
     assert erg["verrechnet"][0]["betrag"] == 6000.0
     assert erg["verrechnet"][0]["status"] == "BEZAHLT"
     assert erg["unverteilt"] == 3000.0
+
+
+def test_mandant_loeschen(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten",
+        json={"name": "Wegfall GmbH", "kurzname": "wegfall",
+              "verfahrensstatus": "VORLAEUFIG", "insolvenz_stichtag": "2026-07-15"},
+    ).json()["id"]
+
+    # Daten über möglichst viele Tabellen verteilen
+    konten = client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]
+    k1200 = next(k for k in konten if k["nummer"] == "1200")
+    k8400 = next(k for k in konten if k["nummer"] == "8400")
+    client.patch(f"/api/konten/{k1200['id']}", json={"iban": "DE89370400440532013000"})
+    client.post(f"/api/mandanten/{mandant_id}/posten", json={
+        "art": "DEBITOR", "partner": "Kunde Albrecht AG", "belegnr": "RE-100",
+        "faellig_am": "2026-08-10", "betrag_brutto": 1190, "konto_id": k8400["id"]})
+    client.post(f"/api/mandanten/{mandant_id}/bank-import",
+                files={"datei": ("auszug.sta", MT940_BEISPIEL, "text/plain")})
+    vorschlaege = client.get(f"/api/mandanten/{mandant_id}/op-ausgleich/vorschlaege").json()
+    client.post(f"/api/mandanten/{mandant_id}/op-ausgleich", json={"paare": [{
+        "transaktion_id": vorschlaege[0]["transaktion"]["id"],
+        "posten_ids": [vorschlaege[0]["posten"]["id"]]}]})
+    client.put(f"/api/mandanten/{mandant_id}/budgets", json=[
+        {"konto_id": k8400["id"], "jahr": 2026, "monat": 9, "betrag_netto": 50000}])
+    regeln = client.get(f"/api/mandanten/{mandant_id}/termin-regeln").json()
+    client.patch(f"/api/termin-regeln/{regeln[0]['id']}",
+                 json={"betrag_modus": "FIX", "betrag_fix": 5000})
+    client.post(f"/api/mandanten/{mandant_id}/termine/generieren", json={})
+    client.post(f"/api/mandanten/{mandant_id}/plan/snapshot", json={})
+    szenarien = client.get(f"/api/mandanten/{mandant_id}/szenarien").json()
+    client.put(f"/api/szenarien/{szenarien[0]['id']}/regeln",
+               json=[{"konto_id": k8400["id"], "faktor": 80}])
+
+    # Bestätigung erforderlich; Bearbeiter dürfen gar nicht löschen
+    assert client.delete(f"/api/mandanten/{mandant_id}").status_code == 422
+    assert client.delete(
+        f"/api/mandanten/{mandant_id}?bestaetigung=falsch").status_code == 422
+
+    antwort = client.delete(f"/api/mandanten/{mandant_id}?bestaetigung=wegfall")
+    assert antwort.status_code == 200, antwort.text
+    assert client.get("/api/mandanten").json() == []
+    assert client.get(f"/api/mandanten/{mandant_id}/plan").status_code == 404
+    # Kurzname ist wieder frei
+    neu = client.post("/api/mandanten", json={"name": "Neu", "kurzname": "wegfall"})
+    assert neu.status_code == 201
+
+    client.post("/api/benutzer", json={
+        "email": "ml@example.com", "name": "M", "passwort": "geheim123",
+        "rolle": "BEARBEITER", "mandanten_ids": [neu.json()["id"]]})
+    client.get("/logout")
+    client.post("/login", data={"email": "ml@example.com", "passwort": "geheim123"})
+    assert client.delete(
+        f"/api/mandanten/{neu.json()['id']}?bestaetigung=wegfall").status_code == 403

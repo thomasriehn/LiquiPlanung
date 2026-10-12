@@ -5,10 +5,13 @@
   <h1>Mandanten</h1>
   <div class="karten">
     {% for m in mandanten %}
-    <a class="karte {% if not m.aktiv %}inaktiv{% endif %}" href="/mandanten/{{ m.id }}/plan">
+    <a class="karte {% if not m.aktiv %}inaktiv{% endif %}" style="position:relative" href="/mandanten/{{ m.id }}/plan">
       <strong>{{ m.name }}</strong>
       <span>{{ m.kontenrahmen }} · {{ m.bundesland }} · {{ m.verfahrensstatus }}</span>
       {% if m.aktenzeichen %}<span class="klein">{{ m.aktenzeichen }}</span>{% endif %}
+      {% if ist_admin %}<button class="gefahr mandant-loeschen" style="position:absolute;top:8px;right:8px"
+        data-id="{{ m.id }}" data-kurzname="{{ m.kurzname }}" data-name="{{ m.name }}"
+        title="Mandant mit allen Daten endgültig löschen">✕</button>{% endif %}
     </a>
     {% else %}
     <p>Noch keine Mandanten vorhanden.</p>
@@ -66,6 +69,20 @@ api("GET", "/api/kontenrahmen").then(vorlagen => {
     `<option value="${esc(v.code)}">${esc(v.code === v.name ? v.name : `${v.code} – ${v.name}`)}${v.fest ? "" : " (eigene Vorlage)"}</option>`
   ).join("");
 }).catch(() => {});
+
+document.querySelectorAll(".mandant-loeschen").forEach(btn => btn.addEventListener("click", async (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  const eingabe = prompt(
+    `Mandant „${btn.dataset.name}“ wird mit ALLEN Daten (Buchungen, Posten, ` +
+    `Plänen, Kontoauszügen …) endgültig gelöscht – nicht umkehrbar.\n\n` +
+    `Zur Bestätigung den Kurznamen eingeben: ${btn.dataset.kurzname}`);
+  if (eingabe === null) return;
+  try {
+    await api("DELETE", `/api/mandanten/${btn.dataset.id}?bestaetigung=${encodeURIComponent(eingabe.trim())}`);
+    location.reload();
+  } catch (err) { toast(err.message); }
+}));
 
 document.getElementById('mandant-form').addEventListener('submit', async (e) => {
   e.preventDefault();

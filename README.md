@@ -56,6 +56,8 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   nebeneinander (Liquidität je Wochenende, Netto-Cashflow, minimale Liquidität).
 - **Export**: 13-Wochen-Plan als Excel-Arbeitsmappe (Tage, Wochen mit Plan/Ist/Δ,
   Soll-Ist) und als PDF-Bericht für Gericht, Sachwalter, Gläubigerausschuss.
+- **Mandantenverwaltung**: Admins löschen Mandanten samt aller Daten endgültig
+  (Bestätigung über den Kurznamen; Audit-Log bleibt erhalten).
 - **Mehrbenutzerbetrieb**: Rollen Admin/Bearbeiter/Leser, Mandantenzuordnung, Audit-Log,
   Profil mit Passwortwechsel und optionaler Zwei-Faktor-Anmeldung (TOTP mit
   QR-Einrichtung; Admin-Reset bei Geräteverlust).
