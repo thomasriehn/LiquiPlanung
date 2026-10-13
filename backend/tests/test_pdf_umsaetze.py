@@ -184,3 +184,138 @@ def test_pdf_umsaetze_api(client):
     assert batch["format"] == "PDF"
     assert batch["anzahl"] == 2
     assert client.delete(f"/api/importe/{batch_id}").json()["ok"] is True
+
+
+DEUTSCHE_BANK_TEXT = """8. Juli 2026
+Kontoauszug vom 08.07.2026 bis 08.07.2026
+Kontoinhaber: Max Verwalter c/o Kanzlei
+Alter Saldo per 07.07.2026IBANvonSeiteAuszug
++ 178.228,05EURDE62 7007 0024 0130 9665 375122
+HabenSollVorgangValutaBuchung
++ 204,37SEPA Überweisung von
+Bersch Hubert Schlosserei/Landtechnik
+08.07.
+2026
+08.07.
+2026
+Verwendungszweck/ Kundenreferenz
+Renr. 202651234 v. 24.06.26 Kdnr. 27250
+NONREF
+- 14,99SEPA Überweisung an
+1 + 1 Telekom
+08.07.
+2026
+08.07.
+2026
+IBAN DE97500400000589011600
+BIC COBADEFFXXX
+Verwendungszweck/ Kundenreferenz
+Rechnung Mobil Juni-Juli RG Nr. 1511575056
+IBANvonSeiteAuszug
+DE62 7007 0024 0130 9665 375222
+0000000003 / 06500900 / 20260708
+HabenSollVorgangValutaBuchung
+- 1.899,09SEPA Überweisung an
+ABL-Technic Entlackung
+08.07.
+2026
+08.07.
+2026
+Verwendungszweck/ Kundenreferenz
+Rechnung-Reparatur
+2607080811-0000015
+Deutsche Bank AG
+Service Center Berlin
+Herrn
+Max Verwalter
+10585 Berlin
+Neuer Saldo
++ 176.518,34EUR
+"""
+
+
+def test_pdf_deutsche_bank():
+    erg = parse_text(DEUTSCHE_BANK_TEXT)
+    assert not erg.warnungen
+    assert len(erg.umsaetze) == 3
+
+    haben = erg.umsaetze[0]
+    assert haben.betrag == Decimal("204.37")
+    assert haben.empfaenger == "Bersch Hubert Schlosserei/Landtechnik"
+    assert haben.buchungstag == date(2026, 7, 8)
+    assert haben.auszugsdatum == date(2026, 7, 8)        # „Kontoauszug … bis“
+    assert "Renr. 202651234" in haben.verwendungszweck
+    assert haben.verwendungszweck.startswith("SEPA Überweisung von")
+
+    soll = erg.umsaetze[1]
+    assert soll.betrag == Decimal("-14.99")
+    assert soll.empfaenger == "1 + 1 Telekom"
+    # IBAN/BIC des Zahlungsempfängers landen nicht im Verwendungszweck
+    assert "DE97" not in soll.verwendungszweck
+    assert "Rechnung Mobil" in soll.verwendungszweck
+
+    # Adressblock am Seitenende verschmutzt den Zweck nicht
+    letzte = erg.umsaetze[2]
+    assert letzte.betrag == Decimal("-1899.09")
+    assert "Deutsche Bank" not in letzte.verwendungszweck
+    assert "Berlin" not in letzte.verwendungszweck
+    assert "2607080811-0000015" in letzte.verwendungszweck
+    # Saldozeilen sind keine Umsätze
+    assert all(abs(u.betrag) < Decimal("100000") for u in erg.umsaetze)
+
+
+UC_TEXT = """UC eBanking prime › CAMT Auszüge
+Muster GmbH vIV
+Auszug Nr. 32
+Kontonummer 406030038 Endsaldo 137.789,65  EUR
+Bankleitzahl 60050101 Kontoauszugsdatum 09.09.2026
+IBAN DE21 6005 0101 0406 0300 38 Anzahl Posten 3
+Summe Soll (2 Posten) -2.421,60 EUR
+Datum Valuta Buchungsinformationen
+Umsatz EUR
+09.09.2026 09.09.2026 GUTSCHRIFT ÜBERWEISUNG
+Belegnummer IN26101172
+Eryurt, Ferhat und Yasemin
+DE45670505050039698382
+MANSDE66
+85,90
+09.09.2026 09.09.2026 EINZELÜBERWEISUNG
+Rechnung 00241578 Cloud für September
+2026
+weclapp
+NL06ABNA0127334777
+ABNANL2AXXX
+-2.326,45
+09.09.2026 09.09.2026 EINZELÜBERWEISUNG
+FPC 2026FPC/22
+J.P.Freitas, Lda
+PT50004513244033815380934
+CCCMPTPLXXX
+-95,15
+Seite 1 von 1
+UC eBanking prime
+Version 6.2.0
+© UniCredit Bank GmbH
+"""
+
+
+def test_pdf_uc_ebanking():
+    erg = parse_text(UC_TEXT)
+    assert not erg.warnungen
+    assert len(erg.umsaetze) == 3
+    assert all(u.auszug_nr == "32" for u in erg.umsaetze)
+    assert all(u.auszugsdatum == date(2026, 9, 9) for u in erg.umsaetze)
+
+    gutschrift = erg.umsaetze[0]
+    assert gutschrift.betrag == Decimal("85.90")
+    assert gutschrift.empfaenger == "Eryurt, Ferhat und Yasemin"
+    assert gutschrift.verwendungszweck == "GUTSCHRIFT ÜBERWEISUNG Belegnummer IN26101172"
+
+    weclapp = erg.umsaetze[1]
+    assert weclapp.betrag == Decimal("-2326.45")
+    assert weclapp.empfaenger == "weclapp"
+    # Zweck-Zeile „2026“ (Umbruch) wird nicht als Betrag fehlinterpretiert
+    assert "Cloud für September 2026" in weclapp.verwendungszweck
+    assert "NL06" not in weclapp.verwendungszweck
+
+    assert erg.umsaetze[2].empfaenger == "J.P.Freitas, Lda"

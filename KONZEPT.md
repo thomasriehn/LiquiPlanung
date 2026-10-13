@@ -246,10 +246,15 @@ Termine werden bei Neugenerierung nicht überschrieben.
 - **Kontoauszüge (MT940 / CAMT.053):** Bankumsätze und Salden; Endsaldo je Auszug wird
   als Bestandsanker übernommen (Zuordnung über IBAN am Bankkonto oder manuelle Auswahl,
   Dubletten-Warnung bei überlappenden Zeiträumen).
-- **PDF-Kontoumsätze:** Kontoauszüge, die nur als PDF vorliegen (z. B.
-  Verfahrenskonto-Reports der Sparkasse), werden über Textextraktion geparst
-  (Auszugsnummer + Auszugs-/Buchungsdatum als Blockbeginn, Betrag am Blockende,
-  mehrzeilige Empfänger per Heuristik). Ausgaben werden in der Oberfläche einzeln
+- **PDF-Kontoumsätze:** Kontoauszüge, die nur als PDF vorliegen, werden über
+  Textextraktion geparst. Drei Formate mit automatischer Erkennung (es gewinnt
+  der Format-Parser mit den meisten Treffern): Sparkassen-Verfahrenskonto-Report
+  (Auszugsnummer + zwei Datumsangaben als Blockbeginn, Betrag am Blockende),
+  Deutsche-Bank-Kontoauszug (Vorzeichen + Betrag mit Vorgangstext verklebt,
+  Datumsangaben über zwei Zeilen umbrochen, Adressblöcke werden gefiltert) und
+  UC eBanking prime „CAMT Auszüge“ (HVB/UniCredit; Buchungs-/Valutadatum als
+  Blockbeginn, Empfänger vor der IBAN-Zeile, Betrag allein am Blockende);
+  mehrzeilige Empfänger per Heuristik. Ausgaben werden in der Oberfläche einzeln
   einem Konto zugeordnet und sofort zum Buchungsdatum als Ist-Buchung übernommen
   (Sachkonto an Bank, DATEV-Logik); alle Buchungen eines PDFs hängen an einem
   Import-Batch und sind gesammelt löschbar.
