@@ -16,10 +16,12 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Duplikatprüfung); Meldung nicht angelegter Konten.
 - **PDF-Kontoumsätze**: Kontoauszüge, die nur als PDF vorliegen, werden
   ausgewertet (automatische Formaterkennung: Sparkassen-Verfahrenskonto-Reports,
-  Deutsche-Bank-Kontoauszüge, UC eBanking prime/HypoVereinsbank); alle Ausgaben
-  erscheinen als Tabelle (Auszugs-/Buchungsdatum, Verwendungszweck, Empfänger,
-  Betrag) mit Kontoauswahl – die Auswahl verbucht den Betrag sofort zum
-  Buchungsdatum als Ist-Buchung (gesammelt löschbar über den Import).
+  Deutsche-Bank-Kontoauszüge, UC eBanking prime/HypoVereinsbank). Ausgaben
+  erscheinen als Tabelle mit Kontoauswahl – die Auswahl verbucht den Betrag
+  sofort zum Buchungsdatum als Ist-Buchung; Zahlungseingänge werden in einem
+  zweiten Block offenen Posten zugewiesen (Anrechnung inkl. Teilzahlung und
+  Sammelposten-Vortrag plus Ist-Buchung). Jede Zuordnung ist über das ✕ am
+  grünen Vermerk einzeln aufhebbar, ganze PDFs gesammelt über den Import.
 - **Bankimport (MT940/CAMT.053)**: Kontoauszüge liefern tagesaktuelle Bestandsanker
   (Endsaldo je Auszug, IBAN-Zuordnung) und Bankumsätze zur Referenz – unabhängig vom
   Buchhaltungsexport, ohne Doppelzählung im Ist.
@@ -30,7 +32,9 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   die Planung rechnet automatisch mit dem Rest. Sammelüberweisungen (1:n) werden
   erkannt, wenn eine Postenkombination die Zahlung exakt ergibt.
 - **Manuelle Zahlungserfassung** je Posten (Betrag/Datum): Teilzahlung mit
-  Restbetrag im Plan, optional Rest ausbuchen (Skonto/Erlass). **Sammelposten**
+  Restbetrag im Plan, optional Rest ausbuchen (Skonto/Erlass) und auf Wunsch
+  direkt als Ist-Buchung (Konto des Postens gegen das gewählte Zahlungsmittel;
+  abwählbar, wenn die Zahlung ohnehin über den Buchhaltungsimport kommt). **Sammelposten**
   bilden erwartete Sammelzahlungseingänge mehrerer Debitoren ab (z. B. je
   Kalenderwoche, auch per OP-CSV-Import über die Spalte „Sammel“); Überzahlungen
   werden automatisch auf die nächsten offenen Sammelposten vorgetragen – spätere

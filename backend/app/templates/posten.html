@@ -66,9 +66,14 @@
     <div class="formular-zeilen">
       <label>Betrag<input id="zahlung-betrag" type="number" step="0.01" min="0.01" required></label>
       <label>Datum<input id="zahlung-datum" type="date"></label>
+      <label>Ist-Buchung über<select id="zahlung-bankkonto"></select></label>
     </div>
     <label class="cb" style="display:flex;gap:8px;align-items:baseline"><input type="checkbox" id="zahlung-ausbuchen">
       <span>Restbetrag ausbuchen (z. B. Skonto/Erlass) – Posten gilt als bezahlt</span></label>
+    <p class="hinweis" style="margin-bottom:0">Mit Ist-Buchung erscheint die Zahlung sofort
+      im 13-Wochen-Plan (Konto des Postens gegen das Zahlungsmittel). „Nicht buchen“
+      wählen, wenn dieselbe Zahlung ohnehin über den Buchhaltungsimport kommt –
+      sonst zählt sie doppelt.</p>
     <div class="werkzeuge" style="margin-top:12px">
       <button id="zahlung-speichern">Zahlung erfassen</button>
       <button id="zahlung-schliessen" class="sekundaer" type="button">Abbrechen</button>
@@ -238,6 +243,14 @@ function oeffneZahlung(p) {
   document.getElementById("zahlung-betrag").value = p.restbetrag.toFixed(2);
   document.getElementById("zahlung-datum").value = new Date().toISOString().slice(0, 10);
   document.getElementById("zahlung-ausbuchen").checked = false;
+  const zahlungsmittel = konten
+    .filter(k => k.aktiv && (k.typ === "BANK" || k.typ === "KASSE"))
+    .sort((a, b) => (a.typ === "BANK" ? 0 : 1) - (b.typ === "BANK" ? 0 : 1)
+      || a.nummer.localeCompare(b.nummer));
+  document.getElementById("zahlung-bankkonto").innerHTML =
+    zahlungsmittel.map(k =>
+      `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}</option>`).join("") +
+    `<option value="">– nicht im Ist buchen –</option>`;
   const dlg = document.getElementById("zahlung-dialog");
   if (typeof dlg.showModal === "function") dlg.showModal();
   else dlg.setAttribute("open", "");   // Browser ohne <dialog>-Unterstützung
@@ -254,10 +267,12 @@ document.getElementById("zahlung-speichern").addEventListener("click", async () 
   const betrag = parseFloat(document.getElementById("zahlung-betrag").value);
   if (!betrag || betrag <= 0) { toast("Bitte einen Betrag größer 0 angeben."); return; }
   try {
+    const bankKontoId = document.getElementById("zahlung-bankkonto").value;
     const erg = await api("POST", `/api/posten/${zahlungPosten.id}/zahlungen`, {
       betrag,
       datum: document.getElementById("zahlung-datum").value || null,
       ausbuchen: document.getElementById("zahlung-ausbuchen").checked,
+      bank_konto_id: bankKontoId ? parseInt(bankKontoId) : null,
     });
     schliesseZahlung();
     let meldung = erg.status === "BEZAHLT"
@@ -270,6 +285,10 @@ document.getElementById("zahlung-speichern").addEventListener("click", async () 
     if (erg.unverteilt > 0) {
       meldung += ` ${eur(erg.unverteilt)} € konnten keinem Sammelposten zugeordnet werden.`;
     }
+    if (erg.buchungen && erg.buchungen.length) {
+      meldung += ` ${erg.buchungen.length} Ist-Buchung(en) angelegt.`;
+    }
+    if (erg.hinweise && erg.hinweise.length) meldung += " " + erg.hinweise.join(" ");
     toast(meldung, false);
     ladeOP();
   } catch (e) { toast(e.message); }

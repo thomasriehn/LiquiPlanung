@@ -811,3 +811,45 @@ def test_wizard_seite_nur_admin(client):
     antwort = client.get("/mandanten-wizard", follow_redirects=False)
     assert antwort.status_code == 303
     assert antwort.headers["location"] == "/"
+
+
+def test_zahlung_mit_ist_buchung(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Ist GmbH", "kurzname": "ist-gmbh"}
+    ).json()["id"]
+    konten = {k["nummer"]: k for k in
+              client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]}
+    pid = client.post(f"/api/mandanten/{mandant_id}/posten", json={
+        "art": "KREDITOR", "partner": "Stromwerk", "faellig_am": "2026-11-20",
+        "betrag_brutto": 1000, "konto_id": konten["4240"]["id"]}).json()["id"]
+
+    erg = client.post(f"/api/posten/{pid}/zahlungen", json={
+        "betrag": 400, "datum": "2026-11-18",
+        "bank_konto_id": konten["1200"]["id"]}).json()
+    assert erg["status"] == "OFFEN"
+    assert len(erg["buchungen"]) == 1
+    assert erg["hinweise"] == []
+
+    # Ist-Buchung in DATEV-Logik: Sachkonto an Bank am Zahltag
+    from app import database
+    db = database.SessionLocal()
+    try:
+        from app import models as m
+        buchung = db.get(m.Buchung, erg["buchungen"][0])
+        assert (buchung.konto_nr, buchung.gegenkonto_nr) == ("4240", "1200")
+        assert float(buchung.betrag) == 400.0
+        assert buchung.datum.isoformat() == "2026-11-18"
+        assert buchung.posten_id == pid
+    finally:
+        db.close()
+
+    # Posten ohne Konto: Zahlung wird angerechnet, aber mit Hinweis ohne Ist-Buchung
+    ohne = client.post(f"/api/mandanten/{mandant_id}/posten", json={
+        "art": "DEBITOR", "partner": "Kunde ohne Konto", "faellig_am": "2026-11-25",
+        "betrag_brutto": 500}).json()["id"]
+    erg = client.post(f"/api/posten/{ohne}/zahlungen", json={
+        "betrag": 500, "bank_konto_id": konten["1200"]["id"]}).json()
+    assert erg["status"] == "BEZAHLT"
+    assert erg["buchungen"] == []
+    assert any("kein Konto" in h for h in erg["hinweise"])

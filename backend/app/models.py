@@ -299,6 +299,11 @@ class Buchung(Base):
     sh: Mapped[str] = mapped_column(String(1), default="S")  # S/H bezogen auf konto_nr
     belegfeld: Mapped[str | None] = mapped_column(String(64), nullable=True)
     text: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Zahlungsbuchung zu einem offenen Posten (Zahlungserfassung/PDF-Zuweisung):
+    # beim Aufheben wird der Anteil wieder vom Posten abgezogen
+    posten_id: Mapped[int | None] = mapped_column(
+        ForeignKey("offene_posten.id", ondelete="SET NULL"), nullable=True
+    )
 
 
 class BankTransaktion(Base):

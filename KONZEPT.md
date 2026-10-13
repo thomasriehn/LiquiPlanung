@@ -254,7 +254,14 @@ Termine werden bei Neugenerierung nicht überschrieben.
   Datumsangaben über zwei Zeilen umbrochen, Adressblöcke werden gefiltert) und
   UC eBanking prime „CAMT Auszüge“ (HVB/UniCredit; Buchungs-/Valutadatum als
   Blockbeginn, Empfänger vor der IBAN-Zeile, Betrag allein am Blockende);
-  mehrzeilige Empfänger per Heuristik. Ausgaben werden in der Oberfläche einzeln
+  mehrzeilige Empfänger per Heuristik. Ausgaben werden einem Konto zugeordnet,
+  Zahlungseingänge einem offenen Posten (Anrechnung über dieselbe Logik wie die
+  manuelle Zahlungserfassung inkl. Sammelposten-Vortrag); je Zahlungsanteil
+  entsteht eine Ist-Buchung mit Posten-Referenz (`buchungen.posten_id`), über
+  die eine Zuordnung einzeln aufhebbar ist (Buchung löschen + Anteil vom Posten
+  abziehen). Die manuelle Zahlungserfassung kann ebenfalls direkt ins Ist buchen
+  (wählbares Zahlungsmittelkonto, abwählbar zur Vermeidung von Doppelzählung
+  mit dem Buchhaltungsimport). Ausgaben werden in der Oberfläche einzeln
   einem Konto zugeordnet und sofort zum Buchungsdatum als Ist-Buchung übernommen
   (Sachkonto an Bank, DATEV-Logik); alle Buchungen eines PDFs hängen an einem
   Import-Batch und sind gesammelt löschbar.

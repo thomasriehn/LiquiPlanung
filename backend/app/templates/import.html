@@ -62,9 +62,22 @@
     <button type="submit">PDF auswerten</button>
   </form>
   <div id="pdf-ergebnis"></div>
+  <h3 id="pdf-ausgaben-titel" style="display:none">Ausgaben – Konto zuordnen</h3>
   <table class="liste" id="pdf-tabelle" style="display:none">
     <thead><tr><th>Auszugsdatum</th><th>Buchungsdatum</th><th>Verwendungszweck</th>
       <th>Empfänger</th><th class="zahl">Betrag</th><th>Konto (verbuchen)</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 id="pdf-eingaenge-titel" style="display:none">Zahlungseingänge – offenem Posten zuweisen</h3>
+  <p class="hinweis" id="pdf-eingaenge-hinweis" style="display:none">
+    Die Zuweisung rechnet den Eingang auf den offenen Posten an (Teilzahlungen
+    lassen den Posten mit Restbetrag offen, Überzahlungen auf Sammelposten werden
+    auf spätere Sammelposten vorgetragen) und bucht den Betrag gleichzeitig im
+    Ist (Bankkonto an das Konto des Postens).
+  </p>
+  <table class="liste" id="pdf-eingaenge" style="display:none">
+    <thead><tr><th>Auszugsdatum</th><th>Buchungsdatum</th><th>Verwendungszweck</th>
+      <th>Auftraggeber</th><th class="zahl">Betrag</th><th>Offener Posten (zuweisen)</th></tr></thead>
     <tbody></tbody>
   </table>
   {% endif %}
@@ -198,8 +211,13 @@ if (bankForm) bankForm.addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message); }
 });
 
-// ---- Kontoumsätze aus PDF: auswerten und einzeln auf Konten verbuchen ----
+// ---- Kontoumsätze aus PDF: Ausgaben auf Konten, Eingänge auf offene Posten ----
 let pdfBatchId = null;
+let offenePosten = [];
+
+async function ladeOffenePosten() {
+  offenePosten = await api("GET", `/api/mandanten/${MANDANT_ID}/posten?status=OFFEN`);
+}
 
 const pdfForm = document.getElementById("pdf-form");
 if (pdfForm) pdfForm.addEventListener("submit", async (e) => {
@@ -208,14 +226,18 @@ if (pdfForm) pdfForm.addEventListener("submit", async (e) => {
   try {
     const erg = await apiDatei(`/api/mandanten/${MANDANT_ID}/pdf-umsaetze`, fd);
     pdfBatchId = erg.batch_id;
+    await ladeOffenePosten();
     const ausgaben = erg.umsaetze.filter(u => u.betrag < 0);
+    const eingaenge = erg.umsaetze.filter(u => u.betrag > 0);
     const box = document.getElementById("pdf-ergebnis");
     let html = `<div class="warnung" style="background:#e8f5ec;border-color:#9fd3ae;color:#1e5c38">
-      ${erg.umsaetze.length} Umsätze erkannt, davon ${ausgaben.length} Ausgaben zum Verbuchen
-      (${erg.umsaetze.length - ausgaben.length} Eingänge/Nullbeträge ausgeblendet).</div>`;
+      ${erg.umsaetze.length} Umsätze erkannt: ${ausgaben.length} Ausgaben,
+      ${eingaenge.length} Zahlungseingänge${erg.umsaetze.length - ausgaben.length - eingaenge.length
+        ? `, ${erg.umsaetze.length - ausgaben.length - eingaenge.length} Nullbeträge ausgeblendet` : ""}.</div>`;
     if (erg.warnungen.length) html += `<div class="warnung">${erg.warnungen.map(esc).join("<br>")}</div>`;
     box.innerHTML = html;
-    zeigePdfTabelle(ausgaben);
+    zeigeAusgaben(ausgaben);
+    zeigeEingaenge(eingaenge);
     ladeBatches();
   } catch (err) { toast(err.message); }
 });
@@ -228,9 +250,51 @@ function pdfKontoSelect() {
   return `<select data-pdf-konto><option value="">– Konto wählen –</option>${optionen}</select>`;
 }
 
-function zeigePdfTabelle(ausgaben) {
-  const tabelle = document.getElementById("pdf-tabelle");
-  const tb = tabelle.querySelector("tbody");
+function postenSelect(betrag) {
+  const passende = offenePosten.filter(p => p.art === (betrag > 0 ? "DEBITOR" : "KREDITOR"));
+  const optionen = passende.map(p =>
+    `<option value="${p.id}">${esc(p.partner)}${p.belegnr ? " · " + esc(p.belegnr) : ""} · offen ${eur(p.restbetrag)} € (fällig ${p.faellig_am})${p.sammel ? " · Sammel" : ""}</option>`).join("");
+  return `<select data-pdf-posten><option value="">– Posten wählen –</option>${optionen}</select>`;
+}
+
+let eingaengeListe = [];
+
+// Nach jeder Zuweisung/Aufhebung ändern sich die Restbeträge: alle noch nicht
+// zugewiesenen Zeilen bekommen frische Posten-Auswahllisten
+function aktualisierePostenAuswahl() {
+  document.querySelectorAll("#pdf-eingaenge tbody tr").forEach((tr, i) => {
+    const zelle = tr.lastElementChild;
+    if (zelle.querySelector("[data-pdf-posten]") && eingaengeListe[i]) {
+      bindeEingang(zelle, eingaengeListe[i]);
+    }
+  });
+}
+
+// Badge mit Aufheben-Kreuz: macht die Buchung(en) rückgängig und stellt die
+// ursprüngliche Auswahl wieder her
+function verbuchtBadge(td, textHtml, buchungIds, zurueck) {
+  td.innerHTML = `<span class="badge-gesperrt" style="position:relative;display:inline-block;
+      padding-right:22px;background:#e8f5ec;color:#1e5c38;border-color:#9fd3ae">${textHtml}
+    ${buchungIds.length ? `<button data-aufheben title="Zuordnung aufheben" style="position:absolute;
+      top:1px;right:3px;border:none;background:none;color:#1e5c38;cursor:pointer;
+      font-weight:700;padding:0;line-height:1">✕</button>` : ""}</span>`;
+  const knopf = td.querySelector("[data-aufheben]");
+  if (knopf) knopf.addEventListener("click", async () => {
+    try {
+      for (const id of buchungIds) {
+        await api("POST", `/api/mandanten/${MANDANT_ID}/pdf-umsaetze/aufheben`, { buchung_id: id });
+      }
+      await ladeOffenePosten();
+      zurueck(td);
+      aktualisierePostenAuswahl();
+      ladeBatches();
+      toast("Zuordnung aufgehoben.", false);
+    } catch (e) { toast(e.message); }
+  });
+}
+
+function zeigeAusgaben(ausgaben) {
+  const tb = document.querySelector("#pdf-tabelle tbody");
   tb.innerHTML = "";
   for (const u of ausgaben) {
     const tr = document.createElement("tr");
@@ -239,32 +303,84 @@ function zeigePdfTabelle(ausgaben) {
       <td class="klein" style="max-width:420px">${esc(u.verwendungszweck)}</td>
       <td>${esc(u.empfaenger)}</td>
       <td class="zahl" style="color:var(--rot)">${eur(u.betrag)}</td>
-      <td>${pdfKontoSelect()}</td>`;
-    tr.querySelector("[data-pdf-konto]").addEventListener("change", async (e) => {
-      const kontoId = e.target.value;
-      if (!kontoId) return;
-      try {
-        const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/pdf-umsaetze/verbuchen`, {
-          batch_id: pdfBatchId,
-          konto_id: parseInt(kontoId),
-          bank_konto_id: parseInt(document.getElementById("pdf-bank-konto").value),
-          datum: u.buchungstag,
-          betrag: u.betrag,
-          text: `${u.empfaenger} – ${u.verwendungszweck}`,
-        });
-        e.target.closest("td").innerHTML =
-          `<span class="badge-gesperrt" style="background:#e8f5ec;color:#1e5c38;border-color:#9fd3ae">
-           ✓ verbucht auf ${esc(erg.konto)}</span>`;
-        ladeBatches();
-      } catch (err) { toast(err.message); e.target.value = ""; }
-    });
+      <td></td>`;
     tb.appendChild(tr);
+    bindeAusgabe(tr.lastElementChild, u);
   }
-  tabelle.style.display = ausgaben.length ? "" : "none";
-  if (!ausgaben.length) {
-    document.getElementById("pdf-ergebnis").innerHTML +=
-      `<div class="warnung">Keine Ausgaben (negative Beträge) im PDF gefunden.</div>`;
+  document.getElementById("pdf-tabelle").style.display = ausgaben.length ? "" : "none";
+  document.getElementById("pdf-ausgaben-titel").style.display = ausgaben.length ? "" : "none";
+}
+
+function bindeAusgabe(td, u) {
+  td.innerHTML = pdfKontoSelect();
+  td.querySelector("[data-pdf-konto]").addEventListener("change", async (e) => {
+    const kontoId = e.target.value;
+    if (!kontoId) return;
+    try {
+      const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/pdf-umsaetze/verbuchen`, {
+        batch_id: pdfBatchId,
+        konto_id: parseInt(kontoId),
+        bank_konto_id: parseInt(document.getElementById("pdf-bank-konto").value),
+        datum: u.buchungstag,
+        betrag: u.betrag,
+        text: `${u.empfaenger} – ${u.verwendungszweck}`,
+      });
+      verbuchtBadge(td, `✓ verbucht auf ${esc(erg.konto)}`, [erg.id],
+        (zelle) => bindeAusgabe(zelle, u));
+      ladeBatches();
+    } catch (err) { toast(err.message); e.target.value = ""; }
+  });
+}
+
+function zeigeEingaenge(eingaenge) {
+  eingaengeListe = eingaenge;
+  const tb = document.querySelector("#pdf-eingaenge tbody");
+  tb.innerHTML = "";
+  for (const u of eingaenge) {
+    const tr = document.createElement("tr");
+    tr.dataset.betrag = u.betrag;
+    tr.innerHTML = `
+      <td>${u.auszugsdatum}</td><td>${u.buchungstag}</td>
+      <td class="klein" style="max-width:420px">${esc(u.verwendungszweck)}</td>
+      <td>${esc(u.empfaenger)}</td>
+      <td class="zahl" style="color:#1e5c38">${eur(u.betrag)}</td>
+      <td></td>`;
+    tb.appendChild(tr);
+    bindeEingang(tr.lastElementChild, u);
   }
+  for (const id of ["pdf-eingaenge", "pdf-eingaenge-titel", "pdf-eingaenge-hinweis"]) {
+    document.getElementById(id).style.display = eingaenge.length ? "" : "none";
+  }
+}
+
+function bindeEingang(td, u) {
+  td.innerHTML = postenSelect(u.betrag);
+  td.querySelector("[data-pdf-posten]").addEventListener("change", async (e) => {
+    const postenId = e.target.value;
+    if (!postenId) return;
+    try {
+      const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/pdf-umsaetze/zuweisen`, {
+        batch_id: pdfBatchId,
+        posten_id: parseInt(postenId),
+        bank_konto_id: parseInt(document.getElementById("pdf-bank-konto").value),
+        datum: u.buchungstag,
+        betrag: u.betrag,
+        text: `${u.empfaenger} – ${u.verwendungszweck}`,
+      });
+      let text = `✓ angerechnet auf ${esc(erg.posten.partner)} – ` +
+        (erg.posten.status === "BEZAHLT" ? "bezahlt" : `Rest ${eur(erg.posten.restbetrag)} €`);
+      if (erg.verrechnet.length) {
+        text += `; vorgetragen: ` + erg.verrechnet.map(v =>
+          `${esc(v.partner)} (${eur(v.betrag)} €)`).join(", ");
+      }
+      if (erg.unverteilt > 0) text += `; ${eur(erg.unverteilt)} € nicht verteilbar`;
+      if (erg.hinweise.length) toast(erg.hinweise.join(" "), false);
+      verbuchtBadge(td, text, erg.buchungen, (zelle) => bindeEingang(zelle, u));
+      await ladeOffenePosten();
+      aktualisierePostenAuswahl();
+      ladeBatches();
+    } catch (err) { toast(err.message); e.target.value = ""; }
+  });
 }
 
 ladeKonten().then(() => { ladeBatches(); ladeBankUmsaetze(); });

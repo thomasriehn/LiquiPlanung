@@ -1136,6 +1136,117 @@ def pdf_umsatz_verbuchen(
     return {"id": buchung.id, "konto": f"{konto.nummer} {konto.bezeichnung}"}
 
 
+class PdfZuweisung(BaseModel):
+    batch_id: int
+    posten_id: int       # offener Posten, auf den der Eingang angerechnet wird
+    bank_konto_id: int   # Bank-/Kassenkonto des Auszugs
+    datum: str           # Buchungsdatum aus dem Auszug
+    betrag: float        # mit Vorzeichen: positiv = Eingang (Debitor)
+    text: str | None = None
+
+
+@router.post("/mandanten/{mandant_id}/pdf-umsaetze/zuweisen")
+def pdf_umsatz_zuweisen(
+    mandant_id: int,
+    daten: PdfZuweisung,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """PDF-Umsatz einem offenen Posten zuweisen: Anrechnung auf den Posten
+    (inkl. Überzahlungs-Vortrag bei Sammelposten) und Ist-Buchung je Anteil.
+
+    Eingänge (positiv) gehören auf Debitoren-Posten, Ausgaben (negativ) auf
+    Kreditoren-Posten."""
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    batch = db.get(models.ImportBatch, daten.batch_id)
+    if batch is None or batch.mandant_id != mandant.id or batch.format != "PDF":
+        raise HTTPException(404, "PDF-Import nicht gefunden")
+    posten = db.get(models.OffenerPosten, daten.posten_id)
+    if posten is None or posten.mandant_id != mandant.id:
+        raise HTTPException(422, "Ungültiger Posten")
+    bank = _bankkonto_oder_422(db, mandant.id, daten.bank_konto_id)
+    betrag = _dec(daten.betrag)
+    if betrag == 0:
+        raise HTTPException(422, "Betrag 0 kann nicht zugewiesen werden")
+    erwartet = models.PostenArt.DEBITOR.value if betrag > 0 else models.PostenArt.KREDITOR.value
+    if posten.art != erwartet:
+        raise HTTPException(
+            422,
+            "Eingänge gehören auf Forderungen (Debitoren), Ausgaben auf "
+            "Eingangsrechnungen (Kreditoren)",
+        )
+    zahltag = _datum(daten.datum, "datum")
+    text = (daten.text or "").strip()[:255] or None
+
+    anteile, unverteilt = _zahlung_anwenden(db, posten, abs(betrag), zahltag, False)
+    buchungen, hinweise = _zahlungs_buchungen(
+        db, mandant.id, anteile, bank, zahltag, text, batch_id=batch.id
+    )
+    batch.anzahl += len(buchungen)
+    audit(db, benutzer, mandant.id, "PDF_UMSATZ_ZUGEWIESEN",
+          f"{zahltag} {betrag:.2f} € auf Posten {posten.id} ({posten.partner})")
+    db.commit()
+    return {
+        "posten": {
+            "id": posten.id,
+            "partner": posten.partner,
+            "status": posten.status,
+            "restbetrag": float(posten.betrag_brutto - posten.bezahlt_betrag),
+        },
+        "verrechnet": [
+            {"posten_id": p.id, "partner": p.partner, "betrag": float(anteil),
+             "status": p.status}
+            for p, anteil in anteile[1:]
+        ],
+        "unverteilt": float(unverteilt),
+        "buchungen": [b.id for b in buchungen],
+        "hinweise": hinweise,
+    }
+
+
+class PdfAufhebung(BaseModel):
+    buchung_id: int
+
+
+@router.post("/mandanten/{mandant_id}/pdf-umsaetze/aufheben")
+def pdf_umsatz_aufheben(
+    mandant_id: int,
+    daten: PdfAufhebung,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Verbuchung/Zuweisung rückgängig machen: die Ist-Buchung wird gelöscht;
+    hängt sie an einem Posten, wird der Zahlungsanteil wieder abgezogen und
+    der Posten erneut geöffnet. Nur für Buchungen aus PDF-Importen und
+    Posten-Zahlungen (Fibu-Importbuchungen bleiben unantastbar)."""
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    buchung = db.get(models.Buchung, daten.buchung_id)
+    if buchung is None or buchung.mandant_id != mandant.id:
+        raise HTTPException(404, "Buchung nicht gefunden")
+    batch = db.get(models.ImportBatch, buchung.batch_id) if buchung.batch_id else None
+    if buchung.posten_id is None and (batch is None or batch.format != "PDF"):
+        raise HTTPException(
+            422, "Nur PDF-Verbuchungen und Posten-Zahlungen können aufgehoben werden"
+        )
+    if buchung.posten_id is not None:
+        posten = db.get(models.OffenerPosten, buchung.posten_id)
+        if posten is not None:
+            posten.bezahlt_betrag = max(
+                Decimal("0"), (posten.bezahlt_betrag or Decimal("0")) - buchung.betrag
+            )
+            posten.status = models.PostenStatus.OFFEN.value
+            posten.bezahlt_am = None
+    if batch is not None and batch.anzahl > 0:
+        batch.anzahl -= 1
+    audit(db, benutzer, mandant.id, "PDF_UMSATZ_AUFGEHOBEN",
+          f"Buchung {buchung.id}: {buchung.datum} {buchung.betrag:.2f} €")
+    db.delete(buchung)
+    db.commit()
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- OP-Ausgleich
 
 @router.get("/mandanten/{mandant_id}/op-ausgleich/vorschlaege")
@@ -1449,35 +1560,24 @@ class ZahlungNeu(BaseModel):
     datum: str | None = None
     # Rest ausbuchen (z. B. Skonto/Erlass): Posten gilt trotz Restbetrag als bezahlt
     ausbuchen: bool = False
+    # Zahlungsmittelkonto: wenn gesetzt, wird die Zahlung zusätzlich im Ist
+    # gebucht (Debitor: Bank an Konto des Postens, Kreditor: Konto an Bank)
+    bank_konto_id: int | None = None
 
 
-@router.post("/posten/{posten_id}/zahlungen")
-def zahlung_erfassen(
-    posten_id: int,
-    daten: ZahlungNeu,
-    benutzer=Depends(aktueller_benutzer),
-    db: Session = Depends(get_db),
-):
-    """Manuelle (Teil-)Zahlung auf einen offenen Posten erfassen.
+def _zahlung_anwenden(
+    db: Session,
+    posten: models.OffenerPosten,
+    betrag: Decimal,
+    zahltag: date,
+    ausbuchen: bool,
+) -> tuple[list[tuple[models.OffenerPosten, Decimal]], Decimal]:
+    """Zahlung auf den Posten anrechnen, Überhang auf Sammelposten vortragen.
 
-    Deckt die Zahlung den Restbetrag (oder ist `ausbuchen` gesetzt), wird der
-    Posten BEZAHLT; sonst bleibt er mit Restbetrag offen und die Planung
-    rechnet mit dem Rest. Auf Sammelposten sind Überzahlungen erlaubt: der
-    Überhang wird auf die nächsten offenen Sammelposten gleicher Art (nach
-    Fälligkeit) vorgetragen – spätere geplante Einzahlungen sinken entsprechend.
-    """
-    nur_schreibend(benutzer)
-    posten = db.get(models.OffenerPosten, posten_id)
-    if posten is None:
-        raise HTTPException(404, "Posten nicht gefunden")
-    mandant_oder_403(db, benutzer, posten.mandant_id)
+    Liefert die Anteile je Posten (erster Eintrag = Hauptposten) und den nicht
+    verteilbaren Rest."""
     if posten.status != models.PostenStatus.OFFEN.value:
         raise HTTPException(422, "Zahlungen sind nur auf offene Posten möglich")
-    betrag = _dec(daten.betrag)
-    if betrag <= 0:
-        raise HTTPException(422, "Zahlungsbetrag muss größer 0 sein")
-    zahltag = _datum(daten.datum, "datum") if daten.datum else date.today()
-
     rest = posten.betrag_brutto - (posten.bezahlt_betrag or Decimal("0"))
     uebertrag = betrag - rest
     if uebertrag > Decimal("0.01") and not posten.sammel:
@@ -1486,12 +1586,12 @@ def zahlung_erfassen(
             f"Zahlung ({betrag:.2f} €) übersteigt den Restbetrag ({rest:.2f} €) – "
             "Überzahlungen werden nur bei Sammelposten auf spätere Posten vorgetragen",
         )
+    anteile: list[tuple[models.OffenerPosten, Decimal]] = [(posten, min(betrag, rest))]
     posten.bezahlt_betrag = (posten.bezahlt_betrag or Decimal("0")) + min(betrag, rest)
-    if daten.ausbuchen or posten.betrag_brutto - posten.bezahlt_betrag <= Decimal("0.01"):
+    if ausbuchen or posten.betrag_brutto - posten.bezahlt_betrag <= Decimal("0.01"):
         posten.status = models.PostenStatus.BEZAHLT.value
         posten.bezahlt_am = zahltag
 
-    verrechnet: list[dict] = []
     if uebertrag > Decimal("0.01"):
         folgende = db.scalars(
             select(models.OffenerPosten)
@@ -1515,17 +1615,98 @@ def zahlung_erfassen(
             if f.betrag_brutto - f.bezahlt_betrag <= Decimal("0.01"):
                 f.status = models.PostenStatus.BEZAHLT.value
                 f.bezahlt_am = zahltag
-            verrechnet.append(
-                {
-                    "posten_id": f.id,
-                    "partner": f.partner,
-                    "faellig_am": f.faellig_am.isoformat(),
-                    "betrag": float(anteil),
-                    "status": f.status,
-                }
-            )
+            anteile.append((f, anteil))
             uebertrag -= anteil
+    return anteile, (uebertrag if uebertrag > Decimal("0.01") else Decimal("0"))
 
+
+def _zahlungs_buchungen(
+    db: Session,
+    mandant_id: int,
+    anteile: list[tuple[models.OffenerPosten, Decimal]],
+    bank: models.Konto,
+    zahltag: date,
+    text: str | None,
+    batch_id: int | None = None,
+) -> tuple[list[models.Buchung], list[str]]:
+    """Ist-Buchungen je Zahlungsanteil (DATEV-Logik, mit Posten-Referenz)."""
+    buchungen: list[models.Buchung] = []
+    hinweise: list[str] = []
+    for p, anteil in anteile:
+        if p.konto is None:
+            hinweise.append(
+                f"Posten „{p.partner}“ hat kein Konto – Anteil {anteil:.2f} € "
+                "wurde nicht im Ist gebucht."
+            )
+            continue
+        if p.art == models.PostenArt.DEBITOR.value:
+            konto_nr, gegen_nr = bank.nummer, p.konto.nummer
+        else:
+            konto_nr, gegen_nr = p.konto.nummer, bank.nummer
+        buchung = models.Buchung(
+            mandant_id=mandant_id,
+            batch_id=batch_id,
+            posten_id=p.id,
+            datum=zahltag,
+            konto_nr=konto_nr,
+            gegenkonto_nr=gegen_nr,
+            betrag=anteil,
+            sh="S",
+            text=(text or f"Zahlung {p.partner}")[:255],
+        )
+        db.add(buchung)
+        buchungen.append(buchung)
+    return buchungen, hinweise
+
+
+def _bankkonto_oder_422(db: Session, mandant_id: int, konto_id: int) -> models.Konto:
+    bank = db.get(models.Konto, konto_id)
+    if (
+        bank is None
+        or bank.mandant_id != mandant_id
+        or bank.typ not in (models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value)
+    ):
+        raise HTTPException(422, "Ungültiges Bank-/Kassenkonto")
+    return bank
+
+
+@router.post("/posten/{posten_id}/zahlungen")
+def zahlung_erfassen(
+    posten_id: int,
+    daten: ZahlungNeu,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Manuelle (Teil-)Zahlung auf einen offenen Posten erfassen.
+
+    Deckt die Zahlung den Restbetrag (oder ist `ausbuchen` gesetzt), wird der
+    Posten BEZAHLT; sonst bleibt er mit Restbetrag offen und die Planung
+    rechnet mit dem Rest. Auf Sammelposten sind Überzahlungen erlaubt: der
+    Überhang wird auf die nächsten offenen Sammelposten gleicher Art (nach
+    Fälligkeit) vorgetragen. Mit `bank_konto_id` wird die Zahlung zusätzlich
+    als Ist-Buchung übernommen (je Anteil, mit Posten-Referenz) – nicht
+    verwenden, wenn dieselbe Zahlung ohnehin über den Buchhaltungsimport kommt
+    (Doppelzählung).
+    """
+    nur_schreibend(benutzer)
+    posten = db.get(models.OffenerPosten, posten_id)
+    if posten is None:
+        raise HTTPException(404, "Posten nicht gefunden")
+    mandant_oder_403(db, benutzer, posten.mandant_id)
+    betrag = _dec(daten.betrag)
+    if betrag <= 0:
+        raise HTTPException(422, "Zahlungsbetrag muss größer 0 sein")
+    zahltag = _datum(daten.datum, "datum") if daten.datum else date.today()
+
+    anteile, unverteilt = _zahlung_anwenden(db, posten, betrag, zahltag, daten.ausbuchen)
+    buchungen: list[models.Buchung] = []
+    hinweise: list[str] = []
+    if daten.bank_konto_id is not None:
+        bank = _bankkonto_oder_422(db, posten.mandant_id, daten.bank_konto_id)
+        buchungen, hinweise = _zahlungs_buchungen(
+            db, posten.mandant_id, anteile, bank, zahltag,
+            f"Zahlung {posten.partner}" + (f" ({posten.belegnr})" if posten.belegnr else ""),
+        )
     audit(db, benutzer, posten.mandant_id, "ZAHLUNG_ERFASST",
           f"Posten {posten.id} ({posten.partner}): {betrag:.2f} €")
     db.commit()
@@ -1533,8 +1714,19 @@ def zahlung_erfassen(
         "status": posten.status,
         "bezahlt_betrag": float(posten.bezahlt_betrag),
         "restbetrag": float(posten.betrag_brutto - posten.bezahlt_betrag),
-        "verrechnet": verrechnet,
-        "unverteilt": float(uebertrag) if uebertrag > Decimal("0.01") else 0.0,
+        "verrechnet": [
+            {
+                "posten_id": p.id,
+                "partner": p.partner,
+                "faellig_am": p.faellig_am.isoformat(),
+                "betrag": float(anteil),
+                "status": p.status,
+            }
+            for p, anteil in anteile[1:]
+        ],
+        "unverteilt": float(unverteilt),
+        "buchungen": [b.id for b in buchungen],
+        "hinweise": hinweise,
     }
 
 

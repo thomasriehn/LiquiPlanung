@@ -319,3 +319,97 @@ def test_pdf_uc_ebanking():
     assert "NL06" not in weclapp.verwendungszweck
 
     assert erg.umsaetze[2].empfaenger == "J.P.Freitas, Lda"
+
+
+def test_pdf_eingang_zuweisen_und_aufheben(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Zuweisung GmbH", "kurzname": "zuweisung"}
+    ).json()["id"]
+    konten = {k["nummer"]: k for k in
+              client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]}
+
+    # zwei offene Sammel-Forderungen mit Konto 8400 (für Vortrag) + Kreditor
+    p1 = client.post(f"/api/mandanten/{mandant_id}/posten", json={
+        "art": "DEBITOR", "partner": "Debitoren KW 37", "faellig_am": "2026-09-11",
+        "betrag_brutto": 25000, "konto_id": konten["8400"]["id"], "sammel": True}).json()["id"]
+    p2 = client.post(f"/api/mandanten/{mandant_id}/posten", json={
+        "art": "DEBITOR", "partner": "Debitoren KW 38", "faellig_am": "2026-09-18",
+        "betrag_brutto": 10000, "konto_id": konten["8400"]["id"], "sammel": True}).json()["id"]
+    kreditor = client.post(f"/api/mandanten/{mandant_id}/posten", json={
+        "art": "KREDITOR", "partner": "Lieferant", "faellig_am": "2026-09-20",
+        "betrag_brutto": 500, "konto_id": konten["3400"]["id"]}).json()["id"]
+
+    erg = client.post(
+        f"/api/mandanten/{mandant_id}/pdf-umsaetze",
+        files={"datei": ("auszug.pdf", _beispiel_pdf(PDF_ZEILEN), "application/pdf")},
+    ).json()
+    batch_id = erg["batch_id"]
+    eingang = next(u for u in erg["umsaetze"] if u["betrag"] > 0)   # +26.300
+
+    # Eingang auf Kreditor-Posten -> falsche Richtung
+    assert client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/zuweisen", json={
+        "batch_id": batch_id, "posten_id": kreditor,
+        "bank_konto_id": konten["1200"]["id"], "datum": eingang["buchungstag"],
+        "betrag": eingang["betrag"], "text": "x"}).status_code == 422
+
+    # Zuweisung auf KW 37 (25.000): Überhang 1.300 wird auf KW 38 vorgetragen,
+    # je Anteil entsteht eine Ist-Buchung
+    erg2 = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/zuweisen", json={
+        "batch_id": batch_id, "posten_id": p1,
+        "bank_konto_id": konten["1200"]["id"], "datum": eingang["buchungstag"],
+        "betrag": eingang["betrag"], "text": "Gutschrift Muster GmbH"}).json()
+    assert erg2["posten"]["status"] == "BEZAHLT"
+    assert erg2["verrechnet"] == [
+        {"posten_id": p2, "partner": "Debitoren KW 38", "betrag": 1300.0, "status": "OFFEN"}]
+    assert len(erg2["buchungen"]) == 2
+    assert erg2["hinweise"] == []
+
+    posten = {p["id"]: p for p in client.get(f"/api/mandanten/{mandant_id}/posten").json()}
+    assert posten[p1]["status"] == "BEZAHLT"
+    assert posten[p2]["restbetrag"] == 8700.0
+    batch = next(b for b in client.get(f"/api/mandanten/{mandant_id}/importe").json()
+                 if b["id"] == batch_id)
+    assert batch["anzahl"] == 2
+
+    # Aufheben beider Buchungen: Posten wieder offen, Anteile zurückgenommen
+    for buchung_id in erg2["buchungen"]:
+        assert client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/aufheben",
+                           json={"buchung_id": buchung_id}).json()["ok"] is True
+    posten = {p["id"]: p for p in client.get(f"/api/mandanten/{mandant_id}/posten").json()}
+    assert posten[p1]["status"] == "OFFEN"
+    assert posten[p1]["restbetrag"] == 25000.0
+    assert posten[p2]["restbetrag"] == 10000.0
+    batch = next(b for b in client.get(f"/api/mandanten/{mandant_id}/importe").json()
+                 if b["id"] == batch_id)
+    assert batch["anzahl"] == 0
+    assert client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/aufheben",
+                       json={"buchung_id": 999999}).status_code == 404
+
+
+def test_pdf_verbuchung_aufheben(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Aufheben GmbH", "kurzname": "aufheben"}
+    ).json()["id"]
+    konten = {k["nummer"]: k for k in
+              client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]}
+    erg = client.post(
+        f"/api/mandanten/{mandant_id}/pdf-umsaetze",
+        files={"datei": ("auszug.pdf", _beispiel_pdf(PDF_ZEILEN), "application/pdf")},
+    ).json()
+    ausgabe = next(u for u in erg["umsaetze"] if u["betrag"] < 0)
+    verbucht = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/verbuchen", json={
+        "batch_id": erg["batch_id"], "konto_id": konten["4240"]["id"],
+        "bank_konto_id": konten["1200"]["id"], "datum": ausgabe["buchungstag"],
+        "betrag": ausgabe["betrag"], "text": "Strom"}).json()
+    assert client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/aufheben",
+                       json={"buchung_id": verbucht["id"]}).json()["ok"] is True
+    batch = next(b for b in client.get(f"/api/mandanten/{mandant_id}/importe").json()
+                 if b["id"] == erg["batch_id"])
+    assert batch["anzahl"] == 0
+    # danach ist dieselbe Verbuchung wieder möglich (Dubletten-Sperre greift nicht mehr)
+    assert client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/verbuchen", json={
+        "batch_id": erg["batch_id"], "konto_id": konten["4240"]["id"],
+        "bank_konto_id": konten["1200"]["id"], "datum": ausgabe["buchungstag"],
+        "betrag": ausgabe["betrag"], "text": "Strom"}).status_code == 200
