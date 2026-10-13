@@ -40,8 +40,8 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
 3. ✔ **Forderungsseite:** Neben Eingangsrechnungen (Kreditoren) werden auch
    Ausgangsrechnungen/Forderungen (Debitoren) als erwartete Einzahlungen geführt.
 4. ✔ **Doppelzählungs-Vermeidung ("Restbudget-Logik"):** Budget je Konto und Woche wird um
-   bereits explizit geplante Posten (OPs, Dauerbuchungen, Kalendertermine) desselben Kontos
-   gekürzt (Untergrenze 0). Sonst würde z. B. die Miete doppelt geplant (Dauerbuchung + Budget).
+   bereits explizit geplante Posten (OPs, Dauerschuldverhältnisse, Kalendertermine) desselben Kontos
+   gekürzt (Untergrenze 0). Sonst würde z. B. die Miete doppelt geplant (Dauerschuldverhältnis + Budget).
 5. ✔ **Kontokorrent-/Kreditlinien:** Verfügbare Liquidität = Bestand + freie Linie.
    Je Bankkonto ist eine Kreditlinie hinterlegbar; die Darstellung weist beides aus.
 6. ✔ **Masseverbindlichkeiten vs. Insolvenzforderungen (§ 38 / § 55 InsO):** Je offenem
@@ -53,7 +53,7 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
    vorbelegt (übersteuerbar).
 7. ✔ **Insolvenzgeld-Assistent:** Je Mandant ist ein Insolvenzgeldzeitraum hinterlegbar
    (Vorschlag: 3 Monate vor erwarteter Eröffnung, §§ 165 ff. SGB III). Im Zeitraum
-   unterdrückt die Planung Personal-/SV-Budgets und -Dauerbuchungen (Nettolöhne über
+   unterdrückt die Planung Personal-/SV-Budgets und -Dauerschuldverhältnisse (Nettolöhne über
    Insolvenzgeld bzw. Vorfinanzierung nach § 170 Abs. 4 SGB III, SV-Beiträge nach
    § 175 SGB III von der BA getragen) und kürzt SV-/LSt-Kalendertermine anteilig nach
    Beitrags-/Lohnmonat. Eine Vorschau zeigt die Entlastung je Position vor dem
@@ -199,7 +199,7 @@ dadurch entstehen die BWA-Zeilen. Bank-an-Bank = Umbuchung (nur Bestandsverschie
 
 1. Offene Posten (geplantes Zahldatum, sonst Fälligkeit; überfällig → nächster
    Bankarbeitstag ab heute),
-2. Dauerbuchungen (Intervall-Expansion mit Vorlauf über die Fenstergrenze, Verschiebung
+2. Dauerschuldverhältnisse (Intervall-Expansion mit Vorlauf über die Fenstergrenze, Verschiebung
    auf Bankarbeitstag),
 3. Zahlungstermine aus dem Kalender (SV/Steuern; Deduplizierung über die fachliche
    Periode, damit manuell verschobene Termine bei Neugenerierung nicht doppeln),

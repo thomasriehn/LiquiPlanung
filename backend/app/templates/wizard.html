@@ -1,0 +1,436 @@
+{% extends "base.html" %}
+{% block titel %}Mandanten-Wizard – LiquiPlanung{% endblock %}
+{% block inhalt %}
+<div class="seite" style="max-width:980px">
+  <h1>Neuen Mandanten anlegen – Wizard</h1>
+  <p class="hinweis">
+    Acht Schritte von den Stammdaten bis zu den Importen. Alles lässt sich später
+    jederzeit in der Anwendung ändern oder nachholen; optionale Schritte können
+    übersprungen werden.
+  </p>
+  <ol class="wizard-schritte" id="schrittleiste">
+    <li data-nr="1">1 · Mandant</li>
+    <li data-nr="2">2 · Bankverbindung</li>
+    <li data-nr="3">3 · Anfangssalden</li>
+    <li data-nr="4">4 · OP-Liste</li>
+    <li data-nr="5">5 · Dauerschuldverhältnisse</li>
+    <li data-nr="6">6 · Bankdaten</li>
+    <li data-nr="7">7 · Buchungsstapel</li>
+    <li data-nr="8">8 · BWA</li>
+    <li data-nr="9">Fertig</li>
+  </ol>
+
+  <section class="wizard-schritt" data-schritt="1">
+    <h2>Schritt 1: Mandantendaten</h2>
+    <form id="form-mandant" class="formular-zeilen">
+      <label>Name<input name="name" required placeholder="z. B. Nordlicht Möbelwerk GmbH"></label>
+      <label>Kurzname<input name="kurzname" required pattern="[a-z0-9\-]+"
+        title="Kleinbuchstaben, Ziffern, Bindestrich" placeholder="z. B. nordlicht"></label>
+      <label>Kontenrahmen<select name="kontenrahmen" id="w-kontenrahmen"></select></label>
+      <label>Bundesland
+        <select name="bundesland">
+          {% for kz in ["BW","BY","BE","BB","HB","HH","HE","MV","NI","NW","RP","SL","SN","ST","SH","TH"] %}
+          <option value="{{ kz }}" {% if kz == "NW" %}selected{% endif %}>{{ kz }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>USt-Zeitraum
+        <select name="ust_zeitraum">
+          <option value="MONAT">monatlich</option>
+          <option value="QUARTAL">vierteljährlich</option>
+        </select>
+      </label>
+      <label class="cb"><input type="checkbox" name="dauerfrist"> Dauerfristverlängerung</label>
+      <label>Verfahrensstatus
+        <select name="verfahrensstatus">
+          <option value="REGELMANDAT">Regelmandat</option>
+          <option value="VORLAEUFIG">vorläufiges Verfahren</option>
+          <option value="EROEFFNET">eröffnetes Verfahren</option>
+          <option value="EIGENVERWALTUNG">Eigenverwaltung</option>
+        </select>
+      </label>
+      <label>Aktenzeichen<input name="aktenzeichen"></label>
+      <label>Insolvenz-Stichtag (Antrag)<input type="date" name="insolvenz_stichtag"></label>
+      <button type="submit">Mandant anlegen &amp; weiter</button>
+    </form>
+    <p class="hinweis">Der Insolvenz-Stichtag steuert die automatische
+      § 38-Einstufung beim OP-Import (Schritt 4).</p>
+  </section>
+
+  <section class="wizard-schritt" data-schritt="2" style="display:none">
+    <h2>Schritt 2: Bankverbindung</h2>
+    <p class="hinweis">Die IBAN wird am Bankkonto hinterlegt – darüber ordnet der
+      Kontoauszugsimport (Schritt 6 und später) die Auszüge automatisch zu.</p>
+    <div class="formular-zeilen">
+      <label>Bankkonto<select id="w-bankkonto"></select></label>
+      <label>IBAN<input id="w-iban" placeholder="DE.." style="min-width:260px"></label>
+      <label>Kreditlinie (optional)<input id="w-kreditlinie" type="number" step="0.01" min="0"></label>
+    </div>
+    <div class="wizard-knoepfe">
+      <button id="w2-speichern">Speichern &amp; weiter</button>
+      <button class="sekundaer" data-ueberspringen="3">Überspringen</button>
+    </div>
+  </section>
+
+  <section class="wizard-schritt" data-schritt="3" style="display:none">
+    <h2>Schritt 3: Anfangssalden (optional)</h2>
+    <p class="hinweis">
+      Salden werden als Bestandsanker zum gewählten Stichtag gespeichert. Nur
+      ausgefüllte Felder werden übernommen. Hinweis: Importierte Kontoauszüge
+      (Schritt 6) setzen den Bankbestand automatisch über den Endsaldo je Auszug –
+      der manuelle Banksaldo ist vor allem ohne Bankdateien sinnvoll.
+    </p>
+    <div class="formular-zeilen">
+      <label>Stichtag<input id="w-saldo-datum" type="date" required></label>
+      <label>Banksaldo<input id="w-saldo-bank" type="number" step="0.01" placeholder="leer = nicht erfassen"></label>
+      <label>Kassenkonto<select id="w-kassekonto"></select></label>
+      <label>Kassenbestand<input id="w-saldo-kasse" type="number" step="0.01" placeholder="leer = nicht erfassen"></label>
+      <label>Warenbestand (nachrichtlich)<input id="w-saldo-waren" type="number" step="0.01" placeholder="leer = nicht erfassen"></label>
+    </div>
+    <div class="wizard-knoepfe">
+      <button id="w3-speichern">Speichern &amp; weiter</button>
+      <button class="sekundaer" data-ueberspringen="4">Überspringen</button>
+    </div>
+  </section>
+
+  <section class="wizard-schritt" data-schritt="4" style="display:none">
+    <h2>Schritt 4: Offene Posten importieren</h2>
+    <p class="hinweis">CSV: <code>Art;Partner;Belegnummer;Rechnungsdatum;Faellig;Betrag;Konto;Notiz;Sammel</code>
+      – Art ER/FO, Sammelposten mit 1/x/ja kennzeichnen. Eingangsrechnungen mit
+      Rechnungsdatum vor dem Insolvenz-Stichtag werden automatisch als
+      Insolvenzforderung (§ 38) gesperrt.</p>
+    <div class="formular-zeilen">
+      <label>OP-Liste (CSV)<input type="file" id="w-op-datei"></label>
+      <button id="w4-import" class="sekundaer">Importieren</button>
+    </div>
+    <div id="w4-ergebnis"></div>
+    <div class="wizard-knoepfe">
+      <button id="w4-weiter" style="display:none">Weiter</button>
+      <button class="sekundaer" data-ueberspringen="5">Überspringen</button>
+    </div>
+  </section>
+
+  <section class="wizard-schritt" data-schritt="5" style="display:none">
+    <h2>Schritt 5: Dauerschuldverhältnisse importieren</h2>
+    <p class="hinweis">CSV: <code>Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto</code>
+      – Art Ausgabe/Einnahme, Intervall monatlich/wöchentlich/vierteljährlich/jährlich
+      (auch M/W/Q/J), Stichtag 1–31 bzw. Mo–So bei wöchentlich.</p>
+    <div class="formular-zeilen">
+      <label>Dauerschuldverhältnisse (CSV)<input type="file" id="w-dauer-datei"></label>
+      <button id="w5-import" class="sekundaer">Importieren</button>
+    </div>
+    <div id="w5-ergebnis"></div>
+    <div class="wizard-knoepfe">
+      <button id="w5-weiter" style="display:none">Weiter</button>
+      <button class="sekundaer" data-ueberspringen="6">Überspringen</button>
+    </div>
+  </section>
+
+  <section class="wizard-schritt" data-schritt="6" style="display:none">
+    <h2>Schritt 6: Bankdaten importieren (optional)</h2>
+    <p class="hinweis">Kontoauszüge MT940 oder CAMT.053, auch mehrere Dateien auf
+      einmal. Zuordnung über die IBAN aus Schritt 2, sonst über das gewählte
+      Bankkonto; der Endsaldo jedes Auszugs wird Bestandsanker.</p>
+    <div class="formular-zeilen">
+      <label>Kontoauszüge<input type="file" id="w-bank-dateien" multiple></label>
+      <button id="w6-import" class="sekundaer">Importieren</button>
+    </div>
+    <div id="w6-ergebnis"></div>
+    <div class="wizard-knoepfe">
+      <button id="w6-weiter" style="display:none">Weiter</button>
+      <button class="sekundaer" data-ueberspringen="7">Überspringen</button>
+    </div>
+  </section>
+
+  <section class="wizard-schritt" data-schritt="7" style="display:none">
+    <h2>Schritt 7: Buchungsstapel importieren (optional)</h2>
+    <p class="hinweis">DATEV-Buchungsstapel (EXTF/DTVF) werden automatisch erkannt;
+      generisches CSV (<code>Datum;Konto;Gegenkonto;Betrag;SH;Belegfeld;Text</code>)
+      deckt Addison-Exporte ab. Auch mehrere Dateien auf einmal.</p>
+    <div class="formular-zeilen">
+      <label>Format
+        <select id="w-buch-format">
+          <option value="auto">automatisch erkennen</option>
+          <option value="datev">DATEV-Buchungsstapel</option>
+          <option value="csv">generisches CSV (Addison)</option>
+        </select>
+      </label>
+      <label>Buchungsstapel<input type="file" id="w-buch-dateien" multiple></label>
+      <button id="w7-import" class="sekundaer">Importieren</button>
+    </div>
+    <div id="w7-ergebnis"></div>
+    <div class="wizard-knoepfe">
+      <button id="w7-weiter" style="display:none">Weiter</button>
+      <button class="sekundaer" data-ueberspringen="8">Überspringen</button>
+    </div>
+  </section>
+
+  <section class="wizard-schritt" data-schritt="8" style="display:none">
+    <h2>Schritt 8: BWA-/Saldenliste importieren (optional)</h2>
+    <p class="hinweis">CSV: <code>Konto;Jahr;Monat;Betrag</code> – liefert die
+      Historie für Budget-Vorschläge und die Schätzung der Steuer-/SV-Termine.</p>
+    <div class="formular-zeilen">
+      <label>BWA-/Saldenliste (CSV)<input type="file" id="w-bwa-datei"></label>
+      <button id="w8-import" class="sekundaer">Importieren</button>
+    </div>
+    <div id="w8-ergebnis"></div>
+    <div class="wizard-knoepfe">
+      <button id="w8-weiter" style="display:none">Fertigstellen</button>
+      <button class="sekundaer" data-ueberspringen="9">Überspringen</button>
+    </div>
+  </section>
+
+  <section class="wizard-schritt" data-schritt="9" style="display:none">
+    <h2>Fertig 🎉</h2>
+    <p>Der Mandant ist eingerichtet. Zusammenfassung:</p>
+    <ul id="w-protokoll"></ul>
+    <p class="hinweis">Sinnvolle nächste Schritte: Budgets je Konto/Monat erfassen
+      („Budget“), Zahlungstermine generieren („Kalender“), Bankabgleich prüfen
+      („Posten → Bankabgleich“) und den Plan als Soll einfrieren.</p>
+    <div class="wizard-knoepfe">
+      <a id="w-zum-plan" href="#"><button>Zum 13-Wochen-Plan</button></a>
+      <a id="w-zu-posten" href="#"><button class="sekundaer">Zu den Posten</button></a>
+    </div>
+  </section>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+let mandantId = null;
+let schritt = 1;
+const protokoll = [];
+
+function zeigeSchritt(nr) {
+  schritt = nr;
+  document.querySelectorAll(".wizard-schritt").forEach(s =>
+    s.style.display = parseInt(s.dataset.schritt) === nr ? "" : "none");
+  document.querySelectorAll("#schrittleiste li").forEach(li => {
+    const eigen = parseInt(li.dataset.nr);
+    li.classList.toggle("aktiv", eigen === nr);
+    li.classList.toggle("fertig", eigen < nr);
+  });
+  if (nr === 9) {
+    const ul = document.getElementById("w-protokoll");
+    ul.innerHTML = protokoll.map(z => `<li>${esc(z)}</li>`).join("");
+    document.getElementById("w-zum-plan").href = `/mandanten/${mandantId}/plan`;
+    document.getElementById("w-zu-posten").href = `/mandanten/${mandantId}/posten`;
+  }
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+document.querySelectorAll("[data-ueberspringen]").forEach(btn =>
+  btn.addEventListener("click", () => zeigeSchritt(parseInt(btn.dataset.ueberspringen))));
+
+function ergebnisBox(ziel, html, fehler) {
+  document.getElementById(ziel).innerHTML =
+    `<div class="warnung" style="${fehler ? "" : "background:#e8f5ec;border-color:#9fd3ae;color:#1e5c38"}">${html}</div>`;
+}
+
+// Schritt 1: Mandant anlegen -------------------------------------------------
+api("GET", "/api/kontenrahmen").then(vorlagen => {
+  document.getElementById("w-kontenrahmen").innerHTML = vorlagen.map(v =>
+    `<option value="${esc(v.code)}">${esc(v.code === v.name ? v.name : `${v.code} – ${v.name}`)}${v.fest ? "" : " (eigene Vorlage)"}</option>`
+  ).join("");
+}).catch(() => {});
+
+let bankKonten = [], kasseKonten = [];
+
+document.getElementById("form-mandant").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const daten = Object.fromEntries(f.entries());
+  daten.dauerfrist = f.get("dauerfrist") === "on";
+  if (!daten.insolvenz_stichtag) daten.insolvenz_stichtag = null;
+  try {
+    const erg = await api("POST", "/api/mandanten", daten);
+    mandantId = erg.id;
+    protokoll.push(`Mandant „${daten.name}“ angelegt (Kontenrahmen ${daten.kontenrahmen}).`);
+    const d = await api("GET", `/api/mandanten/${mandantId}/konten`);
+    bankKonten = d.konten.filter(k => k.typ === "BANK" && k.aktiv);
+    kasseKonten = d.konten.filter(k => k.typ === "KASSE" && k.aktiv);
+    const optionen = liste => liste.map(k =>
+      `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}</option>`).join("");
+    document.getElementById("w-bankkonto").innerHTML =
+      optionen(bankKonten) || `<option value="">kein Bankkonto im Kontenrahmen</option>`;
+    document.getElementById("w-kassekonto").innerHTML =
+      optionen(kasseKonten) || `<option value="">kein Kassenkonto</option>`;
+    document.getElementById("w-saldo-datum").value = new Date().toISOString().slice(0, 10);
+    zeigeSchritt(2);
+  } catch (err) { toast(err.message); }
+});
+
+// Schritt 2: Bankverbindung --------------------------------------------------
+document.getElementById("w2-speichern").addEventListener("click", async () => {
+  const kontoId = document.getElementById("w-bankkonto").value;
+  const iban = document.getElementById("w-iban").value.trim();
+  const kreditlinie = document.getElementById("w-kreditlinie").value;
+  if (!kontoId) { zeigeSchritt(3); return; }
+  if (!iban && !kreditlinie) { toast("IBAN oder Kreditlinie angeben – oder überspringen.", false); return; }
+  try {
+    const daten = {};
+    if (iban) daten.iban = iban;
+    if (kreditlinie) daten.kreditlinie = parseFloat(kreditlinie);
+    await api("PATCH", `/api/konten/${kontoId}`, daten);
+    const konto = bankKonten.find(k => k.id === parseInt(kontoId));
+    if (iban) protokoll.push(`IBAN am Konto ${konto.nummer} hinterlegt.`);
+    if (kreditlinie) protokoll.push(`Kreditlinie ${kreditlinie} € am Konto ${konto.nummer} erfasst.`);
+    zeigeSchritt(3);
+  } catch (err) { toast(err.message); }
+});
+
+// Schritt 3: Anfangssalden ---------------------------------------------------
+document.getElementById("w3-speichern").addEventListener("click", async () => {
+  const datum = document.getElementById("w-saldo-datum").value;
+  if (!datum) { toast("Bitte einen Stichtag wählen."); return; }
+  const bank = document.getElementById("w-saldo-bank").value;
+  const kasse = document.getElementById("w-saldo-kasse").value;
+  const waren = document.getElementById("w-saldo-waren").value;
+  try {
+    let anzahl = 0;
+    if (bank !== "" && document.getElementById("w-bankkonto").value) {
+      await api("POST", `/api/mandanten/${mandantId}/bestaende`, {
+        typ: "BANK", konto_id: parseInt(document.getElementById("w-bankkonto").value),
+        datum, wert: parseFloat(bank) });
+      anzahl++;
+    }
+    if (kasse !== "" && document.getElementById("w-kassekonto").value) {
+      await api("POST", `/api/mandanten/${mandantId}/bestaende`, {
+        typ: "KASSE", konto_id: parseInt(document.getElementById("w-kassekonto").value),
+        datum, wert: parseFloat(kasse) });
+      anzahl++;
+    }
+    if (waren !== "") {
+      await api("POST", `/api/mandanten/${mandantId}/bestaende`, {
+        typ: "WAREN", konto_id: null, datum, wert: parseFloat(waren) });
+      anzahl++;
+    }
+    if (anzahl) protokoll.push(`${anzahl} Anfangssalden per ${datum} erfasst.`);
+    zeigeSchritt(4);
+  } catch (err) { toast(err.message); }
+});
+
+// Schritte 4–8: Importe ------------------------------------------------------
+function importSchritt({ importKnopf, weiterKnopf, ergebnis, lauf, naechster }) {
+  document.getElementById(importKnopf).addEventListener("click", async () => {
+    try {
+      const text = await lauf();
+      if (text === null) return;
+      ergebnisBox(ergebnis, text, false);
+      document.getElementById(weiterKnopf).style.display = "";
+    } catch (err) { ergebnisBox(ergebnis, esc(err.message), true); }
+  });
+  document.getElementById(weiterKnopf).addEventListener("click", () => zeigeSchritt(naechster));
+}
+
+function datei(id) {
+  const eingabe = document.getElementById(id);
+  if (!eingabe.files.length) { toast("Bitte zuerst eine Datei wählen.", false); return null; }
+  return eingabe.files;
+}
+
+importSchritt({
+  importKnopf: "w4-import", weiterKnopf: "w4-weiter", ergebnis: "w4-ergebnis", naechster: 5,
+  lauf: async () => {
+    const dateien = datei("w-op-datei");
+    if (!dateien) return null;
+    const fd = new FormData();
+    fd.append("datei", dateien[0]);
+    const erg = await apiDatei(`/api/mandanten/${mandantId}/posten/import`, fd);
+    let text = `${erg.angelegt} Posten angelegt` +
+      (erg.uebersprungen ? `, ${erg.uebersprungen} übersprungen` : "") + ".";
+    if (erg.insolvenzforderungen) {
+      text += ` ${erg.insolvenzforderungen} automatisch als Insolvenzforderung (§ 38) gesperrt.`;
+    }
+    if (erg.warnungen.length) text += `<br>${erg.warnungen.map(esc).join("<br>")}`;
+    protokoll.push(`OP-Liste: ${erg.angelegt} Posten importiert` +
+      (erg.insolvenzforderungen ? ` (${erg.insolvenzforderungen} × § 38 gesperrt)` : "") + ".");
+    return text;
+  },
+});
+
+importSchritt({
+  importKnopf: "w5-import", weiterKnopf: "w5-weiter", ergebnis: "w5-ergebnis", naechster: 6,
+  lauf: async () => {
+    const dateien = datei("w-dauer-datei");
+    if (!dateien) return null;
+    const fd = new FormData();
+    fd.append("datei", dateien[0]);
+    const erg = await apiDatei(`/api/mandanten/${mandantId}/dauerbuchungen/import`, fd);
+    let text = `${erg.angelegt} Dauerschuldverhältnisse angelegt` +
+      (erg.uebersprungen ? `, ${erg.uebersprungen} übersprungen` : "") + ".";
+    if (erg.warnungen.length) text += `<br>${erg.warnungen.map(esc).join("<br>")}`;
+    protokoll.push(`Dauerschuldverhältnisse: ${erg.angelegt} importiert.`);
+    return text;
+  },
+});
+
+importSchritt({
+  importKnopf: "w6-import", weiterKnopf: "w6-weiter", ergebnis: "w6-ergebnis", naechster: 7,
+  lauf: async () => {
+    const dateien = datei("w-bank-dateien");
+    if (!dateien) return null;
+    const kontoId = document.getElementById("w-bankkonto").value;
+    const teile = [];
+    let gesamt = 0;
+    for (const d of dateien) {
+      const fd = new FormData();
+      fd.append("datei", d);
+      const url = `/api/mandanten/${mandantId}/bank-import` + (kontoId ? `?konto_id=${kontoId}` : "");
+      const erg = await apiDatei(url, fd);
+      gesamt += erg.anzahl;
+      let zeile = `${esc(d.name)}: ${erg.anzahl} Umsätze (${esc(erg.format)})`;
+      if (erg.bestandsanker.length) {
+        zeile += `, Bestandsanker ` + erg.bestandsanker.map(a =>
+          `${esc(a.konto)} ${a.datum}: ${eur(a.wert)} €`).join("; ");
+      }
+      if (erg.warnungen.length) zeile += `<br>${erg.warnungen.map(esc).join("<br>")}`;
+      teile.push(zeile);
+    }
+    protokoll.push(`Bankdaten: ${gesamt} Umsätze aus ${dateien.length} Datei(en) importiert.`);
+    return teile.join("<br>");
+  },
+});
+
+importSchritt({
+  importKnopf: "w7-import", weiterKnopf: "w7-weiter", ergebnis: "w7-ergebnis", naechster: 8,
+  lauf: async () => {
+    const dateien = datei("w-buch-dateien");
+    if (!dateien) return null;
+    const format = document.getElementById("w-buch-format").value;
+    const teile = [];
+    let gesamt = 0;
+    for (const d of dateien) {
+      const fd = new FormData();
+      fd.append("datei", d);
+      const erg = await apiDatei(`/api/mandanten/${mandantId}/import?format=${format}`, fd);
+      gesamt += erg.anzahl;
+      let zeile = `${esc(d.name)}: ${erg.anzahl} Sätze (${esc(erg.format)})`;
+      if (erg.unbekannte_konten.length) {
+        zeile += `<br>Nicht angelegte Konten: ${erg.unbekannte_konten.map(esc).join(", ")}`;
+      }
+      if (erg.warnungen.length) zeile += `<br>${erg.warnungen.slice(0, 5).map(esc).join("<br>")}`;
+      teile.push(zeile);
+    }
+    protokoll.push(`Buchungsstapel: ${gesamt} Buchungen aus ${dateien.length} Datei(en) importiert.`);
+    return teile.join("<br>");
+  },
+});
+
+importSchritt({
+  importKnopf: "w8-import", weiterKnopf: "w8-weiter", ergebnis: "w8-ergebnis", naechster: 9,
+  lauf: async () => {
+    const dateien = datei("w-bwa-datei");
+    if (!dateien) return null;
+    const fd = new FormData();
+    fd.append("datei", dateien[0]);
+    const erg = await apiDatei(`/api/mandanten/${mandantId}/import?format=bwa`, fd);
+    let text = `${erg.anzahl} BWA-Werte importiert.`;
+    if (erg.warnungen.length) text += `<br>${erg.warnungen.slice(0, 5).map(esc).join("<br>")}`;
+    protokoll.push(`BWA-Saldenliste: ${erg.anzahl} Werte importiert.`);
+    return text;
+  },
+});
+
+zeigeSchritt(1);
+</script>
+{% endblock %}

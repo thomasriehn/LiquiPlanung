@@ -21,6 +21,11 @@ Möbelhersteller im **vorläufigen Insolvenzverfahren** (Antrag = Stichtag − 3
 Wochen), Buchhaltung eine Woche im Rückstand, rückläufige Umsätze, Bankbestand
 von 165.000 € auf rund 40.000 € abgeschmolzen.
 
+> **Abkürzung:** Der Onboarding-Wizard („Mit Wizard anlegen“ auf der
+> Mandanten-Seite) führt durch die Schritte 1–5 sowie die Importe der
+> Dateien 01–08 in einem Rutsch; danach geht es bei Schritt 7 (Budgets)
+> weiter. Die folgende Anleitung beschreibt den manuellen Weg.
+
 ## 1. Mandant anlegen
 
 „Mandanten → Neuer Mandant“ – Werte aus der Tabelle in `UEBERSICHT.md`
@@ -69,10 +74,10 @@ bis 30.07. reicht – so soll es sein.
 Kasse (Konto 1000) und Warenbestand mit den Werten/Daten aus der Übersicht
 anlegen (Kasse **1.348,50 €**, Waren **68.500 €** per 05.08.2026).
 
-## 7. Dauerbuchungen importieren und Budgets anlegen (Planbasis)
+## 7. Dauerschuldverhältnisse importieren und Budgets anlegen (Planbasis)
 
-„Posten → Dauerbuchungen“ → `08_dauerbuchungen.csv` über „Dauerbuchungen
-importieren“ hochladen (5 Dauerbuchungen, passend zum importierten
+„Posten → Dauerschuldverhältnisse“ → `08_dauerbuchungen.csv` über „Dauerschuldverhältnisse
+importieren“ hochladen (5 Dauerschuldverhältnisse, passend zum importierten
 Zahlungsverhalten – zur Kontrolle):
 
 | Name | Konto | Betrag brutto | Intervall | Stichtag |
@@ -116,7 +121,7 @@ Mechanismen auf einmal (Details in der Übersicht):
   offen und die Planung rechnet mit dem Rest.
 - **Skonto**: Callsen IT −2.910 auf RE-IT-2201 (3.000, exakt 3 % – sicher).
 
-Miete −8.900 (Dauerbuchung, kein OP), Kartenumsätze +1.250 und Kontoführung
+Miete −8.900 (Dauerschuldverhältnis, kein OP), Kartenumsätze +1.250 und Kontoführung
 −42,50 bekommen **keinen** Vorschlag – erwünschtes Verhalten. Nach „Ausgewählte
 übernehmen“ sind die Posten bezahlt bzw. teilbezahlt („aufheben“ macht alles
 rückgängig).
@@ -126,7 +131,7 @@ rückgängig).
 Auf der Plan-Seite sollte jetzt ein vollständiges Bild stehen: Ist-Zahlen bis
 30.07., Bankbestand aus den Auszugsankern, Plan aus offenen Posten (der
 überfällige Eingang Wohnwelt Harms wird auf den nächsten Bankarbeitstag
-gerollt), Dauerbuchungen, Budgets (mit Restbudget-Logik) und Steuerterminen;
+gerollt), Dauerschuldverhältnisse, Budgets (mit Restbudget-Logik) und Steuerterminen;
 dazu der Sperrhinweis über 19.820 € Insolvenzforderungen. Von hier aus lässt
 sich alles Weitere durchspielen:
 

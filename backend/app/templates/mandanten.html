@@ -56,6 +56,11 @@
     <label>Insolvenz-Stichtag<input type="date" name="insolvenz_stichtag"></label>
     <button type="submit">Anlegen</button>
   </form>
+  <p style="margin-top:12px">
+    <a href="/mandanten-wizard"><button type="button" class="sekundaer">Mit Wizard anlegen</button></a>
+    <span class="hinweis">Geführt in acht Schritten: Stammdaten, Bankverbindung, Anfangssalden
+      und alle Importe (OP-Liste, Dauerschuldverhältnisse, Bankdaten, Buchungsstapel, BWA).</span>
+  </p>
   {% endif %}
 </div>
 {% endblock %}

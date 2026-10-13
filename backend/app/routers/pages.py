@@ -124,6 +124,18 @@ def profil_seite(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/mandanten-wizard")
+def mandanten_wizard_seite(request: Request, db: Session = Depends(get_db)):
+    benutzer = _benutzer_oder_login(request, db)
+    if benutzer is None:
+        return RedirectResponse("/login", status_code=303)
+    if not ist_admin(benutzer):
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(
+        request, "wizard.html", {"benutzer": benutzer, "ist_admin": True}
+    )
+
+
 @router.get("/kontenrahmen")
 def kontenrahmen_seite(request: Request, db: Session = Depends(get_db)):
     benutzer = _benutzer_oder_login(request, db)

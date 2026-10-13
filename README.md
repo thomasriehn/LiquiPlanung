@@ -12,7 +12,7 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
 - **Bestände & Liquiditätsentwicklung**: je Bank-/Kassenkonto, Gesamtliquidität,
   verfügbare Liquidität inkl. Kreditlinien, Warenbestand nachrichtlich.
 - **Import**: DATEV-Buchungsstapel (EXTF/DTVF), generisches CSV (Addison abbildbar),
-  BWA-/Saldenlisten, OP-Listen und Dauerbuchungen (CSV mit toleranter Kopfzeile,
+  BWA-/Saldenlisten, OP-Listen und Dauerschuldverhältnisse (CSV mit toleranter Kopfzeile,
   Duplikatprüfung); Meldung nicht angelegter Konten.
 - **Bankimport (MT940/CAMT.053)**: Kontoauszüge liefern tagesaktuelle Bestandsanker
   (Endsaldo je Auszug, IBAN-Zuordnung) und Bankumsätze zur Referenz – unabhängig vom
@@ -29,7 +29,7 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Kalenderwoche, auch per OP-CSV-Import über die Spalte „Sammel“); Überzahlungen
   werden automatisch auf die nächsten offenen Sammelposten vorgetragen – spätere
   geplante Einzahlungen sinken entsprechend.
-  Offene Posten und Dauerbuchungen sind vollständig bearbeitbar.
+  Offene Posten und Dauerschuldverhältnisse sind vollständig bearbeitbar.
 - **Integrierte Sicherungen**: automatische Voll-Backups (Intervall/Aufbewahrung
   konfigurierbar, Docker-Volume), manuelle Sicherung, Download und geführte
   Wiederherstellung in der Admin-Oberfläche – datenbankunabhängig (PostgreSQL/SQLite),
@@ -58,7 +58,11 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   nebeneinander (Liquidität je Wochenende, Netto-Cashflow, minimale Liquidität).
 - **Export**: 13-Wochen-Plan als Excel-Arbeitsmappe (Tage, Wochen mit Plan/Ist/Δ,
   Soll-Ist) und als PDF-Bericht für Gericht, Sachwalter, Gläubigerausschuss.
-- **Mandantenverwaltung**: Admins löschen Mandanten samt aller Daten endgültig
+- **Mandantenverwaltung**: Neue Mandanten wahlweise per Formular oder über den
+  **Onboarding-Wizard** („Mit Wizard anlegen“) – acht geführte Schritte von den
+  Stammdaten über Bankverbindung (IBAN) und Anfangssalden bis zu den Importen
+  (OP-Liste, Dauerschuldverhältnisse, optional Bankdaten, Buchungsstapel, BWA).
+  Admins löschen Mandanten samt aller Daten endgültig
   (Bestätigung über den Kurznamen; Audit-Log bleibt erhalten).
 - **Mehrbenutzerbetrieb**: Rollen Admin/Bearbeiter/Leser, Mandantenzuordnung, Audit-Log,
   Profil mit Passwortwechsel und optionaler Zwei-Faktor-Anmeldung (TOTP mit

@@ -795,3 +795,19 @@ def test_op_import_sammelspalte(client):
     erg = client.post(f"/api/posten/{pid}/zahlungen", json={"betrag": 10500}).json()
     assert erg["status"] == "BEZAHLT"
     assert erg["unverteilt"] == 500.0   # kein weiterer Sammelposten vorhanden
+
+
+def test_wizard_seite_nur_admin(client):
+    _login(client)
+    antwort = client.get("/mandanten-wizard")
+    assert antwort.status_code == 200
+    assert "Wizard" in antwort.text
+
+    client.post("/api/benutzer", json={
+        "email": "wz@example.com", "name": "W", "passwort": "geheim123",
+        "rolle": "BEARBEITER", "mandanten_ids": []})
+    client.get("/logout")
+    client.post("/login", data={"email": "wz@example.com", "passwort": "geheim123"})
+    antwort = client.get("/mandanten-wizard", follow_redirects=False)
+    assert antwort.status_code == 303
+    assert antwort.headers["location"] == "/"
