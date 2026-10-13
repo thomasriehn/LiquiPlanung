@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block titel %}LiquiPlanung{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v={{ static_version }}">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
 <body>
@@ -42,7 +42,7 @@
 {% block inhalt %}{% endblock %}
 </main>
 <div id="toast"></div>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v={{ static_version }}"></script>
 {% block skripte %}{% endblock %}
 </body>
 </html>

@@ -16,6 +16,17 @@ from ..security import (
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 
+# Cache-Busting: Versionsstempel aus der neuesten Änderungszeit der statischen
+# Dateien (beim Start berechnet). Browser laden CSS/JS nach jedem Update neu,
+# statt mit veralteten Stylesheets zu arbeiten.
+_static_verzeichnis = Path(__file__).resolve().parent.parent / "static"
+templates.env.globals["static_version"] = str(
+    max(
+        (int(p.stat().st_mtime) for p in _static_verzeichnis.glob("*") if p.is_file()),
+        default=0,
+    )
+)
+
 router = APIRouter()
 
 
