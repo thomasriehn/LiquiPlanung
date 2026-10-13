@@ -1008,6 +1008,134 @@ def bank_umsaetze(
     ]
 
 
+# ------------------------------------------------- PDF-Kontoumsätze (Ist)
+
+@router.post("/mandanten/{mandant_id}/pdf-umsaetze")
+async def pdf_umsaetze_hochladen(
+    mandant_id: int,
+    datei: UploadFile,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """PDF-Kontoauszug auswerten (z. B. Verfahrenskonto-Report der Sparkasse).
+
+    Liefert die erkannten Umsätze zurück; verbucht wird einzeln über
+    /pdf-umsaetze/verbuchen. Der angelegte Import-Batch bündelt die daraus
+    entstehenden Ist-Buchungen (gesammelt löschbar unter „Bisherige Importe“)."""
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    from ..services import pdf_kontoauszug
+
+    erg = pdf_kontoauszug.parse_pdf(await datei.read())
+    if not erg.umsaetze:
+        raise HTTPException(422, "; ".join(erg.warnungen) or "Keine Umsätze im PDF gefunden")
+    batch = models.ImportBatch(
+        mandant_id=mandant.id,
+        dateiname=datei.filename or "kontoauszug.pdf",
+        format="PDF",
+        anzahl=0,
+        warnungen="\n".join(erg.warnungen) or None,
+        benutzer_id=benutzer.id,
+    )
+    db.add(batch)
+    audit(db, benutzer, mandant.id, "PDF_UMSAETZE",
+          f"{datei.filename} ({len(erg.umsaetze)} Umsätze erkannt)")
+    db.commit()
+    return {
+        "batch_id": batch.id,
+        "warnungen": erg.warnungen[:20],
+        "umsaetze": [
+            {
+                "auszug_nr": u.auszug_nr,
+                "auszugsdatum": u.auszugsdatum.isoformat(),
+                "buchungstag": u.buchungstag.isoformat(),
+                "verwendungszweck": u.verwendungszweck,
+                "empfaenger": u.empfaenger,
+                "betrag": float(u.betrag),
+            }
+            for u in erg.umsaetze
+        ],
+    }
+
+
+class PdfVerbuchung(BaseModel):
+    batch_id: int
+    konto_id: int        # Sachkonto, auf dem der Umsatz im Ist landet
+    bank_konto_id: int   # Bank-/Kassenkonto des Auszugs (Gegenkonto)
+    datum: str           # Buchungsdatum aus dem Auszug
+    betrag: float        # mit Vorzeichen: negativ = Auszahlung
+    text: str | None = None
+
+
+@router.post("/mandanten/{mandant_id}/pdf-umsaetze/verbuchen")
+def pdf_umsatz_verbuchen(
+    mandant_id: int,
+    daten: PdfVerbuchung,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Einzelnen PDF-Umsatz als Ist-Buchung übernehmen.
+
+    Negativer Betrag: Auszahlung (Sachkonto an Bank), positiver Betrag:
+    Einzahlung (Bank an Sachkonto) – DATEV-Logik mit Betrag positiv und
+    S/H auf dem ersten Konto. Doppelte Übernahme desselben Umsatzes im
+    selben Batch wird abgelehnt."""
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    batch = db.get(models.ImportBatch, daten.batch_id)
+    if batch is None or batch.mandant_id != mandant.id or batch.format != "PDF":
+        raise HTTPException(404, "PDF-Import nicht gefunden")
+    konto = db.get(models.Konto, daten.konto_id)
+    if konto is None or konto.mandant_id != mandant.id:
+        raise HTTPException(422, "Ungültiges Konto")
+    bank = db.get(models.Konto, daten.bank_konto_id)
+    if (
+        bank is None
+        or bank.mandant_id != mandant.id
+        or bank.typ not in (models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value)
+    ):
+        raise HTTPException(422, "Ungültiges Bank-/Kassenkonto")
+    if konto.id == bank.id:
+        raise HTTPException(422, "Konto und Gegenkonto dürfen nicht identisch sein")
+    betrag = _dec(daten.betrag)
+    if betrag == 0:
+        raise HTTPException(422, "Betrag 0 kann nicht verbucht werden")
+    datum = _datum(daten.datum)
+    text = (daten.text or "").strip()[:255] or None
+
+    if betrag < 0:  # Auszahlung: Sachkonto (Soll) an Bank
+        konto_nr, gegen_nr = konto.nummer, bank.nummer
+    else:           # Einzahlung: Bank (Soll) an Sachkonto
+        konto_nr, gegen_nr = bank.nummer, konto.nummer
+    doppelt = db.scalar(
+        select(models.Buchung.id).where(
+            models.Buchung.batch_id == batch.id,
+            models.Buchung.datum == datum,
+            models.Buchung.betrag == abs(betrag),
+            models.Buchung.gegenkonto_nr.in_((konto.nummer, bank.nummer)),
+            models.Buchung.text == text,
+        )
+    )
+    if doppelt:
+        raise HTTPException(409, "Dieser Umsatz ist aus diesem PDF bereits verbucht")
+    buchung = models.Buchung(
+        mandant_id=mandant.id,
+        batch_id=batch.id,
+        datum=datum,
+        konto_nr=konto_nr,
+        gegenkonto_nr=gegen_nr,
+        betrag=abs(betrag),
+        sh="S",
+        text=text,
+    )
+    db.add(buchung)
+    batch.anzahl += 1
+    audit(db, benutzer, mandant.id, "PDF_UMSATZ_VERBUCHT",
+          f"{datum} {betrag:.2f} € auf Konto {konto.nummer}")
+    db.commit()
+    return {"id": buchung.id, "konto": f"{konto.nummer} {konto.bezeichnung}"}
+
+
 # ---------------------------------------------------------------- OP-Ausgleich
 
 @router.get("/mandanten/{mandant_id}/op-ausgleich/vorschlaege")

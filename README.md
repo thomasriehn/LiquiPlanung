@@ -14,6 +14,11 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
 - **Import**: DATEV-Buchungsstapel (EXTF/DTVF), generisches CSV (Addison abbildbar),
   BWA-/Saldenlisten, OP-Listen und Dauerschuldverhältnisse (CSV mit toleranter Kopfzeile,
   Duplikatprüfung); Meldung nicht angelegter Konten.
+- **PDF-Kontoumsätze**: Kontoauszüge, die nur als PDF vorliegen (z. B.
+  Verfahrenskonto-Reports der Sparkasse), werden ausgewertet; alle Ausgaben
+  erscheinen als Tabelle (Auszugs-/Buchungsdatum, Verwendungszweck, Empfänger,
+  Betrag) mit Kontoauswahl – die Auswahl verbucht den Betrag sofort zum
+  Buchungsdatum als Ist-Buchung (gesammelt löschbar über den Import).
 - **Bankimport (MT940/CAMT.053)**: Kontoauszüge liefern tagesaktuelle Bestandsanker
   (Endsaldo je Auszug, IBAN-Zuordnung) und Bankumsätze zur Referenz – unabhängig vom
   Buchhaltungsexport, ohne Doppelzählung im Ist.

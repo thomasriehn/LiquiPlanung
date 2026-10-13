@@ -41,6 +41,32 @@
   <div id="bank-ergebnis"></div>
   {% endif %}
 
+  <h2>Kontoumsätze aus PDF (Ist-Buchungen)</h2>
+  <p class="hinweis">
+    Für Kontoauszüge, die nur als PDF vorliegen (z. B. Verfahrenskonto-Reports
+    der Sparkasse): Nach dem Auswerten erscheinen alle <strong>Ausgaben</strong>
+    (negative Beträge) als Tabelle. Sobald in der letzten Spalte ein Konto
+    gewählt wird, wird der Betrag zum Buchungsdatum als Ist-Buchung auf diesem
+    Konto verbucht (Gegenkonto: das gewählte Bankkonto). Alle Buchungen eines
+    PDFs gehören zu einem Import und lassen sich unter „Bisherige Importe“
+    gesammelt wieder löschen.
+  </p>
+  {% if not leser %}
+  <form id="pdf-form" class="formular-zeilen">
+    <label>PDF-Kontoauszug<input type="file" name="datei" required></label>
+    <label>Bankkonto (Gegenkonto)
+      <select id="pdf-bank-konto"></select>
+    </label>
+    <button type="submit">PDF auswerten</button>
+  </form>
+  <div id="pdf-ergebnis"></div>
+  <table class="liste" id="pdf-tabelle" style="display:none">
+    <thead><tr><th>Auszugsdatum</th><th>Buchungsdatum</th><th>Verwendungszweck</th>
+      <th>Empfänger</th><th class="zahl">Betrag</th><th>Konto (verbuchen)</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  {% endif %}
+
   <h2>Bisherige Importe</h2>
   <table class="liste">
     <thead><tr><th>Datum</th><th>Datei</th><th>Format</th><th class="zahl">Sätze</th><th>Warnungen</th><th></th></tr></thead>
@@ -69,6 +95,15 @@ async function ladeKonten() {
     sel.innerHTML = `<option value="">automatisch über IBAN</option>` +
       konten.filter(k => k.aktiv && (k.typ === "BANK" || k.typ === "KASSE")).map(k =>
         `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}${k.iban ? " (" + esc(k.iban) + ")" : ""}</option>`).join("");
+  }
+  const pdfSel = document.getElementById("pdf-bank-konto");
+  if (pdfSel) {
+    const zahlungsmittel = konten
+      .filter(k => k.aktiv && (k.typ === "BANK" || k.typ === "KASSE"))
+      .sort((a, b) => (a.typ === "BANK" ? 0 : 1) - (b.typ === "BANK" ? 0 : 1)
+        || a.nummer.localeCompare(b.nummer));
+    pdfSel.innerHTML = zahlungsmittel.map(k =>
+      `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}</option>`).join("");
   }
 }
 
@@ -160,6 +195,75 @@ if (bankForm) bankForm.addEventListener("submit", async (e) => {
     ladeBankUmsaetze();
   } catch (err) { toast(err.message); }
 });
+
+// ---- Kontoumsätze aus PDF: auswerten und einzeln auf Konten verbuchen ----
+let pdfBatchId = null;
+
+const pdfForm = document.getElementById("pdf-form");
+if (pdfForm) pdfForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData(pdfForm);
+  try {
+    const erg = await apiDatei(`/api/mandanten/${MANDANT_ID}/pdf-umsaetze`, fd);
+    pdfBatchId = erg.batch_id;
+    const ausgaben = erg.umsaetze.filter(u => u.betrag < 0);
+    const box = document.getElementById("pdf-ergebnis");
+    let html = `<div class="warnung" style="background:#e8f5ec;border-color:#9fd3ae;color:#1e5c38">
+      ${erg.umsaetze.length} Umsätze erkannt, davon ${ausgaben.length} Ausgaben zum Verbuchen
+      (${erg.umsaetze.length - ausgaben.length} Eingänge/Nullbeträge ausgeblendet).</div>`;
+    if (erg.warnungen.length) html += `<div class="warnung">${erg.warnungen.map(esc).join("<br>")}</div>`;
+    box.innerHTML = html;
+    zeigePdfTabelle(ausgaben);
+    ladeBatches();
+  } catch (err) { toast(err.message); }
+});
+
+function pdfKontoSelect() {
+  const optionen = konten
+    .filter(k => k.aktiv && k.typ !== "BANK" && k.typ !== "KASSE")
+    .map(k => `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}</option>`)
+    .join("");
+  return `<select data-pdf-konto><option value="">– Konto wählen –</option>${optionen}</select>`;
+}
+
+function zeigePdfTabelle(ausgaben) {
+  const tabelle = document.getElementById("pdf-tabelle");
+  const tb = tabelle.querySelector("tbody");
+  tb.innerHTML = "";
+  for (const u of ausgaben) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${u.auszugsdatum}</td><td>${u.buchungstag}</td>
+      <td class="klein" style="max-width:420px">${esc(u.verwendungszweck)}</td>
+      <td>${esc(u.empfaenger)}</td>
+      <td class="zahl" style="color:var(--rot)">${eur(u.betrag)}</td>
+      <td>${pdfKontoSelect()}</td>`;
+    tr.querySelector("[data-pdf-konto]").addEventListener("change", async (e) => {
+      const kontoId = e.target.value;
+      if (!kontoId) return;
+      try {
+        const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/pdf-umsaetze/verbuchen`, {
+          batch_id: pdfBatchId,
+          konto_id: parseInt(kontoId),
+          bank_konto_id: parseInt(document.getElementById("pdf-bank-konto").value),
+          datum: u.buchungstag,
+          betrag: u.betrag,
+          text: `${u.empfaenger} – ${u.verwendungszweck}`,
+        });
+        e.target.closest("td").innerHTML =
+          `<span class="badge-gesperrt" style="background:#e8f5ec;color:#1e5c38;border-color:#9fd3ae">
+           ✓ verbucht auf ${esc(erg.konto)}</span>`;
+        ladeBatches();
+      } catch (err) { toast(err.message); e.target.value = ""; }
+    });
+    tb.appendChild(tr);
+  }
+  tabelle.style.display = ausgaben.length ? "" : "none";
+  if (!ausgaben.length) {
+    document.getElementById("pdf-ergebnis").innerHTML +=
+      `<div class="warnung">Keine Ausgaben (negative Beträge) im PDF gefunden.</div>`;
+  }
+}
 
 ladeKonten().then(() => { ladeBatches(); ladeBankUmsaetze(); });
 </script>
