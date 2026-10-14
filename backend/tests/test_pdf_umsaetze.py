@@ -413,3 +413,60 @@ def test_pdf_verbuchung_aufheben(client):
         "batch_id": erg["batch_id"], "konto_id": konten["4240"]["id"],
         "bank_konto_id": konten["1200"]["id"], "datum": ausgabe["buchungstag"],
         "betrag": ausgabe["betrag"], "text": "Strom"}).status_code == 200
+
+
+def test_pdf_ueberschneidende_auszuege(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Überschneidung GmbH", "kurzname": "ueberschneidung"}
+    ).json()["id"]
+    konten = {k["nummer"]: k for k in
+              client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]}
+    pdf = _beispiel_pdf(PDF_ZEILEN)
+
+    # Erster Auszug: nichts ist vorab verbucht
+    erg1 = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze",
+                       files={"datei": ("auszug1.pdf", pdf, "application/pdf")}).json()
+    assert all(u["bereits_verbucht"] is False for u in erg1["umsaetze"])
+    ausgabe = next(u for u in erg1["umsaetze"] if u["betrag"] < 0)
+    client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/verbuchen", json={
+        "batch_id": erg1["batch_id"], "konto_id": konten["4240"]["id"],
+        "bank_konto_id": konten["1200"]["id"], "datum": ausgabe["buchungstag"],
+        "betrag": ausgabe["betrag"],
+        "text": f'{ausgabe["empfaenger"]} – {ausgabe["verwendungszweck"]}'})
+
+    # Zweiter, überschneidender Auszug: der verbuchte Umsatz ist markiert
+    erg2 = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze",
+                       files={"datei": ("auszug2.pdf", pdf, "application/pdf")}).json()
+    flags = {u["empfaenger"]: u["bereits_verbucht"] for u in erg2["umsaetze"]}
+    assert flags["Stadtwerke Musterstadt"] is True
+    assert flags["Muster GmbH"] is False
+
+    # Erneute Verbuchung aus dem zweiten Auszug wird serverseitig abgelehnt
+    antwort = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/verbuchen", json={
+        "batch_id": erg2["batch_id"], "konto_id": konten["4240"]["id"],
+        "bank_konto_id": konten["1200"]["id"], "datum": ausgabe["buchungstag"],
+        "betrag": ausgabe["betrag"],
+        "text": f'{ausgabe["empfaenger"]} – {ausgabe["verwendungszweck"]}'})
+    assert antwort.status_code == 409
+    assert "überschneidenden" in antwort.json()["detail"]
+
+    # Gleiches gilt für die Zuweisung von Eingängen
+    eingang = next(u for u in erg1["umsaetze"] if u["betrag"] > 0)
+    pid = client.post(f"/api/mandanten/{mandant_id}/posten", json={
+        "art": "DEBITOR", "partner": "Muster GmbH", "faellig_am": "2026-09-15",
+        "betrag_brutto": 30000, "konto_id": konten["8400"]["id"]}).json()["id"]
+    text = f'{eingang["empfaenger"]} – {eingang["verwendungszweck"]}'
+    client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/zuweisen", json={
+        "batch_id": erg1["batch_id"], "posten_id": pid,
+        "bank_konto_id": konten["1200"]["id"], "datum": eingang["buchungstag"],
+        "betrag": eingang["betrag"], "text": text})
+    assert client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/zuweisen", json={
+        "batch_id": erg2["batch_id"], "posten_id": pid,
+        "bank_konto_id": konten["1200"]["id"], "datum": eingang["buchungstag"],
+        "betrag": eingang["betrag"], "text": text}).status_code == 409
+
+    # dritter Upload: beide Umsätze markiert
+    erg3 = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze",
+                       files={"datei": ("auszug3.pdf", pdf, "application/pdf")}).json()
+    assert all(u["bereits_verbucht"] for u in erg3["umsaetze"])

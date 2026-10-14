@@ -1010,6 +1010,29 @@ def bank_umsaetze(
 
 # ------------------------------------------------- PDF-Kontoumsätze (Ist)
 
+def _pdf_umsatz_text(empfaenger: str, zweck: str) -> str | None:
+    """Kanonischer Buchungstext eines PDF-Umsatzes.
+
+    Muss zur Textbildung der Oberfläche passen – darüber werden bei
+    überschneidenden Auszugszeiträumen bereits verbuchte Umsätze erkannt."""
+    return f"{empfaenger} – {zweck}".strip()[:255] or None
+
+
+def _pdf_verbuchte_schluessel(db: Session, mandant_id: int) -> set[tuple[date, str | None]]:
+    """(Datum, Text) aller Ist-Buchungen aus PDF-Importen des Mandanten."""
+    pdf_batches = select(models.ImportBatch.id).where(
+        models.ImportBatch.mandant_id == mandant_id,
+        models.ImportBatch.format == "PDF",
+    )
+    zeilen = db.execute(
+        select(models.Buchung.datum, models.Buchung.text).where(
+            models.Buchung.mandant_id == mandant_id,
+            models.Buchung.batch_id.in_(pdf_batches),
+        )
+    ).all()
+    return {(datum, text) for datum, text in zeilen}
+
+
 @router.post("/mandanten/{mandant_id}/pdf-umsaetze")
 async def pdf_umsaetze_hochladen(
     mandant_id: int,
@@ -1041,6 +1064,8 @@ async def pdf_umsaetze_hochladen(
     audit(db, benutzer, mandant.id, "PDF_UMSAETZE",
           f"{datei.filename} ({len(erg.umsaetze)} Umsätze erkannt)")
     db.commit()
+    # Überschneidende Auszugszeiträume: schon verbuchte Umsätze markieren
+    verbucht = _pdf_verbuchte_schluessel(db, mandant.id)
     return {
         "batch_id": batch.id,
         "warnungen": erg.warnungen[:20],
@@ -1052,6 +1077,10 @@ async def pdf_umsaetze_hochladen(
                 "verwendungszweck": u.verwendungszweck,
                 "empfaenger": u.empfaenger,
                 "betrag": float(u.betrag),
+                "bereits_verbucht": (
+                    u.buchungstag,
+                    _pdf_umsatz_text(u.empfaenger, u.verwendungszweck),
+                ) in verbucht,
             }
             for u in erg.umsaetze
         ],
@@ -1107,17 +1136,12 @@ def pdf_umsatz_verbuchen(
         konto_nr, gegen_nr = konto.nummer, bank.nummer
     else:           # Einzahlung: Bank (Soll) an Sachkonto
         konto_nr, gegen_nr = bank.nummer, konto.nummer
-    doppelt = db.scalar(
-        select(models.Buchung.id).where(
-            models.Buchung.batch_id == batch.id,
-            models.Buchung.datum == datum,
-            models.Buchung.betrag == abs(betrag),
-            models.Buchung.gegenkonto_nr.in_((konto.nummer, bank.nummer)),
-            models.Buchung.text == text,
+    # Dublettenschutz über alle PDF-Importe hinweg (überschneidende Zeiträume)
+    if (datum, text) in _pdf_verbuchte_schluessel(db, mandant.id):
+        raise HTTPException(
+            409, "Dieser Umsatz ist bereits verbucht (ggf. aus einem früheren, "
+            "sich überschneidenden Kontoauszug)"
         )
-    )
-    if doppelt:
-        raise HTTPException(409, "Dieser Umsatz ist aus diesem PDF bereits verbucht")
     buchung = models.Buchung(
         mandant_id=mandant.id,
         batch_id=batch.id,
@@ -1178,6 +1202,12 @@ def pdf_umsatz_zuweisen(
         )
     zahltag = _datum(daten.datum, "datum")
     text = (daten.text or "").strip()[:255] or None
+    # Dublettenschutz über alle PDF-Importe hinweg (überschneidende Zeiträume)
+    if (zahltag, text) in _pdf_verbuchte_schluessel(db, mandant.id):
+        raise HTTPException(
+            409, "Dieser Umsatz ist bereits verbucht (ggf. aus einem früheren, "
+            "sich überschneidenden Kontoauszug)"
+        )
 
     anteile, unverteilt = _zahlung_anwenden(db, posten, abs(betrag), zahltag, False)
     buchungen, hinweise = _zahlungs_buchungen(

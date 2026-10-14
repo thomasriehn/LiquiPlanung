@@ -230,10 +230,16 @@ if (pdfForm) pdfForm.addEventListener("submit", async (e) => {
     const ausgaben = erg.umsaetze.filter(u => u.betrag < 0);
     const eingaenge = erg.umsaetze.filter(u => u.betrag > 0);
     const box = document.getElementById("pdf-ergebnis");
+    const schonVerbucht = erg.umsaetze.filter(u => u.bereits_verbucht).length;
     let html = `<div class="warnung" style="background:#e8f5ec;border-color:#9fd3ae;color:#1e5c38">
       ${erg.umsaetze.length} Umsätze erkannt: ${ausgaben.length} Ausgaben,
       ${eingaenge.length} Zahlungseingänge${erg.umsaetze.length - ausgaben.length - eingaenge.length
         ? `, ${erg.umsaetze.length - ausgaben.length - eingaenge.length} Nullbeträge ausgeblendet` : ""}.</div>`;
+    if (schonVerbucht) {
+      html += `<div class="warnung">${schonVerbucht} Umsätze sind bereits aus einem
+        früheren, sich überschneidenden Kontoauszug verbucht – sie sind ausgegraut
+        und nicht erneut verbuchbar.</div>`;
+    }
     if (erg.warnungen.length) html += `<div class="warnung">${erg.warnungen.map(esc).join("<br>")}</div>`;
     box.innerHTML = html;
     zeigeAusgaben(ausgaben);
@@ -241,6 +247,12 @@ if (pdfForm) pdfForm.addEventListener("submit", async (e) => {
     ladeBatches();
   } catch (err) { toast(err.message); }
 });
+
+function bereitsVerbuchtZelle(tr, td) {
+  tr.style.opacity = ".5";
+  td.innerHTML = `<span class="badge-gesperrt" title="Bereits aus einem früheren,
+    sich überschneidenden Kontoauszug verbucht">bereits verbucht</span>`;
+}
 
 function pdfKontoSelect() {
   const optionen = konten
@@ -305,7 +317,8 @@ function zeigeAusgaben(ausgaben) {
       <td class="zahl" style="color:var(--rot)">${eur(u.betrag)}</td>
       <td></td>`;
     tb.appendChild(tr);
-    bindeAusgabe(tr.lastElementChild, u);
+    if (u.bereits_verbucht) bereitsVerbuchtZelle(tr, tr.lastElementChild);
+    else bindeAusgabe(tr.lastElementChild, u);
   }
   document.getElementById("pdf-tabelle").style.display = ausgaben.length ? "" : "none";
   document.getElementById("pdf-ausgaben-titel").style.display = ausgaben.length ? "" : "none";
@@ -346,7 +359,8 @@ function zeigeEingaenge(eingaenge) {
       <td class="zahl" style="color:#1e5c38">${eur(u.betrag)}</td>
       <td></td>`;
     tb.appendChild(tr);
-    bindeEingang(tr.lastElementChild, u);
+    if (u.bereits_verbucht) bereitsVerbuchtZelle(tr, tr.lastElementChild);
+    else bindeEingang(tr.lastElementChild, u);
   }
   for (const id of ["pdf-eingaenge", "pdf-eingaenge-titel", "pdf-eingaenge-hinweis"]) {
     document.getElementById(id).style.display = eingaenge.length ? "" : "none";

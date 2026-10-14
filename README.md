@@ -22,6 +22,8 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   zweiten Block offenen Posten zugewiesen (Anrechnung inkl. Teilzahlung und
   Sammelposten-Vortrag plus Ist-Buchung). Jede Zuordnung ist über das ✕ am
   grünen Vermerk einzeln aufhebbar, ganze PDFs gesammelt über den Import.
+  Bei sich überschneidenden Auszugszeiträumen werden bereits verbuchte
+  Umsätze ausgegraut und sind nicht erneut verbuchbar (serverseitig gesperrt).
 - **Bankimport (MT940/CAMT.053)**: Kontoauszüge liefern tagesaktuelle Bestandsanker
   (Endsaldo je Auszug, IBAN-Zuordnung) und Bankumsätze zur Referenz – unabhängig vom
   Buchhaltungsexport, ohne Doppelzählung im Ist.
