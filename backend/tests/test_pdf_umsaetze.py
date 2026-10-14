@@ -470,3 +470,30 @@ def test_pdf_ueberschneidende_auszuege(client):
     erg3 = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze",
                        files={"datei": ("auszug3.pdf", pdf, "application/pdf")}).json()
     assert all(u["bereits_verbucht"] for u in erg3["umsaetze"])
+
+
+def test_import_loeschen_gibt_anrechnung_zurueck(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Rückgabe GmbH", "kurzname": "rueckgabe"}
+    ).json()["id"]
+    konten = {k["nummer"]: k for k in
+              client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]}
+    pid = client.post(f"/api/mandanten/{mandant_id}/posten", json={
+        "art": "DEBITOR", "partner": "Muster GmbH", "faellig_am": "2026-09-15",
+        "betrag_brutto": 30000, "konto_id": konten["8400"]["id"]}).json()["id"]
+    erg = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze",
+                      files={"datei": ("a.pdf", _beispiel_pdf(PDF_ZEILEN), "application/pdf")}).json()
+    eingang = next(u for u in erg["umsaetze"] if u["betrag"] > 0)
+    client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/zuweisen", json={
+        "batch_id": erg["batch_id"], "posten_id": pid,
+        "bank_konto_id": konten["1200"]["id"], "datum": eingang["buchungstag"],
+        "betrag": eingang["betrag"], "text": "ZE"})
+    posten = client.get(f"/api/mandanten/{mandant_id}/posten").json()[0]
+    assert posten["restbetrag"] == 3700.0
+
+    # Kompletten PDF-Import löschen: Anrechnung wird zurückgenommen
+    client.delete(f"/api/importe/{erg['batch_id']}")
+    posten = client.get(f"/api/mandanten/{mandant_id}/posten").json()[0]
+    assert posten["restbetrag"] == 30000.0
+    assert posten["status"] == "OFFEN"

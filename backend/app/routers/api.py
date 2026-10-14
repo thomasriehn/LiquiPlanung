@@ -815,12 +815,173 @@ def import_loeschen(
     if batch is None:
         raise HTTPException(404, "Import nicht gefunden")
     mandant_oder_403(db, benutzer, batch.mandant_id)
+    # Zahlungsbuchungen mit Posten-Referenz: Anrechnung zurücknehmen
+    for b in db.scalars(
+        select(models.Buchung).where(
+            models.Buchung.batch_id == batch.id,
+            models.Buchung.posten_id.is_not(None),
+        )
+    ):
+        _zahlungs_anteil_zuruecknehmen(db, b)
     db.execute(delete(models.Buchung).where(models.Buchung.batch_id == batch.id))
     db.execute(
         delete(models.BankTransaktion).where(models.BankTransaktion.batch_id == batch.id)
     )
     audit(db, benutzer, batch.mandant_id, "IMPORT_GELOESCHT", batch.dateiname)
     db.delete(batch)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/importe/{batch_id}/saetze")
+def import_saetze(
+    batch_id: int,
+    limit: int = 1000,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Die Sätze eines Imports: Buchungen (DATEV/CSV/PDF) bzw. Bankumsätze
+    (MT940/CAMT). BWA-Werte werden je Konto/Monat fortgeschrieben und hängen
+    an keinem Import."""
+    batch = db.get(models.ImportBatch, batch_id)
+    if batch is None:
+        raise HTTPException(404, "Import nicht gefunden")
+    mandant_oder_403(db, benutzer, batch.mandant_id)
+    limit = max(1, min(limit, 5000))
+    if batch.format in ("MT940", "CAMT"):
+        umsaetze = list(db.scalars(
+            select(models.BankTransaktion)
+            .where(models.BankTransaktion.batch_id == batch.id)
+            .order_by(models.BankTransaktion.buchungstag, models.BankTransaktion.id)
+            .limit(limit + 1)
+        ))
+        return {
+            "format": batch.format,
+            "mehr": len(umsaetze) > limit,
+            "bank_umsaetze": [
+                {
+                    "id": u.id,
+                    "buchungstag": u.buchungstag.isoformat(),
+                    "betrag": float(u.betrag),
+                    "partner": u.partner,
+                    "verwendungszweck": u.verwendungszweck,
+                }
+                for u in umsaetze[:limit]
+            ],
+        }
+    if batch.format == "BWA":
+        return {"format": "BWA", "mehr": False, "hinweis": (
+            "BWA-Werte werden je Konto und Monat fortgeschrieben und sind "
+            "keinem Import zugeordnet.")}
+    buchungen = list(db.scalars(
+        select(models.Buchung)
+        .where(models.Buchung.batch_id == batch.id)
+        .order_by(models.Buchung.datum, models.Buchung.id)
+        .limit(limit + 1)
+    ))
+    return {
+        "format": batch.format,
+        "mehr": len(buchungen) > limit,
+        "buchungen": [
+            {
+                "id": b.id,
+                "datum": b.datum.isoformat(),
+                "konto_nr": b.konto_nr,
+                "gegenkonto_nr": b.gegenkonto_nr,
+                "betrag": float(b.betrag),
+                "sh": b.sh,
+                "belegfeld": b.belegfeld,
+                "text": b.text,
+                # Zahlungsbuchung zu einem offenen Posten: Betrag nicht änderbar
+                "posten_id": b.posten_id,
+            }
+            for b in buchungen[:limit]
+        ],
+    }
+
+
+def _zahlungs_anteil_zuruecknehmen(db: Session, buchung: models.Buchung) -> None:
+    """Anrechnung einer Zahlungsbuchung vom Posten abziehen (vor dem Löschen)."""
+    if buchung.posten_id is None:
+        return
+    posten = db.get(models.OffenerPosten, buchung.posten_id)
+    if posten is None:
+        return
+    posten.bezahlt_betrag = max(
+        Decimal("0"), (posten.bezahlt_betrag or Decimal("0")) - buchung.betrag
+    )
+    posten.status = models.PostenStatus.OFFEN.value
+    posten.bezahlt_am = None
+
+
+BUCHUNG_FELDER = {"konto_nr", "gegenkonto_nr", "belegfeld", "text"}
+
+
+@router.patch("/buchungen/{buchung_id}")
+def buchung_aendern(
+    buchung_id: int,
+    daten: dict,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Einzelnen importierten Buchungssatz korrigieren (Datum, Konten, Betrag,
+    S/H, Belegfeld, Text). Bei Zahlungsbuchungen zu einem offenen Posten ist
+    der Betrag gesperrt – dort Zuordnung aufheben und neu erfassen."""
+    nur_schreibend(benutzer)
+    buchung = db.get(models.Buchung, buchung_id)
+    if buchung is None:
+        raise HTTPException(404, "Buchung nicht gefunden")
+    mandant_oder_403(db, benutzer, buchung.mandant_id)
+    for feld, wert in daten.items():
+        if feld == "datum":
+            buchung.datum = _datum(wert, feld)
+        elif feld == "betrag":
+            if buchung.posten_id is not None:
+                raise HTTPException(
+                    422, "Betrag einer Posten-Zahlung ist gesperrt – Zuordnung "
+                    "aufheben und neu erfassen",
+                )
+            betrag = _dec(wert)
+            if betrag <= 0:
+                raise HTTPException(422, "Betrag muss größer 0 sein")
+            buchung.betrag = betrag
+        elif feld == "sh":
+            if wert not in ("S", "H"):
+                raise HTTPException(422, "S/H muss S oder H sein")
+            buchung.sh = wert
+        elif feld in BUCHUNG_FELDER:
+            wert = (str(wert).strip() if wert is not None else "")
+            if feld in ("konto_nr", "gegenkonto_nr") and not wert:
+                raise HTTPException(422, "Konto/Gegenkonto darf nicht leer sein")
+            setattr(buchung, feld, wert or None)
+    audit(db, benutzer, buchung.mandant_id, "BUCHUNG_GEAENDERT",
+          f"Buchung {buchung.id}: {sorted(daten.keys())}")
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/buchungen/{buchung_id}")
+def buchung_loeschen(
+    buchung_id: int,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Einzelnen Buchungssatz löschen. Zahlungsbuchungen geben ihre Anrechnung
+    an den offenen Posten zurück; der Import-Zähler wird mitgeführt."""
+    nur_schreibend(benutzer)
+    buchung = db.get(models.Buchung, buchung_id)
+    if buchung is None:
+        raise HTTPException(404, "Buchung nicht gefunden")
+    mandant_oder_403(db, benutzer, buchung.mandant_id)
+    _zahlungs_anteil_zuruecknehmen(db, buchung)
+    if buchung.batch_id:
+        batch = db.get(models.ImportBatch, buchung.batch_id)
+        if batch is not None and batch.anzahl > 0:
+            batch.anzahl -= 1
+    audit(db, benutzer, buchung.mandant_id, "BUCHUNG_GELOESCHT",
+          f"{buchung.datum} {buchung.konto_nr}/{buchung.gegenkonto_nr} "
+          f"{buchung.betrag:.2f} €")
+    db.delete(buchung)
     db.commit()
     return {"ok": True}
 

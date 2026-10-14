@@ -853,3 +853,76 @@ def test_zahlung_mit_ist_buchung(client):
     assert erg["status"] == "BEZAHLT"
     assert erg["buchungen"] == []
     assert any("kein Konto" in h for h in erg["hinweise"])
+
+
+def test_import_saetze_ansehen_und_aendern(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Sätze GmbH", "kurzname": "saetze"}
+    ).json()["id"]
+    extf = (
+        '"EXTF";700;21;"Buchungsstapel";12;;;"";"";"";1;1;20260101;4;20260801;20260831;"";"";1\n'
+        "Umsatz (ohne Soll/Haben-Kz);Soll/Haben-Kennzeichen;WKZ;Kurs;Basis;WKZ2;Konto;"
+        "Gegenkonto (ohne BU-Schlüssel);BU;Belegdatum;Belegfeld 1;Belegfeld 2;Skonto;Buchungstext\n"
+        '1.190,00;"S";;;;;1200;8400;;0308;"RE-1";;;"Zahlungseingang"\n'
+        '890,00;"S";;;;;4920;1200;;0408;"RE-2";;;"IT-Service"\n'
+    ).encode("cp1252")
+    client.post(f"/api/mandanten/{mandant_id}/import",
+                files={"datei": ("buchungen.csv", extf, "text/csv")})
+    batch = client.get(f"/api/mandanten/{mandant_id}/importe").json()[0]
+
+    erg = client.get(f"/api/importe/{batch['id']}/saetze").json()
+    assert erg["format"] == "DATEV"
+    assert erg["mehr"] is False
+    assert len(erg["buchungen"]) == 2
+    satz = erg["buchungen"][1]
+    assert (satz["konto_nr"], satz["betrag"]) == ("4920", 890.0)
+
+    # Satz korrigieren: Konto, Betrag, Datum, Text
+    assert client.patch(f"/api/buchungen/{satz['id']}", json={
+        "konto_nr": "4930", "betrag": 790, "datum": "2026-08-05",
+        "text": "Bürobedarf statt IT"}).json()["ok"] is True
+    erg = client.get(f"/api/importe/{batch['id']}/saetze").json()
+    satz = next(b for b in erg["buchungen"] if b["id"] == satz["id"])
+    assert (satz["konto_nr"], satz["betrag"], satz["datum"]) == ("4930", 790.0, "2026-08-05")
+    assert satz["text"] == "Bürobedarf statt IT"
+    # Validierung
+    assert client.patch(f"/api/buchungen/{satz['id']}",
+                        json={"betrag": -5}).status_code == 422
+    assert client.patch(f"/api/buchungen/{satz['id']}",
+                        json={"sh": "X"}).status_code == 422
+    assert client.patch(f"/api/buchungen/{satz['id']}",
+                        json={"konto_nr": ""}).status_code == 422
+
+    # Einzelnen Satz löschen: Import-Zähler sinkt mit
+    assert client.delete(f"/api/buchungen/{satz['id']}").json()["ok"] is True
+    batch = client.get(f"/api/mandanten/{mandant_id}/importe").json()[0]
+    assert batch["anzahl"] == 1
+    assert len(client.get(f"/api/importe/{batch['id']}/saetze").json()["buchungen"]) == 1
+
+
+def test_zahlungsbuchung_betrag_gesperrt_und_batchloeschung(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Sperre GmbH", "kurzname": "sperre"}
+    ).json()["id"]
+    konten = {k["nummer"]: k for k in
+              client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]}
+    pid = client.post(f"/api/mandanten/{mandant_id}/posten", json={
+        "art": "KREDITOR", "partner": "Lieferant X", "faellig_am": "2026-11-20",
+        "betrag_brutto": 1000, "konto_id": konten["3400"]["id"]}).json()["id"]
+    erg = client.post(f"/api/posten/{pid}/zahlungen", json={
+        "betrag": 400, "bank_konto_id": konten["1200"]["id"]}).json()
+    buchung_id = erg["buchungen"][0]
+
+    # Betrag der Zahlungsbuchung ist gesperrt, andere Felder nicht
+    assert client.patch(f"/api/buchungen/{buchung_id}",
+                        json={"betrag": 999}).status_code == 422
+    assert client.patch(f"/api/buchungen/{buchung_id}",
+                        json={"text": "korrigiert"}).json()["ok"] is True
+
+    # Einzellöschung gibt die Anrechnung an den Posten zurück
+    client.delete(f"/api/buchungen/{buchung_id}")
+    posten = client.get(f"/api/mandanten/{mandant_id}/posten").json()[0]
+    assert posten["restbetrag"] == 1000.0
+    assert posten["status"] == "OFFEN"

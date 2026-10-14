@@ -152,13 +152,84 @@ async function ladeBatches() {
     tr.innerHTML = `<td>${new Date(b.erstellt_am).toLocaleString("de-DE")}</td>
       <td>${esc(b.dateiname)}</td><td>${esc(b.format)}</td><td class="zahl">${b.anzahl}</td>
       <td class="klein">${b.warnungen ? b.warnungen.split("\n").slice(0,3).map(esc).join("<br>") : ""}</td>
-      <td>${LESER ? "" : `<button class="gefahr klein-knopf" data-id="${b.id}">Löschen</button>`}</td>`;
+      <td><button class="sekundaer klein-knopf" data-saetze="${b.id}">Sätze</button>
+        ${LESER ? "" : `<button class="gefahr klein-knopf" data-id="${b.id}">Löschen</button>`}</td>`;
     tb.appendChild(tr);
   }
   tb.querySelectorAll("button[data-id]").forEach(btn => btn.addEventListener("click", async () => {
     if (!confirm("Import samt Buchungen löschen?")) return;
     try { await api("DELETE", `/api/importe/${btn.dataset.id}`); ladeBatches(); }
     catch (e) { toast(e.message); }
+  }));
+  tb.querySelectorAll("button[data-saetze]").forEach(btn =>
+    btn.addEventListener("click", () => zeigeSaetze(btn)));
+}
+
+// ---- Satzansicht je Import: Buchungen inline korrigier- und löschbar ----
+async function zeigeSaetze(knopf) {
+  const zeile = knopf.closest("tr");
+  if (zeile.nextElementSibling && zeile.nextElementSibling.dataset.detail) {
+    zeile.nextElementSibling.remove();          // zugeklappt
+    return;
+  }
+  let erg;
+  try { erg = await api("GET", `/api/importe/${knopf.dataset.saetze}/saetze`); }
+  catch (e) { toast(e.message); return; }
+  const detail = document.createElement("tr");
+  detail.dataset.detail = "1";
+  const zelle = document.createElement("td");
+  zelle.colSpan = 6;
+  zelle.style.background = "#f6f8fb";
+  if (erg.hinweis) {
+    zelle.innerHTML = `<p class="hinweis" style="margin:8px 0">${esc(erg.hinweis)}</p>`;
+  } else if (erg.bank_umsaetze) {
+    zelle.innerHTML = `<table class="liste" style="margin:8px 0">
+      <thead><tr><th>Buchungstag</th><th class="zahl">Betrag</th><th>Partner</th><th>Verwendungszweck</th></tr></thead>
+      <tbody>${erg.bank_umsaetze.map(u => `<tr><td>${u.buchungstag}</td>
+        <td class="zahl" style="${u.betrag < 0 ? "color:var(--rot)" : ""}">${eur(u.betrag)}</td>
+        <td>${esc(u.partner)}</td><td class="klein">${esc(u.verwendungszweck)}</td></tr>`).join("")}</tbody>
+    </table>${erg.mehr ? `<p class="hinweis">Weitere Umsätze vorhanden – Anzeige begrenzt.</p>` : ""}`;
+  } else {
+    zelle.innerHTML = `<table class="liste" style="margin:8px 0">
+      <thead><tr><th>Datum</th><th>Konto</th><th>Gegenkonto</th><th class="zahl">Betrag</th>
+        <th>S/H</th><th>Beleg</th><th>Text</th><th></th></tr></thead>
+      <tbody>${erg.buchungen.map(b => `<tr data-bid="${b.id}">
+        <td><input data-bfeld="datum" type="date" value="${b.datum}" style="width:140px"></td>
+        <td><input data-bfeld="konto_nr" value="${esc(b.konto_nr)}" style="width:70px"></td>
+        <td><input data-bfeld="gegenkonto_nr" value="${esc(b.gegenkonto_nr)}" style="width:70px"></td>
+        <td class="zahl"><input data-bfeld="betrag" type="number" step="0.01" min="0.01"
+          value="${b.betrag}" style="width:100px" ${b.posten_id ? `disabled
+          title="Zahlung zu einem offenen Posten – Betrag über Aufheben/Neuerfassen ändern"` : ""}></td>
+        <td><select data-bfeld="sh"><option ${b.sh === "S" ? "selected" : ""}>S</option>
+          <option ${b.sh === "H" ? "selected" : ""}>H</option></select></td>
+        <td><input data-bfeld="belegfeld" value="${esc(b.belegfeld)}" style="width:110px"></td>
+        <td><input data-bfeld="text" value="${esc(b.text)}"></td>
+        <td>${LESER ? "" : `<button class="gefahr klein-knopf" data-bweg="${b.id}">✕</button>`}</td>
+      </tr>`).join("")}</tbody>
+    </table>${erg.mehr ? `<p class="hinweis">Weitere Sätze vorhanden – Anzeige begrenzt.</p>` : ""}
+    ${erg.buchungen.length ? "" : `<p class="hinweis" style="margin:8px 0">Keine Sätze (mehr) in diesem Import.</p>`}`;
+  }
+  detail.appendChild(zelle);
+  zeile.after(detail);
+  if (LESER) zelle.querySelectorAll("input,select").forEach(el => el.disabled = true);
+
+  zelle.addEventListener("change", async (e) => {
+    const feld = e.target.dataset.bfeld;
+    if (!feld) return;
+    const id = e.target.closest("tr").dataset.bid;
+    const wert = feld === "betrag" ? parseFloat(e.target.value) : e.target.value;
+    try {
+      await api("PATCH", `/api/buchungen/${id}`, { [feld]: wert });
+      toast("Satz gespeichert.", false);
+    } catch (err) { toast(err.message); }
+  });
+  zelle.querySelectorAll("button[data-bweg]").forEach(btn => btn.addEventListener("click", async () => {
+    if (!confirm("Buchungssatz löschen?")) return;
+    try {
+      await api("DELETE", `/api/buchungen/${btn.dataset.bweg}`);
+      btn.closest("tr").remove();
+      toast("Satz gelöscht.", false);
+    } catch (err) { toast(err.message); }
   }));
 }
 

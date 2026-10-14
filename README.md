@@ -13,7 +13,9 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   verfügbare Liquidität inkl. Kreditlinien, Warenbestand nachrichtlich.
 - **Import**: DATEV-Buchungsstapel (EXTF/DTVF), generisches CSV (Addison abbildbar),
   BWA-/Saldenlisten, OP-Listen und Dauerschuldverhältnisse (CSV mit toleranter Kopfzeile,
-  Duplikatprüfung); Meldung nicht angelegter Konten.
+  Duplikatprüfung); Meldung nicht angelegter Konten. Die Sätze jedes Imports sind
+  einsehbar und einzeln korrigier- und löschbar („Sätze“ in „Bisherige Importe“);
+  Zahlungsbuchungen geben beim Löschen ihre Anrechnung an den Posten zurück.
 - **PDF-Kontoumsätze**: Kontoauszüge, die nur als PDF vorliegen, werden
   ausgewertet (automatische Formaterkennung: Sparkassen-Verfahrenskonto-Reports,
   Deutsche-Bank-Kontoauszüge, UC eBanking prime/HypoVereinsbank). Ausgaben
