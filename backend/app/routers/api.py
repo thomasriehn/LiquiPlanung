@@ -900,6 +900,89 @@ def import_saetze(
     }
 
 
+@router.get("/importe/{batch_id}/pdf-ansicht")
+def import_pdf_ansicht(
+    batch_id: int,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Zuordnungsansicht eines PDF-Imports wiederherstellen („ansehen“).
+
+    Die gespeicherte PDF-Datei wird erneut ausgewertet; zu jedem Umsatz werden
+    die in diesem Import getroffenen Zuordnungen (Konto bzw. offener Posten)
+    mitgeliefert, damit sie angezeigt und per ✕ aufgehoben oder nachträglich
+    geändert werden können. In anderen Importen verbuchte Umsätze bleiben
+    gesperrt."""
+    batch = db.get(models.ImportBatch, batch_id)
+    if batch is None:
+        raise HTTPException(404, "Import nicht gefunden")
+    mandant_oder_403(db, benutzer, batch.mandant_id)
+    if batch.format != "PDF":
+        raise HTTPException(422, "Die Zuordnungsansicht gibt es nur für PDF-Importe")
+    if not batch.datei:
+        raise HTTPException(
+            422, "Für diesen älteren Import ist die PDF-Datei nicht gespeichert – "
+            "den Auszug bitte einmal neu hochladen",
+        )
+    from ..services import pdf_kontoauszug
+
+    erg = pdf_kontoauszug.parse_pdf(batch.datei)
+    eigene: dict[tuple, list[models.Buchung]] = {}
+    for b in db.scalars(
+        select(models.Buchung).where(models.Buchung.batch_id == batch.id)
+    ):
+        eigene.setdefault((b.datum, b.text), []).append(b)
+    verbucht_alle = _pdf_verbuchte_schluessel(db, batch.mandant_id)
+    konten_namen = {
+        k.nummer: f"{k.nummer} {k.bezeichnung}"
+        for k in db.scalars(
+            select(models.Konto).where(models.Konto.mandant_id == batch.mandant_id)
+        )
+    }
+
+    umsaetze = []
+    for u in erg.umsaetze:
+        schluessel = (u.buchungstag, _pdf_umsatz_text(u.empfaenger, u.verwendungszweck))
+        zugeordnet = eigene.get(schluessel, [])
+        zuordnung = None
+        if zugeordnet:
+            posten_anteile = []
+            konto = None
+            for b in zugeordnet:
+                if b.posten_id is not None:
+                    p = db.get(models.OffenerPosten, b.posten_id)
+                    posten_anteile.append({
+                        "partner": p.partner if p else f"Posten #{b.posten_id}",
+                        "status": p.status if p else "?",
+                        "betrag": float(b.betrag),
+                    })
+                else:
+                    sachkonto_nr = b.konto_nr if u.betrag < 0 else b.gegenkonto_nr
+                    konto = konten_namen.get(sachkonto_nr, sachkonto_nr)
+            zuordnung = {
+                "buchungen": [b.id for b in zugeordnet],
+                "konto": konto,
+                "posten": posten_anteile,
+            }
+        umsaetze.append({
+            "auszug_nr": u.auszug_nr,
+            "auszugsdatum": u.auszugsdatum.isoformat(),
+            "buchungstag": u.buchungstag.isoformat(),
+            "verwendungszweck": u.verwendungszweck,
+            "empfaenger": u.empfaenger,
+            "betrag": float(u.betrag),
+            "zuordnung": zuordnung,
+            # in einem anderen Import verbucht -> gesperrt
+            "bereits_verbucht": zuordnung is None and schluessel in verbucht_alle,
+        })
+    return {
+        "batch_id": batch.id,
+        "dateiname": batch.dateiname,
+        "warnungen": erg.warnungen[:20],
+        "umsaetze": umsaetze,
+    }
+
+
 def _zahlungs_anteil_zuruecknehmen(db: Session, buchung: models.Buchung) -> None:
     """Anrechnung einer Zahlungsbuchung vom Posten abziehen (vor dem Löschen)."""
     if buchung.posten_id is None:
@@ -1210,7 +1293,8 @@ async def pdf_umsaetze_hochladen(
     mandant = mandant_oder_403(db, benutzer, mandant_id)
     from ..services import pdf_kontoauszug
 
-    erg = pdf_kontoauszug.parse_pdf(await datei.read())
+    daten_roh = await datei.read()
+    erg = pdf_kontoauszug.parse_pdf(daten_roh)
     if not erg.umsaetze:
         raise HTTPException(422, "; ".join(erg.warnungen) or "Keine Umsätze im PDF gefunden")
     batch = models.ImportBatch(
@@ -1220,6 +1304,7 @@ async def pdf_umsaetze_hochladen(
         anzahl=0,
         warnungen="\n".join(erg.warnungen) or None,
         benutzer_id=benutzer.id,
+        datei=daten_roh,   # für die spätere Zuordnungsansicht („ansehen“)
     )
     db.add(batch)
     audit(db, benutzer, mandant.id, "PDF_UMSAETZE",

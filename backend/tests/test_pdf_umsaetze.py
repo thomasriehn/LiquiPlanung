@@ -497,3 +497,83 @@ def test_import_loeschen_gibt_anrechnung_zurueck(client):
     posten = client.get(f"/api/mandanten/{mandant_id}/posten").json()[0]
     assert posten["restbetrag"] == 30000.0
     assert posten["status"] == "OFFEN"
+
+
+def test_pdf_ansicht_wiederherstellen(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Ansicht GmbH", "kurzname": "ansicht"}
+    ).json()["id"]
+    konten = {k["nummer"]: k for k in
+              client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]}
+    pid = client.post(f"/api/mandanten/{mandant_id}/posten", json={
+        "art": "DEBITOR", "partner": "Muster GmbH", "faellig_am": "2026-09-15",
+        "betrag_brutto": 30000, "konto_id": konten["8400"]["id"]}).json()["id"]
+
+    erg = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze",
+                      files={"datei": ("auszug.pdf", _beispiel_pdf(PDF_ZEILEN), "application/pdf")}).json()
+    ausgabe = next(u for u in erg["umsaetze"] if u["betrag"] < 0)
+    eingang = next(u for u in erg["umsaetze"] if u["betrag"] > 0)
+    client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/verbuchen", json={
+        "batch_id": erg["batch_id"], "konto_id": konten["4240"]["id"],
+        "bank_konto_id": konten["1200"]["id"], "datum": ausgabe["buchungstag"],
+        "betrag": ausgabe["betrag"],
+        "text": f'{ausgabe["empfaenger"]} – {ausgabe["verwendungszweck"]}'})
+    client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/zuweisen", json={
+        "batch_id": erg["batch_id"], "posten_id": pid,
+        "bank_konto_id": konten["1200"]["id"], "datum": eingang["buchungstag"],
+        "betrag": eingang["betrag"],
+        "text": f'{eingang["empfaenger"]} – {eingang["verwendungszweck"]}'})
+
+    # Wiederansicht: Zuordnungen hängen an den Umsätzen
+    ansicht = client.get(f"/api/importe/{erg['batch_id']}/pdf-ansicht").json()
+    assert ansicht["dateiname"] == "auszug.pdf"
+    nach_empfaenger = {u["empfaenger"]: u for u in ansicht["umsaetze"]}
+    verbucht = nach_empfaenger["Stadtwerke Musterstadt"]
+    assert verbucht["zuordnung"]["konto"].startswith("4240")
+    assert verbucht["zuordnung"]["posten"] == []
+    assert len(verbucht["zuordnung"]["buchungen"]) == 1
+    assert verbucht["bereits_verbucht"] is False
+    zugewiesen = nach_empfaenger["Muster GmbH"]
+    assert zugewiesen["zuordnung"]["posten"][0]["partner"] == "Muster GmbH"
+    assert zugewiesen["zuordnung"]["posten"][0]["betrag"] == 26300.0
+
+    # In einem ZWEITEN Import erscheinen dieselben Umsätze als fremd verbucht
+    erg2 = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze",
+                       files={"datei": ("auszug2.pdf", _beispiel_pdf(PDF_ZEILEN), "application/pdf")}).json()
+    ansicht2 = client.get(f"/api/importe/{erg2['batch_id']}/pdf-ansicht").json()
+    fremd = {u["empfaenger"]: u for u in ansicht2["umsaetze"]}
+    assert fremd["Stadtwerke Musterstadt"]["zuordnung"] is None
+    assert fremd["Stadtwerke Musterstadt"]["bereits_verbucht"] is True
+
+    # Aufheben über die Ansicht: danach ist der Umsatz wieder frei
+    client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/aufheben",
+                json={"buchung_id": verbucht["zuordnung"]["buchungen"][0]})
+    ansicht = client.get(f"/api/importe/{erg['batch_id']}/pdf-ansicht").json()
+    frei = next(u for u in ansicht["umsaetze"] if u["empfaenger"] == "Stadtwerke Musterstadt")
+    assert frei["zuordnung"] is None
+    assert frei["bereits_verbucht"] is False
+
+    # Nur PDF-Importe haben die Ansicht; ohne gespeicherte Datei klare Meldung
+    extf = (
+        '"EXTF";700;21;"Buchungsstapel";12;;;"";"";"";1;1;20260101;4;20260801;20260831;"";"";1\n'
+        "Umsatz (ohne Soll/Haben-Kz);Soll/Haben-Kennzeichen;WKZ;Kurs;Basis;WKZ2;Konto;"
+        "Gegenkonto (ohne BU-Schlüssel);BU;Belegdatum;Belegfeld 1;Belegfeld 2;Skonto;Buchungstext\n"
+        '100,00;"S";;;;;1200;8400;;0308;"R";;;"x"\n'
+    ).encode("cp1252")
+    client.post(f"/api/mandanten/{mandant_id}/import",
+                files={"datei": ("b.csv", extf, "text/csv")})
+    datev_batch = next(b for b in client.get(f"/api/mandanten/{mandant_id}/importe").json()
+                       if b["format"] == "DATEV")
+    assert client.get(f"/api/importe/{datev_batch['id']}/pdf-ansicht").status_code == 422
+
+    from app import database, models as m
+    db = database.SessionLocal()
+    try:
+        db.get(m.ImportBatch, erg["batch_id"]).datei = None
+        db.commit()
+    finally:
+        db.close()
+    antwort = client.get(f"/api/importe/{erg['batch_id']}/pdf-ansicht")
+    assert antwort.status_code == 422
+    assert "nicht gespeichert" in antwort.json()["detail"]

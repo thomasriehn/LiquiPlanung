@@ -3,6 +3,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import (
+    LargeBinary,
     Boolean,
     Date,
     DateTime,
@@ -277,9 +278,12 @@ class ImportBatch(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     mandant_id: Mapped[int] = mapped_column(ForeignKey("mandanten.id", ondelete="CASCADE"), index=True)
     dateiname: Mapped[str] = mapped_column(String(255))
-    format: Mapped[str] = mapped_column(String(32))  # DATEV / CSV / BWA
+    format: Mapped[str] = mapped_column(String(32))  # DATEV / CSV / BWA / PDF / MT940 / CAMT
     anzahl: Mapped[int] = mapped_column(Integer, default=0)
     warnungen: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Originaldatei (nur PDF-Kontoauszüge): erlaubt das spätere Wiederherstellen
+    # der Zuordnungsansicht („ansehen“ bei den bisherigen Importen)
+    datei: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     benutzer_id: Mapped[int | None] = mapped_column(ForeignKey("benutzer.id"), nullable=True)
     erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

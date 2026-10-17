@@ -152,7 +152,7 @@ async function ladeBatches() {
     tr.innerHTML = `<td>${new Date(b.erstellt_am).toLocaleString("de-DE")}</td>
       <td>${esc(b.dateiname)}</td><td>${esc(b.format)}</td><td class="zahl">${b.anzahl}</td>
       <td class="klein">${b.warnungen ? b.warnungen.split("\n").slice(0,3).map(esc).join("<br>") : ""}</td>
-      <td><button class="sekundaer klein-knopf" data-saetze="${b.id}">Sätze</button>
+      <td>${b.format === "PDF" ? `<button class="sekundaer klein-knopf" data-ansehen="${b.id}" title="Zuordnungsansicht wiederherstellen (Konten/Posten zuordnen oder aufheben)">ansehen</button> ` : ""}<button class="sekundaer klein-knopf" data-saetze="${b.id}" title="Sätze einzeln korrigieren oder löschen">editieren</button>
         ${LESER ? "" : `<button class="gefahr klein-knopf" data-id="${b.id}">Löschen</button>`}</td>`;
     tb.appendChild(tr);
   }
@@ -163,6 +163,8 @@ async function ladeBatches() {
   }));
   tb.querySelectorAll("button[data-saetze]").forEach(btn =>
     btn.addEventListener("click", () => zeigeSaetze(btn)));
+  tb.querySelectorAll("button[data-ansehen]").forEach(btn =>
+    btn.addEventListener("click", () => zeigePdfAnsicht(btn.dataset.ansehen)));
 }
 
 // ---- Satzansicht je Import: Buchungen inline korrigier- und löschbar ----
@@ -325,6 +327,39 @@ function bereitsVerbuchtZelle(tr, td) {
     sich überschneidenden Kontoauszug verbucht">bereits verbucht</span>`;
 }
 
+// „ansehen“: Zuordnungsansicht eines früheren PDF-Imports wiederherstellen
+async function zeigePdfAnsicht(batchId) {
+  let erg;
+  try { erg = await api("GET", `/api/importe/${batchId}/pdf-ansicht`); }
+  catch (e) { toast(e.message); return; }
+  pdfBatchId = erg.batch_id;
+  await ladeOffenePosten();
+  const ausgaben = erg.umsaetze.filter(u => u.betrag < 0);
+  const eingaenge = erg.umsaetze.filter(u => u.betrag > 0);
+  const zugeordnet = erg.umsaetze.filter(u => u.zuordnung).length;
+  document.getElementById("pdf-ergebnis").innerHTML =
+    `<div class="warnung" style="background:#eaf1fa;border-color:#9db4d0;color:#1d4e89">
+      Zuordnungsansicht des Imports <strong>${esc(erg.dateiname)}</strong>:
+      ${erg.umsaetze.length} Umsätze, davon ${zugeordnet} zugeordnet. Zuordnungen lassen
+      sich hier aufheben (✕) oder nachholen.</div>`;
+  zeigeAusgaben(ausgaben);
+  zeigeEingaenge(eingaenge);
+  document.getElementById("pdf-ergebnis").scrollIntoView({ behavior: "smooth" });
+}
+
+function zuordnungsBadge(td, u, zurueck) {
+  const z = u.zuordnung;
+  u.zuordnung = null;   // nach dem Aufheben rendert `zurueck` wieder die Auswahl
+  let text;
+  if (z.posten.length) {
+    text = "✓ angerechnet auf " + z.posten.map(p =>
+      `${esc(p.partner)} (${eur(p.betrag)} €${p.status === "BEZAHLT" ? ", bezahlt" : ""})`).join(", ");
+  } else {
+    text = `✓ verbucht auf ${esc(z.konto || "?")}`;
+  }
+  verbuchtBadge(td, text, z.buchungen, zurueck);
+}
+
 function pdfKontoSelect() {
   const optionen = konten
     .filter(k => k.aktiv && k.typ !== "BANK" && k.typ !== "KASSE")
@@ -396,6 +431,7 @@ function zeigeAusgaben(ausgaben) {
 }
 
 function bindeAusgabe(td, u) {
+  if (u.zuordnung) { zuordnungsBadge(td, u, (zelle) => bindeAusgabe(zelle, u)); return; }
   td.innerHTML = pdfKontoSelect();
   td.querySelector("[data-pdf-konto]").addEventListener("change", async (e) => {
     const kontoId = e.target.value;
@@ -439,6 +475,7 @@ function zeigeEingaenge(eingaenge) {
 }
 
 function bindeEingang(td, u) {
+  if (u.zuordnung) { zuordnungsBadge(td, u, (zelle) => bindeEingang(zelle, u)); return; }
   td.innerHTML = postenSelect(u.betrag);
   td.querySelector("[data-pdf-posten]").addEventListener("change", async (e) => {
     const postenId = e.target.value;
