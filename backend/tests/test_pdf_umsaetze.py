@@ -577,3 +577,60 @@ def test_pdf_ansicht_wiederherstellen(client):
     antwort = client.get(f"/api/importe/{erg['batch_id']}/pdf-ansicht")
     assert antwort.status_code == 422
     assert "nicht gespeichert" in antwort.json()["detail"]
+
+
+def test_pdf_verbuchung_aufteilung(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Split GmbH", "kurzname": "split"}
+    ).json()["id"]
+    konten = {k["nummer"]: k for k in
+              client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]}
+    erg = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze",
+                      files={"datei": ("a.pdf", _beispiel_pdf(PDF_ZEILEN), "application/pdf")}).json()
+    ausgabe = next(u for u in erg["umsaetze"] if u["betrag"] < 0)   # -140,00
+    text = f'{ausgabe["empfaenger"]} – {ausgabe["verwendungszweck"]}'
+
+    # Summe muss den Umsatzbetrag ergeben
+    antwort = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/verbuchen", json={
+        "batch_id": erg["batch_id"], "bank_konto_id": konten["1200"]["id"],
+        "datum": ausgabe["buchungstag"], "betrag": ausgabe["betrag"], "text": text,
+        "aufteilung": [
+            {"konto_id": konten["4240"]["id"], "betrag": 100},
+            {"konto_id": konten["4920"]["id"], "betrag": 30},
+        ]})
+    assert antwort.status_code == 422
+    assert "ergeben" in antwort.json()["detail"]
+    # weder Konto noch Aufteilung
+    assert client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/verbuchen", json={
+        "batch_id": erg["batch_id"], "bank_konto_id": konten["1200"]["id"],
+        "datum": ausgabe["buchungstag"], "betrag": ausgabe["betrag"], "text": text,
+    }).status_code == 422
+
+    verbucht = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/verbuchen", json={
+        "batch_id": erg["batch_id"], "bank_konto_id": konten["1200"]["id"],
+        "datum": ausgabe["buchungstag"], "betrag": ausgabe["betrag"], "text": text,
+        "aufteilung": [
+            {"konto_id": konten["4240"]["id"], "betrag": 100},
+            {"konto_id": konten["4920"]["id"], "betrag": 40},
+        ]}).json()
+    assert len(verbucht["ids"]) == 2
+    assert "4240" in verbucht["konto"] and "4920" in verbucht["konto"]
+
+    # Sätze: zwei Buchungen mit Anteilen, Sachkonto an Bank
+    saetze = client.get(f"/api/importe/{erg['batch_id']}/saetze").json()["buchungen"]
+    assert sorted((b["konto_nr"], b["betrag"]) for b in saetze) == [
+        ("4240", 100.0), ("4920", 40.0)]
+    assert all(b["gegenkonto_nr"] == "1200" for b in saetze)
+
+    # Wiederansicht zeigt beide Konten mit Anteilen; Aufheben gibt alles frei
+    ansicht = client.get(f"/api/importe/{erg['batch_id']}/pdf-ansicht").json()
+    zeile = next(u for u in ansicht["umsaetze"] if u["empfaenger"] == "Stadtwerke Musterstadt")
+    assert "4240" in zeile["zuordnung"]["konto"] and "4920" in zeile["zuordnung"]["konto"]
+    assert len(zeile["zuordnung"]["buchungen"]) == 2
+    for bid in zeile["zuordnung"]["buchungen"]:
+        client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/aufheben",
+                    json={"buchung_id": bid})
+    ansicht = client.get(f"/api/importe/{erg['batch_id']}/pdf-ansicht").json()
+    zeile = next(u for u in ansicht["umsaetze"] if u["empfaenger"] == "Stadtwerke Musterstadt")
+    assert zeile["zuordnung"] is None and zeile["bereits_verbucht"] is False

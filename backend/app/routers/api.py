@@ -947,7 +947,7 @@ def import_pdf_ansicht(
         zuordnung = None
         if zugeordnet:
             posten_anteile = []
-            konto = None
+            konto_teile = []
             for b in zugeordnet:
                 if b.posten_id is not None:
                     p = db.get(models.OffenerPosten, b.posten_id)
@@ -958,10 +958,14 @@ def import_pdf_ansicht(
                     })
                 else:
                     sachkonto_nr = b.konto_nr if u.betrag < 0 else b.gegenkonto_nr
-                    konto = konten_namen.get(sachkonto_nr, sachkonto_nr)
+                    name = konten_namen.get(sachkonto_nr, sachkonto_nr)
+                    # bei Aufteilung auf mehrere Konten: Anteil mit ausweisen
+                    if len(zugeordnet) > 1:
+                        name += f" ({b.betrag:.2f} €)".replace(".", ",")
+                    konto_teile.append(name)
             zuordnung = {
                 "buchungen": [b.id for b in zugeordnet],
-                "konto": konto,
+                "konto": ", ".join(konto_teile) or None,
                 "posten": posten_anteile,
             }
         umsaetze.append({
@@ -1333,13 +1337,20 @@ async def pdf_umsaetze_hochladen(
     }
 
 
+class PdfVerbuchungAnteil(BaseModel):
+    konto_id: int
+    betrag: float        # Anteil (positiv), Summe muss den Umsatzbetrag ergeben
+
+
 class PdfVerbuchung(BaseModel):
     batch_id: int
-    konto_id: int        # Sachkonto, auf dem der Umsatz im Ist landet
-    bank_konto_id: int   # Bank-/Kassenkonto des Auszugs (Gegenkonto)
-    datum: str           # Buchungsdatum aus dem Auszug
-    betrag: float        # mit Vorzeichen: negativ = Auszahlung
+    konto_id: int | None = None   # Sachkonto (einfacher Fall)
+    bank_konto_id: int            # Bank-/Kassenkonto des Auszugs (Gegenkonto)
+    datum: str                    # Buchungsdatum aus dem Auszug
+    betrag: float                 # mit Vorzeichen: negativ = Auszahlung
     text: str | None = None
+    # optional: Aufteilung auf mehrere Konten (statt konto_id)
+    aufteilung: list[PdfVerbuchungAnteil] | None = None
 
 
 @router.post("/mandanten/{mandant_id}/pdf-umsaetze/verbuchen")
@@ -1353,57 +1364,82 @@ def pdf_umsatz_verbuchen(
 
     Negativer Betrag: Auszahlung (Sachkonto an Bank), positiver Betrag:
     Einzahlung (Bank an Sachkonto) – DATEV-Logik mit Betrag positiv und
-    S/H auf dem ersten Konto. Doppelte Übernahme desselben Umsatzes im
-    selben Batch wird abgelehnt."""
+    S/H auf dem ersten Konto. Optional lässt sich der Umsatz über
+    `aufteilung` auf mehrere Konten verteilen (die Anteile müssen den
+    Umsatzbetrag exakt ergeben); je Anteil entsteht eine Buchung.
+    Doppelte Übernahme desselben Umsatzes wird abgelehnt."""
     nur_schreibend(benutzer)
     mandant = mandant_oder_403(db, benutzer, mandant_id)
     batch = db.get(models.ImportBatch, daten.batch_id)
     if batch is None or batch.mandant_id != mandant.id or batch.format != "PDF":
         raise HTTPException(404, "PDF-Import nicht gefunden")
-    konto = db.get(models.Konto, daten.konto_id)
-    if konto is None or konto.mandant_id != mandant.id:
-        raise HTTPException(422, "Ungültiges Konto")
-    bank = db.get(models.Konto, daten.bank_konto_id)
-    if (
-        bank is None
-        or bank.mandant_id != mandant.id
-        or bank.typ not in (models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value)
-    ):
-        raise HTTPException(422, "Ungültiges Bank-/Kassenkonto")
-    if konto.id == bank.id:
-        raise HTTPException(422, "Konto und Gegenkonto dürfen nicht identisch sein")
+    bank = _bankkonto_oder_422(db, mandant.id, daten.bank_konto_id)
     betrag = _dec(daten.betrag)
     if betrag == 0:
         raise HTTPException(422, "Betrag 0 kann nicht verbucht werden")
     datum = _datum(daten.datum)
     text = (daten.text or "").strip()[:255] or None
 
-    if betrag < 0:  # Auszahlung: Sachkonto (Soll) an Bank
-        konto_nr, gegen_nr = konto.nummer, bank.nummer
-    else:           # Einzahlung: Bank (Soll) an Sachkonto
-        konto_nr, gegen_nr = bank.nummer, konto.nummer
+    # Anteile bestimmen: einfacher Fall (ein Konto) oder Aufteilung
+    if daten.aufteilung:
+        anteile_roh = [(a.konto_id, _dec(a.betrag)) for a in daten.aufteilung]
+        if any(b <= 0 for _, b in anteile_roh):
+            raise HTTPException(422, "Alle Teilbeträge müssen größer 0 sein")
+        summe = sum(b for _, b in anteile_roh)
+        if abs(summe - abs(betrag)) > Decimal("0.01"):
+            raise HTTPException(
+                422,
+                f"Die Teilbeträge ({summe:.2f} €) müssen den Umsatzbetrag "
+                f"({abs(betrag):.2f} €) ergeben",
+            )
+    elif daten.konto_id is not None:
+        anteile_roh = [(daten.konto_id, abs(betrag))]
+    else:
+        raise HTTPException(422, "Konto oder Aufteilung angeben")
+
+    anteile: list[tuple[models.Konto, Decimal]] = []
+    for konto_id, anteil in anteile_roh:
+        konto = db.get(models.Konto, konto_id)
+        if konto is None or konto.mandant_id != mandant.id:
+            raise HTTPException(422, "Ungültiges Konto")
+        if konto.id == bank.id:
+            raise HTTPException(422, "Konto und Gegenkonto dürfen nicht identisch sein")
+        anteile.append((konto, anteil))
+
     # Dublettenschutz über alle PDF-Importe hinweg (überschneidende Zeiträume)
     if (datum, text) in _pdf_verbuchte_schluessel(db, mandant.id):
         raise HTTPException(
             409, "Dieser Umsatz ist bereits verbucht (ggf. aus einem früheren, "
             "sich überschneidenden Kontoauszug)"
         )
-    buchung = models.Buchung(
-        mandant_id=mandant.id,
-        batch_id=batch.id,
-        datum=datum,
-        konto_nr=konto_nr,
-        gegenkonto_nr=gegen_nr,
-        betrag=abs(betrag),
-        sh="S",
-        text=text,
-    )
-    db.add(buchung)
-    batch.anzahl += 1
+    buchungen: list[models.Buchung] = []
+    for konto, anteil in anteile:
+        if betrag < 0:  # Auszahlung: Sachkonto (Soll) an Bank
+            konto_nr, gegen_nr = konto.nummer, bank.nummer
+        else:           # Einzahlung: Bank (Soll) an Sachkonto
+            konto_nr, gegen_nr = bank.nummer, konto.nummer
+        buchung = models.Buchung(
+            mandant_id=mandant.id,
+            batch_id=batch.id,
+            datum=datum,
+            konto_nr=konto_nr,
+            gegenkonto_nr=gegen_nr,
+            betrag=anteil,
+            sh="S",
+            text=text,
+        )
+        db.add(buchung)
+        buchungen.append(buchung)
+    batch.anzahl += len(buchungen)
+    konto_text = ", ".join(f"{k.nummer} {k.bezeichnung}" for k, _ in anteile)
     audit(db, benutzer, mandant.id, "PDF_UMSATZ_VERBUCHT",
-          f"{datum} {betrag:.2f} € auf Konto {konto.nummer}")
+          f"{datum} {betrag:.2f} € auf {konto_text}")
     db.commit()
-    return {"id": buchung.id, "konto": f"{konto.nummer} {konto.bezeichnung}"}
+    return {
+        "id": buchungen[0].id,
+        "ids": [b.id for b in buchungen],
+        "konto": konto_text,
+    }
 
 
 class PdfZuweisung(BaseModel):
@@ -2795,6 +2831,10 @@ def plan_abrufen(
 
 class SnapshotNeu(BaseModel):
     kommentar: str | None = None
+    # gewählter Fensterbeginn der Plan-Seite (wird auf den Wochenmontag gerundet);
+    # ohne Angabe: Beginn der aktuellen Woche
+    start: str | None = None
+    wochen: int = 13
 
 
 @router.post("/mandanten/{mandant_id}/plan/snapshot", status_code=201)
@@ -2806,7 +2846,14 @@ def snapshot_anlegen(
 ):
     nur_schreibend(benutzer)
     mandant = mandant_oder_403(db, benutzer, mandant_id)
-    snap = erstelle_snapshot(db, mandant, kommentar=daten.kommentar)
+    if not 1 <= daten.wochen <= 52:
+        raise HTTPException(422, "Wochen müssen zwischen 1 und 52 liegen")
+    snap = erstelle_snapshot(
+        db, mandant,
+        start=_datum(daten.start, "start") if daten.start else None,
+        wochen=daten.wochen,
+        kommentar=daten.kommentar,
+    )
     audit(db, benutzer, mandant.id, "SNAPSHOT_ERSTELLT", snap.stichtag.isoformat())
     db.commit()
     return {"id": snap.id, "stichtag": snap.stichtag.isoformat()}

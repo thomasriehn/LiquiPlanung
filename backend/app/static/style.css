@@ -164,3 +164,31 @@ dialog:not([open]) { display: none; }
 .wizard-schritt h2 { margin-top: 0; }
 .wizard-schritt { background: #fff; border: 1px solid var(--rand); border-radius: 8px; padding: 18px 20px; }
 .wizard-knoepfe { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
+
+/* Fixierte erste Spalte (z. B. Kontenbezeichnung in der Budgetplanung) */
+table.liste td.fix-spalte, table.liste th.fix-spalte {
+  position: sticky; left: 0; background: #fff; z-index: 2;
+  box-shadow: 2px 0 0 var(--rand);
+}
+table.liste thead th.fix-spalte { background: var(--blau-hell); z-index: 5; }
+
+/* Durchsuchbare Kontoauswahl mit Kategorie-Überschriften (PDF-Abstimmung) */
+.kombo { position: relative; display: inline-block; min-width: 250px; }
+.kombo input { width: 100%; }
+.kombo-liste {
+  position: absolute; top: 100%; left: 0; right: 0; max-height: 300px; overflow-y: auto;
+  background: #fff; border: 1px solid var(--rand); border-radius: 4px; z-index: 30;
+  box-shadow: 0 6px 18px rgba(20, 40, 70, .18);
+}
+.kombo-gruppe {
+  padding: 4px 9px; font-size: 11px; font-weight: 700; letter-spacing: .02em;
+  color: #46525f; background: var(--blau-hell); border-top: 1px solid var(--rand);
+  position: sticky; top: 0;
+}
+.kombo-liste > .kombo-gruppe:first-child { border-top: none; }
+.kombo-eintrag {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  color: inherit; padding: 5px 9px; cursor: pointer; font-size: 12.5px; border-radius: 0;
+}
+.kombo-eintrag:hover { background: #eaf1fa; }
+.kombo-leer { padding: 7px 9px; color: #8a93a0; font-size: 12px; }

@@ -38,10 +38,10 @@ async function lade() {
   geaendert = new Map();
 
   const tabelle = document.getElementById("tabelle");
-  let html = `<thead><tr><th>Konto</th><th>Gruppe</th>` +
+  let html = `<thead><tr><th class="fix-spalte">Konto</th><th>Gruppe</th>` +
     MONATE.map(m => `<th class="zahl">${m}</th>`).join("") + `</tr></thead><tbody>`;
   for (const k of konten) {
-    html += `<tr><td><span class="konto-nr">${esc(k.nummer)}</span> ${esc(k.bezeichnung)}` +
+    html += `<tr><td class="fix-spalte"><span class="konto-nr">${esc(k.nummer)}</span> ${esc(k.bezeichnung)}` +
       (k.ust_satz ? ` <span class="klein">(${k.ust_satz}%)</span>` : "") + `</td>` +
       `<td class="klein">${esc(gruppenName[k.gruppe_id]) || "–"}</td>`;
     for (let m = 1; m <= 12; m++) {

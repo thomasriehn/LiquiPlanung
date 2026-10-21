@@ -90,10 +90,30 @@ function summiere(zeilen) {
   return agg;
 }
 
+const MONATSNAMEN = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun",
+                     "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+
 function spalten() {
   const ansicht = document.getElementById("ansicht").value;
   if (ansicht === "tage") {
     return daten.tage.map(t => ({ id: t, tage: [t] }));
+  }
+  if (ansicht === "monate") {
+    const monate = [];
+    let aktuell = null;
+    for (const t of daten.tage) {
+      const schluessel = t.slice(0, 7);                     // JJJJ-MM
+      if (!aktuell || aktuell.id !== schluessel) {
+        aktuell = {
+          id: schluessel,
+          label: `${MONATSNAMEN[parseInt(t.slice(5, 7)) - 1]} ${t.slice(0, 4)}`,
+          tage: [],
+        };
+        monate.push(aktuell);
+      }
+      aktuell.tage.push(t);
+    }
+    return monate;
   }
   return daten.wochen.map(w => ({ id: w.label + w.jahr, label: w.label, tage: w.tage.filter(t => daten.tage.includes(t)) }));
 }
@@ -252,9 +272,15 @@ document.getElementById("szenario").addEventListener("change", lade);
 const einfrierenKnopf = document.getElementById("einfrieren");
 if (einfrierenKnopf) {
   einfrierenKnopf.addEventListener("click", async () => {
-    if (!confirm("Aktuellen Plan als Soll-Vorgabe einfrieren?")) return;
+    const start = document.getElementById("start").value || (daten && daten.start) || null;
+    if (!confirm(`Aktuellen Plan als Soll-Vorgabe einfrieren?` +
+      (start ? `\nStichtag: Wochenbeginn zum ${datumVoll(start)}.` : ""))) return;
     try {
-      const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/plan/snapshot`, { kommentar: null });
+      const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/plan/snapshot`, {
+        kommentar: null,
+        start,
+        wochen: parseInt(document.getElementById("wochen").value) || 13,
+      });
       toast(`Plan eingefroren (Stichtag ${datumVoll(erg.stichtag)}).`, false);
       lade();
     } catch (e) { toast(e.message); }

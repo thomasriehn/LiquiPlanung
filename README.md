@@ -6,9 +6,10 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
 
 ## Funktionsumfang
 
-- **Rollierende 13-Wochen-Matrix**: Spalten = Tage (umschaltbar auf Wochen), Zeilen =
+- **Rollierende 13-Wochen-Matrix**: Spalten = Tage (umschaltbar auf Wochen oder Monate), Zeilen =
   Konten mit BWA-Aggregationsknoten; Ist bis heute, Plan ab morgen, Abweichungsansicht.
-- **Soll-/Ist-Vergleich** gegen eingefrorene Plan-Snapshots („Plan einfrieren“).
+- **Soll-/Ist-Vergleich** gegen eingefrorene Plan-Snapshots („Plan einfrieren“,
+  Stichtag = Wochenbeginn des gewählten Fensterstarts).
 - **Bestände & Liquiditätsentwicklung**: je Bank-/Kassenkonto, Gesamtliquidität,
   verfügbare Liquidität inkl. Kreditlinien, Warenbestand nachrichtlich.
 - **Import**: DATEV-Buchungsstapel (EXTF/DTVF), generisches CSV (Addison abbildbar),
@@ -18,7 +19,10 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Zahlungsbuchungen geben beim Löschen ihre Anrechnung an den Posten zurück),
   und „ansehen“ stellt bei PDF-Importen die Zuordnungsansicht jederzeit wieder
   her – mit den getroffenen Zuordnungen, die sich dort aufheben oder nachholen
-  lassen (die PDF-Datei wird dazu am Import gespeichert).
+  lassen (die PDF-Datei wird dazu am Import gespeichert). Die Kontoauswahl der
+  Abstimmung ist durchsuchbar und nach BWA-Gruppen gegliedert; Ausgaben lassen
+  sich optional auf mehrere Konten aufteilen (Teilbeträge müssen den
+  Umsatzbetrag ergeben).
 - **PDF-Kontoumsätze**: Kontoauszüge, die nur als PDF vorliegen, werden
   ausgewertet (automatische Formaterkennung: Sparkassen-Verfahrenskonto-Reports,
   Deutsche-Bank-Kontoauszüge, UC eBanking prime/HypoVereinsbank). Ausgaben

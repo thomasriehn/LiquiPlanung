@@ -82,6 +82,18 @@
   </table>
   {% endif %}
 
+  <dialog id="aufteilung-dialog" style="border:1px solid #c9d4e0;border-radius:8px;padding:18px 22px;min-width:600px">
+    <h3 style="margin-top:0">Auf mehrere Konten aufteilen</h3>
+    <p class="hinweis" id="aufteilung-info"></p>
+    <div id="aufteilung-zeilen"></div>
+    <button type="button" class="sekundaer" id="aufteilung-plus">+ weiteres Konto</button>
+    <p id="aufteilung-summe" style="font-weight:600"></p>
+    <div class="werkzeuge">
+      <button type="button" id="aufteilung-ok">Verbuchen</button>
+      <button type="button" class="sekundaer" id="aufteilung-abbrechen">Abbrechen</button>
+    </div>
+  </dialog>
+
   <h2>Bisherige Importe</h2>
   <table class="liste">
     <thead><tr><th>Datum</th><th>Datei</th><th>Format</th><th class="zahl">Sätze</th><th>Warnungen</th><th></th></tr></thead>
@@ -111,6 +123,18 @@ async function ladeKonten() {
       konten.filter(k => k.aktiv && (k.typ === "BANK" || k.typ === "KASSE")).map(k =>
         `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}${k.iban ? " (" + esc(k.iban) + ")" : ""}</option>`).join("");
   }
+  const sachkonten = konten.filter(k => k.aktiv && k.typ !== "BANK" && k.typ !== "KASSE");
+  kontoGruppen = d.gruppen
+    .slice().sort((a, b) => (a.sortierung || 0) - (b.sortierung || 0))
+    .map(g => ({
+      name: g.name,
+      konten: sachkonten.filter(k => k.gruppe_id === g.id)
+        .sort((a, b) => a.nummer.localeCompare(b.nummer)),
+    }))
+    .filter(g => g.konten.length);
+  const ohneGruppe = sachkonten.filter(k => !k.gruppe_id)
+    .sort((a, b) => a.nummer.localeCompare(b.nummer));
+  if (ohneGruppe.length) kontoGruppen.push({ name: "Ohne Gruppe", konten: ohneGruppe });
   const pdfSel = document.getElementById("pdf-bank-konto");
   if (pdfSel) {
     const zahlungsmittel = konten
@@ -360,13 +384,139 @@ function zuordnungsBadge(td, u, zurueck) {
   verbuchtBadge(td, text, z.buchungen, zurueck);
 }
 
-function pdfKontoSelect() {
-  const optionen = konten
-    .filter(k => k.aktiv && k.typ !== "BANK" && k.typ !== "KASSE")
-    .map(k => `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}</option>`)
-    .join("");
-  return `<select data-pdf-konto><option value="">– Konto wählen –</option>${optionen}</select>`;
+let kontoGruppen = [];
+
+// Durchsuchbare Kontoauswahl mit Kategorie-Überschriften; optional mit dem
+// Eintrag „auf mehrere Konten aufteilen“
+function kontoKombo(beiAuswahl, mitAufteilen) {
+  const huelle = document.createElement("div");
+  huelle.className = "kombo";
+  huelle.innerHTML = `<input placeholder="Konto suchen …" autocomplete="off">
+    <div class="kombo-liste" hidden></div>`;
+  const eingabe = huelle.querySelector("input");
+  const liste = huelle.querySelector(".kombo-liste");
+  function fuelle() {
+    const f = eingabe.value.trim().toLowerCase();
+    let html = "";
+    if (mitAufteilen) {
+      html += `<button type="button" class="kombo-eintrag" data-aufteilen>
+        <strong>Auf mehrere Konten aufteilen …</strong></button>`;
+    }
+    for (const g of kontoGruppen) {
+      const treffer = g.konten.filter(k =>
+        !f || (k.nummer + " " + k.bezeichnung).toLowerCase().includes(f));
+      if (!treffer.length) continue;
+      html += `<div class="kombo-gruppe">${esc(g.name)}</div>`;
+      html += treffer.map(k => `<button type="button" class="kombo-eintrag" data-id="${k.id}">
+        <span class="konto-nr">${esc(k.nummer)}</span>${esc(k.bezeichnung)}</button>`).join("");
+    }
+    liste.innerHTML = html || `<div class="kombo-leer">Kein Konto gefunden.</div>`;
+  }
+  eingabe.addEventListener("focus", () => { fuelle(); liste.hidden = false; });
+  eingabe.addEventListener("input", () => { fuelle(); liste.hidden = false; });
+  document.addEventListener("click", (e) => {
+    if (huelle.isConnected && !huelle.contains(e.target)) liste.hidden = true;
+  });
+  liste.addEventListener("click", (e) => {
+    const eintrag = e.target.closest(".kombo-eintrag");
+    if (!eintrag) return;
+    liste.hidden = true;
+    if (eintrag.dataset.aufteilen !== undefined) { beiAuswahl(null, true); return; }
+    const konto = konten.find(k => k.id === parseInt(eintrag.dataset.id));
+    eingabe.value = `${konto.nummer} ${konto.bezeichnung}`;
+    beiAuswahl(konto, false);
+  });
+  return huelle;
 }
+
+// ---- Aufteilung einer Ausgabe auf mehrere Konten ----
+let aufteilungKontext = null;   // { td, u }
+
+function aufteilungSumme() {
+  const ziel = Math.abs(aufteilungKontext.u.betrag);
+  let summe = 0;
+  document.querySelectorAll("#aufteilung-zeilen [data-anteil]").forEach(el => {
+    summe += parseFloat(el.value) || 0;
+  });
+  const el = document.getElementById("aufteilung-summe");
+  const offen = ziel - summe;
+  el.textContent = `Aufgeteilt ${eur(summe)} von ${eur(ziel)} €` +
+    (Math.abs(offen) <= 0.005 ? " ✓" : ` – noch ${eur(offen)} € zu verteilen`);
+  el.style.color = Math.abs(offen) <= 0.005 ? "#1e5c38" : "var(--rot)";
+}
+
+function aufteilungZeile(vorgabe) {
+  const zeile = document.createElement("div");
+  zeile.className = "werkzeuge";
+  zeile.style.marginBottom = "6px";
+  zeile.dataset.aufteilungZeile = "1";
+  zeile.appendChild(kontoKombo((konto) => {
+    zeile.dataset.kontoId = konto.id;
+  }, false));
+  const betrag = document.createElement("input");
+  betrag.type = "number"; betrag.step = "0.01"; betrag.min = "0.01";
+  betrag.style.width = "120px";
+  betrag.dataset.anteil = "1";
+  if (vorgabe) betrag.value = vorgabe.toFixed(2);
+  betrag.addEventListener("input", aufteilungSumme);
+  zeile.appendChild(betrag);
+  const weg = document.createElement("button");
+  weg.type = "button"; weg.className = "gefahr klein-knopf"; weg.textContent = "✕";
+  weg.addEventListener("click", () => { zeile.remove(); aufteilungSumme(); });
+  zeile.appendChild(weg);
+  return zeile;
+}
+
+function oeffneAufteilung(td, u) {
+  aufteilungKontext = { td, u };
+  document.getElementById("aufteilung-info").innerHTML =
+    `${esc(u.empfaenger)} – ${eur(u.betrag)} € vom ${u.buchungstag}. Die Teilbeträge
+     müssen zusammen den Umsatzbetrag ergeben; je Konto entsteht eine Ist-Buchung.`;
+  const zeilen = document.getElementById("aufteilung-zeilen");
+  zeilen.innerHTML = "";
+  zeilen.appendChild(aufteilungZeile(Math.abs(u.betrag)));
+  zeilen.appendChild(aufteilungZeile());
+  aufteilungSumme();
+  const dlg = document.getElementById("aufteilung-dialog");
+  if (typeof dlg.showModal === "function") dlg.showModal();
+  else dlg.setAttribute("open", "");
+}
+
+function schliesseAufteilung() {
+  const dlg = document.getElementById("aufteilung-dialog");
+  if (typeof dlg.close === "function") dlg.close();
+  else dlg.removeAttribute("open");
+}
+
+document.getElementById("aufteilung-plus").addEventListener("click", () => {
+  document.getElementById("aufteilung-zeilen").appendChild(aufteilungZeile());
+});
+document.getElementById("aufteilung-abbrechen").addEventListener("click", schliesseAufteilung);
+document.getElementById("aufteilung-ok").addEventListener("click", async () => {
+  const { td, u } = aufteilungKontext;
+  const anteile = [];
+  for (const zeile of document.querySelectorAll("[data-aufteilung-zeile]")) {
+    const betrag = parseFloat(zeile.querySelector("[data-anteil]").value) || 0;
+    if (!betrag) continue;
+    if (!zeile.dataset.kontoId) { toast("Bitte für jeden Teilbetrag ein Konto wählen."); return; }
+    anteile.push({ konto_id: parseInt(zeile.dataset.kontoId), betrag });
+  }
+  if (anteile.length < 2) { toast("Mindestens zwei Teilbeträge angeben – oder direkt ein Konto wählen.", false); return; }
+  try {
+    const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/pdf-umsaetze/verbuchen`, {
+      batch_id: pdfBatchId,
+      bank_konto_id: parseInt(document.getElementById("pdf-bank-konto").value),
+      datum: u.buchungstag,
+      betrag: u.betrag,
+      text: `${u.empfaenger} – ${u.verwendungszweck}`,
+      aufteilung: anteile,
+    });
+    schliesseAufteilung();
+    verbuchtBadge(td, `✓ verbucht auf ${esc(erg.konto)}`, erg.ids,
+      (zelle) => bindeAusgabe(zelle, u));
+    ladeBatches();
+  } catch (err) { toast(err.message); }
+});
 
 function postenSelect(betrag) {
   const passende = offenePosten.filter(p => p.art === (betrag > 0 ? "DEBITOR" : "KREDITOR"));
@@ -432,24 +582,23 @@ function zeigeAusgaben(ausgaben) {
 
 function bindeAusgabe(td, u) {
   if (u.zuordnung) { zuordnungsBadge(td, u, (zelle) => bindeAusgabe(zelle, u)); return; }
-  td.innerHTML = pdfKontoSelect();
-  td.querySelector("[data-pdf-konto]").addEventListener("change", async (e) => {
-    const kontoId = e.target.value;
-    if (!kontoId) return;
+  td.innerHTML = "";
+  td.appendChild(kontoKombo(async (konto, aufteilen) => {
+    if (aufteilen) { oeffneAufteilung(td, u); return; }
     try {
       const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/pdf-umsaetze/verbuchen`, {
         batch_id: pdfBatchId,
-        konto_id: parseInt(kontoId),
+        konto_id: konto.id,
         bank_konto_id: parseInt(document.getElementById("pdf-bank-konto").value),
         datum: u.buchungstag,
         betrag: u.betrag,
         text: `${u.empfaenger} – ${u.verwendungszweck}`,
       });
-      verbuchtBadge(td, `✓ verbucht auf ${esc(erg.konto)}`, [erg.id],
+      verbuchtBadge(td, `✓ verbucht auf ${esc(erg.konto)}`, erg.ids || [erg.id],
         (zelle) => bindeAusgabe(zelle, u));
       ladeBatches();
-    } catch (err) { toast(err.message); e.target.value = ""; }
-  });
+    } catch (err) { toast(err.message); bindeAusgabe(td, u); }
+  }, true));
 }
 
 function zeigeEingaenge(eingaenge) {

@@ -926,3 +926,28 @@ def test_zahlungsbuchung_betrag_gesperrt_und_batchloeschung(client):
     posten = client.get(f"/api/mandanten/{mandant_id}/posten").json()[0]
     assert posten["restbetrag"] == 1000.0
     assert posten["status"] == "OFFEN"
+
+
+def test_snapshot_mit_gewaehltem_start(client):
+    from datetime import date, timedelta
+
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Snap GmbH", "kurzname": "snap"}
+    ).json()["id"]
+    # Fensterbeginn zwei Wochen in der Zukunft wählen -> Stichtag ist der
+    # Montag JENER Woche, nicht der aktuellen
+    kuenftig = date.today() + timedelta(weeks=2)
+    erwartet = kuenftig - timedelta(days=kuenftig.weekday())
+    erg = client.post(f"/api/mandanten/{mandant_id}/plan/snapshot",
+                      json={"start": kuenftig.isoformat(), "wochen": 8}).json()
+    assert erg["stichtag"] == erwartet.isoformat()
+    snap = client.get(f"/api/mandanten/{mandant_id}/plan/snapshots").json()[0]
+    assert snap["stichtag"] == erwartet.isoformat()
+    assert snap["wochen"] == 8
+    # ohne Angabe weiterhin: Beginn der aktuellen Woche
+    heute = date.today()
+    erg = client.post(f"/api/mandanten/{mandant_id}/plan/snapshot", json={}).json()
+    assert erg["stichtag"] == (heute - timedelta(days=heute.weekday())).isoformat()
+    assert client.post(f"/api/mandanten/{mandant_id}/plan/snapshot",
+                       json={"wochen": 99}).status_code == 422
