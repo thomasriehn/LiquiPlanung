@@ -192,4 +192,8 @@ table.liste thead th.fix-spalte { background: var(--blau-hell); z-index: 5; }
 }
 .kombo-eintrag:hover { background: #eaf1fa; }
 .kombo-eintrag .konto-nr { color: var(--grau); margin-right: 5px; }
+.sammel-vermerk {
+  display: inline-block; margin-top: 3px; padding: 0 6px; border-radius: 8px;
+  background: var(--blau-hell); color: #1d4e89; font-size: 11px;
+}
 .kombo-leer { padding: 7px 9px; color: #8a93a0; font-size: 12px; }

@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import delete, select, update
@@ -926,7 +927,7 @@ def import_pdf_ansicht(
         )
     from ..services import pdf_kontoauszug
 
-    erg = pdf_kontoauszug.parse_pdf(batch.datei)
+    erg = pdf_kontoauszug.parse_datei(batch.datei)
     eigene: dict[tuple, list[models.Buchung]] = {}
     for b in db.scalars(
         select(models.Buchung).where(models.Buchung.batch_id == batch.id)
@@ -975,14 +976,16 @@ def import_pdf_ansicht(
             "verwendungszweck": u.verwendungszweck,
             "empfaenger": u.empfaenger,
             "betrag": float(u.betrag),
+            "sammelauftrag": u.sammelauftrag or None,
             "zuordnung": zuordnung,
             # in einem anderen Import verbucht -> gesperrt
-            "bereits_verbucht": zuordnung is None and schluessel in verbucht_alle,
+            "bereits_verbucht": zuordnung is None and _pdf_bereits_verbucht(u, verbucht_alle),
         })
     return {
         "batch_id": batch.id,
         "dateiname": batch.dateiname,
         "warnungen": erg.warnungen[:20],
+        "hinweise": erg.hinweise[:20],
         "umsaetze": umsaetze,
     }
 
@@ -1281,6 +1284,17 @@ def _pdf_verbuchte_schluessel(db: Session, mandant_id: int) -> set[tuple[date, s
     return {(datum, text) for datum, text in zeilen}
 
 
+def _pdf_bereits_verbucht(u, verbucht: set[tuple[date, str | None]]) -> bool:
+    """Umsatz schon in einem PDF-Import verbucht? Aus Sammelüberweisungen
+    aufgelöste Einzelzahlungen gelten auch dann als verbucht, wenn die
+    ursprüngliche Auszugszeile früher als Ganzes verbucht wurde."""
+    if (u.buchungstag, _pdf_umsatz_text(u.empfaenger, u.verwendungszweck)) in verbucht:
+        return True
+    return u.ursprung is not None and (
+        u.buchungstag, _pdf_umsatz_text(*u.ursprung)
+    ) in verbucht
+
+
 @router.post("/mandanten/{mandant_id}/pdf-umsaetze")
 async def pdf_umsaetze_hochladen(
     mandant_id: int,
@@ -1288,7 +1302,7 @@ async def pdf_umsaetze_hochladen(
     benutzer=Depends(aktueller_benutzer),
     db: Session = Depends(get_db),
 ):
-    """PDF-Kontoauszug auswerten (z. B. Verfahrenskonto-Report der Sparkasse).
+    """PDF-Kontoauszug bzw. ZIP-Paket (Auszug + Postenlisten) auswerten.
 
     Liefert die erkannten Umsätze zurück; verbucht wird einzeln über
     /pdf-umsaetze/verbuchen. Der angelegte Import-Batch bündelt die daraus
@@ -1298,7 +1312,8 @@ async def pdf_umsaetze_hochladen(
     from ..services import pdf_kontoauszug
 
     daten_roh = await datei.read()
-    erg = pdf_kontoauszug.parse_pdf(daten_roh)
+    # Texterkennung dauert Sekunden – nicht im Event-Loop ausführen
+    erg = await run_in_threadpool(pdf_kontoauszug.parse_datei, daten_roh)
     if not erg.umsaetze:
         raise HTTPException(422, "; ".join(erg.warnungen) or "Keine Umsätze im PDF gefunden")
     batch = models.ImportBatch(
@@ -1319,6 +1334,7 @@ async def pdf_umsaetze_hochladen(
     return {
         "batch_id": batch.id,
         "warnungen": erg.warnungen[:20],
+        "hinweise": erg.hinweise[:20],
         "umsaetze": [
             {
                 "auszug_nr": u.auszug_nr,
@@ -1327,10 +1343,8 @@ async def pdf_umsaetze_hochladen(
                 "verwendungszweck": u.verwendungszweck,
                 "empfaenger": u.empfaenger,
                 "betrag": float(u.betrag),
-                "bereits_verbucht": (
-                    u.buchungstag,
-                    _pdf_umsatz_text(u.empfaenger, u.verwendungszweck),
-                ) in verbucht,
+                "sammelauftrag": u.sammelauftrag or None,
+                "bereits_verbucht": _pdf_bereits_verbucht(u, verbucht),
             }
             for u in erg.umsaetze
         ],

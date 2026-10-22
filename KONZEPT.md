@@ -265,6 +265,28 @@ Termine werden bei Neugenerierung nicht überschrieben.
   einem Konto zugeordnet und sofort zum Buchungsdatum als Ist-Buchung übernommen
   (Sachkonto an Bank, DATEV-Logik); alle Buchungen eines PDFs hängen an einem
   Import-Batch und sind gesammelt löschbar.
+- **Texterkennung (OCR):** PDFs ohne Textebene (Scan, „Microsoft Print to PDF“
+  mit Glyphen als Vektorpfaden) werden mit pypdfium2 gerendert (300 dpi) und
+  per tesseract (`deu`, Wortpositionen als TSV) gelesen. Für das UC-Layout
+  trennen die Wortpositionen die Spalten (Datum | Valuta | Zweck | Empfänger/
+  IBAN/BIC | Umsatz); die Umsatzsumme wird gegen Anfangs-/Endsaldo des Auszugs
+  geprüft und eine Abweichung als möglicher Lesefehler gemeldet. Andere Layouts
+  laufen mit dem erkannten Fließtext durch die Text-Parser. Ohne installiertes
+  tesseract gibt es eine klare Meldung statt eines leeren Ergebnisses.
+- **ZIP-Pakete (Auszug + Postenlisten):** Ein ZIP bündelt den Kontoauszug mit
+  den UC-eBanking-Postenlisten der Sammelüberweisungen („Postenliste – SEPA
+  Zahlung (CCT)“, jeweils mit angehängten Belegen). Jede PDF im Paket wird
+  anhand ihrer ersten Seite eingeordnet (Postenliste, Auszug mit/ohne
+  Textebene, sonstiger Beleg – nur so weit gelesen wie nötig). Postenlisten:
+  Empfänger, IBAN (Prüfziffer-validiert, auch über Zeilenumbrüche), Zweck und
+  Betrag je Posten, gegengeprüft gegen Gesamtbetrag und Postenzahl. Die
+  Auszugszeile einer Sammelüberweisung wird über Gesamtbetrag (exakt),
+  „POSTEN n“ und Nähe zum Ausführungsdatum gefunden und durch die
+  Einzelzahlungen ersetzt (Datum/Auszugsnummer aus der Auszugszeile). War die
+  Sammelzeile früher bereits als Ganzes verbucht, gelten ihre Einzelzahlungen
+  als verbucht. Ohne lesbaren Auszug werden die Einzelzahlungen zum
+  Ausführungsdatum übernommen (mit Hinweis). Schutz gegen ZIP-Bomben:
+  max. 100 Dateien bzw. 200 MB entpackt.
 
 Unbekannte Konten werden beim Import gemeldet und können direkt angelegt werden.
 

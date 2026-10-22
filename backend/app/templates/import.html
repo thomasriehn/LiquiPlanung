@@ -45,7 +45,11 @@
   <p class="hinweis">
     Für Kontoauszüge, die nur als PDF vorliegen. Unterstützte Formate (automatische
     Erkennung): Sparkassen-Verfahrenskonto-Reports, Deutsche-Bank-Kontoauszüge und
-    UC-eBanking-prime-Auszüge (HypoVereinsbank/UniCredit).
+    UC-eBanking-prime-Auszüge (HypoVereinsbank/UniCredit). PDFs ohne Textebene
+    (Scan bzw. „Als PDF drucken“) werden per Texterkennung gelesen und gegen
+    Anfangs-/Endsaldo geprüft. <strong>ZIP-Pakete</strong> aus Kontoauszug und
+    UC-eBanking-Postenlisten lösen Sammelüberweisungen in die einzelnen Zahlungen
+    je Empfänger auf; beigefügte Belege werden übergangen.
     Nach dem Auswerten erscheinen alle <strong>Ausgaben</strong>
     (negative Beträge) als Tabelle. Sobald in der letzten Spalte ein Konto
     gewählt wird, wird der Betrag zum Buchungsdatum als Ist-Buchung auf diesem
@@ -55,11 +59,11 @@
   </p>
   {% if not leser %}
   <form id="pdf-form" class="formular-zeilen">
-    <label>PDF-Kontoauszug<input type="file" name="datei" required></label>
+    <label>Kontoauszug (PDF oder ZIP)<input type="file" name="datei" required></label>
     <label>Bankkonto (Gegenkonto)
       <select id="pdf-bank-konto"></select>
     </label>
-    <button type="submit">PDF auswerten</button>
+    <button type="submit">Auszug auswerten</button>
   </form>
   <div id="pdf-ergebnis"></div>
   <h3 id="pdf-ausgaben-titel" style="display:none">Ausgaben – Konto zuordnen</h3>
@@ -322,6 +326,10 @@ const pdfForm = document.getElementById("pdf-form");
 if (pdfForm) pdfForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const fd = new FormData(pdfForm);
+  const knopf = pdfForm.querySelector("button[type=submit]");
+  const knopfText = knopf.textContent;
+  knopf.disabled = true;
+  knopf.textContent = "Wird ausgewertet …";
   try {
     const erg = await apiDatei(`/api/mandanten/${MANDANT_ID}/pdf-umsaetze`, fd);
     pdfBatchId = erg.batch_id;
@@ -333,7 +341,8 @@ if (pdfForm) pdfForm.addEventListener("submit", async (e) => {
     let html = `<div class="warnung" style="background:#e8f5ec;border-color:#9fd3ae;color:#1e5c38">
       ${erg.umsaetze.length} Umsätze erkannt: ${ausgaben.length} Ausgaben,
       ${eingaenge.length} Zahlungseingänge${erg.umsaetze.length - ausgaben.length - eingaenge.length
-        ? `, ${erg.umsaetze.length - ausgaben.length - eingaenge.length} Nullbeträge ausgeblendet` : ""}.</div>`;
+        ? `, ${erg.umsaetze.length - ausgaben.length - eingaenge.length} Nullbeträge ausgeblendet` : ""}.
+      ${(erg.hinweise || []).map(h => `<br><span class="klein">${esc(h)}</span>`).join("")}</div>`;
     if (schonVerbucht) {
       html += `<div class="warnung">${schonVerbucht} Umsätze sind bereits aus einem
         früheren, sich überschneidenden Kontoauszug verbucht – sie sind ausgegraut
@@ -345,7 +354,17 @@ if (pdfForm) pdfForm.addEventListener("submit", async (e) => {
     zeigeEingaenge(eingaenge);
     ladeBatches();
   } catch (err) { toast(err.message); }
+  finally {
+    knopf.disabled = false;
+    knopf.textContent = knopfText;
+  }
 });
+
+function zweckZelle(u) {
+  return esc(u.verwendungszweck) + (u.sammelauftrag
+    ? `<div class="sammel-vermerk" title="Aus der Postenliste der Sammelüberweisung aufgelöst">Sammelauftrag ${esc(u.sammelauftrag)}</div>`
+    : "");
+}
 
 function bereitsVerbuchtZelle(tr, td) {
   tr.style.opacity = ".5";
@@ -569,7 +588,7 @@ function zeigeAusgaben(ausgaben) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${u.auszugsdatum}</td><td>${u.buchungstag}</td>
-      <td class="klein" style="max-width:420px">${esc(u.verwendungszweck)}</td>
+      <td class="klein" style="max-width:420px">${zweckZelle(u)}</td>
       <td>${esc(u.empfaenger)}</td>
       <td class="zahl" style="color:var(--rot)">${eur(u.betrag)}</td>
       <td></td>`;
@@ -611,7 +630,7 @@ function zeigeEingaenge(eingaenge) {
     tr.dataset.betrag = u.betrag;
     tr.innerHTML = `
       <td>${u.auszugsdatum}</td><td>${u.buchungstag}</td>
-      <td class="klein" style="max-width:420px">${esc(u.verwendungszweck)}</td>
+      <td class="klein" style="max-width:420px">${zweckZelle(u)}</td>
       <td>${esc(u.empfaenger)}</td>
       <td class="zahl" style="color:#1e5c38">${eur(u.betrag)}</td>
       <td></td>`;

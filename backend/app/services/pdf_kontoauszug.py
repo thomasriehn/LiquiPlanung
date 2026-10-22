@@ -15,13 +15,28 @@ es gewinnt der Format-Parser mit den meisten erkannten Umsätzen):
 
 Mehrzeilige Empfängernamen und Rauschen (Seitenköpfe, Adressblöcke,
 Saldozeilen) werden über Heuristiken behandelt.
+
+PDFs ohne Textebene (Scans, „Microsoft Print to PDF“ mit Glyphen als
+Vektorpfaden) werden per Texterkennung (tesseract) gelesen, sofern auf dem
+Server installiert. Für das UC-eBanking-Layout werden dabei die Spalten über
+die Wortpositionen getrennt und die Umsätze gegen Anfangs-/Endsaldo geprüft.
+
+**ZIP-Pakete** bündeln einen Kontoauszug mit den UC-eBanking-Postenlisten
+der Sammelüberweisungen („SEPA Zahlung (CCT)“, mit angehängten Belegen): Die
+Auszugszeile einer Sammelüberweisung wird in die Einzelzahlungen je Empfänger
+aufgelöst, damit jede für sich einem Konto zugeordnet werden kann.
 """
 
 import re
+import shutil
+import subprocess
+import threading
+import zipfile
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
+from pathlib import PurePosixPath
 
 
 @dataclass
@@ -32,12 +47,17 @@ class PdfUmsatz:
     verwendungszweck: str
     empfaenger: str
     betrag: Decimal
+    # aus einer Sammelüberweisung aufgelöst: Auftragsnummer der Postenliste und
+    # (Empfänger, Zweck) der ursprünglichen Auszugszeile
+    sammelauftrag: str = ""
+    ursprung: tuple[str, str] | None = None
 
 
 @dataclass
 class PdfErgebnis:
     umsaetze: list[PdfUmsatz] = field(default_factory=list)
     warnungen: list[str] = field(default_factory=list)
+    hinweise: list[str] = field(default_factory=list)
 
 
 # Blockbeginn: Auszugsnummer + Auszugsdatum + Buchungsdatum (+ Beginn Zweck)
@@ -339,17 +359,560 @@ def parse_text(text: str) -> PdfErgebnis:
     return erg
 
 
-def parse_pdf(daten: bytes) -> PdfErgebnis:
+def _pdf_leser(daten: bytes):
     import logging
 
     logging.getLogger("pypdf").setLevel(logging.ERROR)  # Font-Hinweise unterdrücken
-    try:
-        from pypdf import PdfReader
+    from pypdf import PdfReader
 
-        leser = PdfReader(BytesIO(daten))
-        text = "\n".join(seite.extract_text() or "" for seite in leser.pages)
+    return PdfReader(BytesIO(daten))
+
+
+def _seitentexte(daten: bytes) -> list[str]:
+    """Text je Seite (pypdf); wirft bei defekten/verschlüsselten PDFs."""
+    return [seite.extract_text() or "" for seite in _pdf_leser(daten).pages]
+
+
+def _ohne_textebene(seiten: list[str]) -> bool:
+    return len("".join(seiten).strip()) < 30
+
+
+def parse_pdf(daten: bytes) -> PdfErgebnis:
+    try:
+        seiten = _seitentexte(daten)
     except Exception as e:  # defekte/verschlüsselte PDFs sauber melden
         erg = PdfErgebnis()
         erg.warnungen.append(f"PDF nicht lesbar: {e}")
         return erg
-    return parse_text(text)
+    if _ohne_textebene(seiten):
+        return _auszug_per_ocr(daten)
+    return parse_text("\n".join(seiten))
+
+
+def parse_datei(daten: bytes) -> PdfErgebnis:
+    """Einstieg für Uploads: ZIP-Paket oder einzelnes PDF."""
+    if daten[:4] == b"PK\x03\x04":
+        return parse_zip(daten)
+    return parse_pdf(daten)
+
+
+# ------------------------------------------------- Texterkennung (tesseract)
+
+OCR_AUFLOESUNG = 300        # dpi beim Rendern
+OCR_MAX_SEITEN = 30
+
+
+@dataclass
+class OcrWort:
+    text: str
+    links: float            # relativ zur Seitenbreite (0..1)
+    rechts: float
+
+
+def ocr_verfuegbar() -> bool:
+    if shutil.which("tesseract") is None:
+        return False
+    try:
+        import pypdfium2  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _ocr_sprache() -> str:
+    try:
+        sprachen = subprocess.run(
+            ["tesseract", "--list-langs"], capture_output=True, timeout=30
+        ).stdout.decode()
+    except (OSError, subprocess.SubprocessError):
+        return "eng"
+    return "deu" if "deu" in sprachen.split() else "eng"
+
+
+_PDFIUM_SPERRE = threading.Lock()     # pdfium ist nicht threadsicher
+
+
+def _ocr_zeilen(daten: bytes, ab: int = 0, bis: int = OCR_MAX_SEITEN) -> list[list[list[OcrWort]]]:
+    """Seiten → Zeilen → Wörter (links→rechts) mit relativen x-Positionen."""
+    import pypdfium2 as pdfium
+
+    with _PDFIUM_SPERRE:
+        dokument = pdfium.PdfDocument(daten)
+        try:
+            bilder = [
+                dokument[nr].render(scale=OCR_AUFLOESUNG / 72, grayscale=True).to_pil()
+                for nr in range(ab, min(bis, len(dokument)))
+            ]
+        finally:
+            dokument.close()
+
+    sprache = _ocr_sprache()
+    seiten = []
+    for bild in bilder:
+        png = BytesIO()
+        bild.save(png, "PNG")
+        tsv = subprocess.run(
+            ["tesseract", "stdin", "stdout", "-l", sprache, "--psm", "6", "tsv"],
+            input=png.getvalue(), capture_output=True, timeout=180,
+        ).stdout.decode("utf-8", "replace")
+        breite = bild.size[0] or 1
+        zeilen: dict[tuple, list[OcrWort]] = {}
+        for roh in tsv.splitlines()[1:]:
+            t = roh.split("\t")
+            if len(t) < 12 or t[0] != "5" or not t[11].strip():
+                continue
+            links = int(t[6]) / breite
+            zeilen.setdefault((int(t[2]), int(t[3]), int(t[4])), []).append(
+                OcrWort(t[11].strip(), links, links + int(t[8]) / breite)
+            )
+        seiten.append([sorted(w, key=lambda x: x.links) for w in zeilen.values()])
+    return seiten
+
+
+def _zeilentext(woerter: list[OcrWort]) -> str:
+    return " ".join(w.text for w in woerter)
+
+
+def _auszug_per_ocr(daten: bytes) -> PdfErgebnis:
+    if not ocr_verfuegbar():
+        erg = PdfErgebnis()
+        erg.warnungen.append(
+            "Das PDF enthält keinen auslesbaren Text (Scan bzw. Druck als Grafik). "
+            "Die dafür nötige Texterkennung (tesseract) ist auf dem Server nicht "
+            "installiert – siehe Installationshinweise."
+        )
+        return erg
+    try:
+        seiten = _ocr_zeilen(daten, bis=1)
+        erste = "\n".join(_zeilentext(z) for s in seiten for z in s)
+        if not re.search(r"saldo|auszug", erste, re.I):
+            # z. B. eingescannte Rechnung: Rest gar nicht erst erkennen
+            erg = PdfErgebnis()
+            erg.warnungen.append("Per Texterkennung keine Kontoauszugsdaten gefunden.")
+            return erg
+        seiten += _ocr_zeilen(daten, ab=1)
+    except Exception as e:
+        erg = PdfErgebnis()
+        erg.warnungen.append(f"Texterkennung fehlgeschlagen: {e}")
+        return erg
+    erg = _parse_uc_ocr(seiten)
+    if not erg.umsaetze:
+        # andere Layouts: erkannten Fließtext durch die Text-Parser schicken
+        erg = parse_text("\n".join(_zeilentext(z) for s in seiten for z in s))
+    if erg.umsaetze:
+        erg.hinweise.insert(0, "Kontoauszug per Texterkennung (OCR) gelesen.")
+    return erg
+
+
+# UC-eBanking-„CAMT Auszüge“ aus OCR-Wörtern: Spalten Datum | Valuta |
+# Buchungsinformationen (Zweck links, Empfänger/IBAN/BIC rechts) | Umsatz
+_OCR_DATUM = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
+_OCR_BETRAG = re.compile(r"^-?\d{1,3}(?:\.\d{3})*,\d{2}$")
+# Tabellenende bzw. Seitenfuß („… UC eBanking prime Gedruckt durch Benutzer …“)
+_OCR_ENDE = re.compile(r"^Endsaldo\b|Gedruckt durch|^UC eBanking prime")
+_SALDO_MUSTER = {
+    "anfang": re.compile(r"Anfangss?aldo\s+(-?\d{1,3}(?:\.\d{3})*,\d{2})"),
+    "ende": re.compile(r"Endsaldo\s+(-?\d{1,3}(?:\.\d{3})*,\d{2})"),
+}
+
+
+def _parse_uc_ocr(seiten: list[list[list[OcrWort]]]) -> PdfErgebnis:
+    erg = PdfErgebnis()
+    volltext = "\n".join(_zeilentext(z) for s in seiten for z in s)
+    m = _UC_AUSZUG_NR.search(volltext)
+    auszug_nr = m.group(1) if m else ""
+    m = _UC_AUSZUGSDATUM.search(volltext)
+    auszugsdatum = _datum(m.group(1)) if m else None
+
+    bloecke: list[dict] = []
+    for zeilen in seiten:
+        spalten = None          # je Seite aus der Kopfzeile der Umsatztabelle
+        aktuell = None
+        for woerter in zeilen:
+            texte = [w.text for w in woerter]
+            if "Valuta" in texte and any(t.startswith("Buchungsinfo") for t in texte):
+                info = next(w for w in woerter if w.text.startswith("Buchungsinfo"))
+                rechts = max(w.rechts for w in woerter)
+                spalten = {
+                    "info": info.links,
+                    "rechts": rechts,
+                    # Empfängerspalte beginnt gut ein Drittel der Strecke
+                    # Buchungsinformationen → rechter Rand der Umsatzspalte
+                    "partner": info.links + 0.33 * (rechts - info.links),
+                }
+                aktuell = None
+                continue
+            if spalten is None:
+                continue
+            if _OCR_ENDE.search(_zeilentext(woerter)):
+                aktuell = None
+                continue
+            rest = list(woerter)
+            betrag = None
+            if rest and _OCR_BETRAG.match(rest[-1].text) and rest[-1].rechts >= spalten["rechts"] - 0.03:
+                betrag = _betrag_wert(rest.pop().text)
+            if (len(rest) >= 2 and _OCR_DATUM.match(rest[0].text) and _OCR_DATUM.match(rest[1].text)
+                    and rest[1].links < spalten["info"]):
+                buchung = _datum(rest[0].text)
+                if buchung is None or betrag is None:
+                    aktuell = None
+                    continue
+                aktuell = {"buchung": buchung, "betrag": betrag, "zweck": [], "partner": []}
+                bloecke.append(aktuell)
+                rest = rest[2:]
+            elif aktuell is None:
+                continue
+            # Wörter rechts einer deutlichen Lücke ab der Empfängerspalte → Empfänger
+            zweck, partner = [], []
+            for i, w in enumerate(rest):
+                luecke = w.links - rest[i - 1].rechts if i else 1.0
+                if partner or (w.links >= spalten["partner"] - 0.01 and luecke > 0.015):
+                    partner.append(w.text)
+                else:
+                    zweck.append(w.text)
+            if zweck:
+                aktuell["zweck"].append(" ".join(zweck))
+            if partner:
+                aktuell["partner"].append(" ".join(partner))
+
+    for b in bloecke:
+        empfaenger_zeilen = []
+        for z in b["partner"]:
+            if _UC_IBAN.match(z.replace(" ", "")) or _UC_BIC.match(z):
+                break
+            empfaenger_zeilen.append(z)
+        erg.umsaetze.append(PdfUmsatz(
+            auszug_nr=auszug_nr,
+            auszugsdatum=auszugsdatum or b["buchung"],
+            buchungstag=b["buchung"],
+            verwendungszweck=" ".join(b["zweck"])[:500],
+            empfaenger=" ".join(empfaenger_zeilen)[:255],
+            betrag=b["betrag"],
+        ))
+    if erg.umsaetze:
+        _salden_pruefen(volltext, erg)
+    return erg
+
+
+def _salden_pruefen(text: str, erg: PdfErgebnis) -> None:
+    """Gegen OCR-Lesefehler: Umsatzsumme muss der Saldoveränderung entsprechen."""
+    werte = {}
+    for name, muster in _SALDO_MUSTER.items():
+        m = muster.search(text)
+        if m:
+            werte[name] = _betrag_wert(m.group(1))
+    summe = sum((u.betrag for u in erg.umsaetze), Decimal(0))
+    if werte.get("anfang") is not None and werte.get("ende") is not None:
+        soll = werte["ende"] - werte["anfang"]
+        if soll == summe:
+            erg.hinweise.append(
+                f"Prüfsumme stimmt: {len(erg.umsaetze)} Umsätze ergeben die Saldoveränderung "
+                f"von {_eur(werte['anfang'])} auf {_eur(werte['ende'])} €."
+            )
+        else:
+            erg.warnungen.append(
+                f"Prüfsumme weicht ab: Umsätze ergeben {_eur(summe)} €, laut Anfangs-/Endsaldo "
+                f"wären es {_eur(soll)} € – mögliche Lesefehler der Texterkennung, bitte "
+                "Beträge mit dem Auszug abgleichen."
+            )
+    else:
+        erg.warnungen.append(
+            "Anfangs-/Endsaldo nicht erkannt – die per Texterkennung gelesenen Beträge "
+            "bitte mit dem Auszug abgleichen."
+        )
+
+
+def _eur(wert: Decimal) -> str:
+    return f"{wert:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+# ------------------------------- UC-eBanking-Postenliste (Sammelüberweisung)
+
+_IBAN_LAENGEN = {
+    "AT": 20, "BE": 16, "BG": 22, "CH": 21, "CY": 28, "CZ": 24, "DE": 22, "DK": 18,
+    "EE": 20, "ES": 24, "FI": 18, "FR": 27, "GB": 22, "GR": 27, "HR": 21, "HU": 28,
+    "IE": 22, "IS": 26, "IT": 27, "LI": 21, "LT": 20, "LU": 20, "LV": 21, "MC": 27,
+    "MT": 31, "NL": 18, "NO": 15, "PL": 28, "PT": 25, "RO": 24, "SE": 24, "SI": 19,
+    "SK": 24, "SM": 27,
+}
+_IBAN_ANFANG = re.compile(r"\b([A-Z]{2})(\d{2})")
+_BIC_WORT = re.compile(r"^[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?$")
+
+
+def _iban_gueltig(iban: str) -> bool:
+    umgestellt = iban[4:] + iban[:4]
+    try:
+        return int("".join(str(int(c, 36)) for c in umgestellt)) % 97 == 1
+    except ValueError:
+        return False
+
+
+def _iban_finden(text: str) -> tuple[int, int, str] | None:
+    """Erste gültige IBAN (Prüfziffer) – auch mit Leerzeichen und über einen
+    Zeilenumbruch hinweg geschrieben („DE52 7001 … 8228\\n02“)."""
+    for m in _IBAN_ANFANG.finditer(text):
+        laenge = _IBAN_LAENGEN.get(m.group(1))
+        if not laenge:
+            continue
+        zeichen = [m.group(1), m.group(2)]
+        i = m.end()
+        anzahl = 4
+        while anzahl < laenge and i < len(text):
+            c = text[i]
+            if c in " \n":
+                i += 1
+            elif c.isascii() and (c.isdigit() or c.isupper()):
+                zeichen.append(c)
+                anzahl += 1
+                i += 1
+            else:
+                break
+        iban = "".join(zeichen)
+        if anzahl == laenge and _iban_gueltig(iban):
+            return m.start(), i, iban
+    return None
+
+
+@dataclass
+class SammelPosten:
+    empfaenger: str
+    iban: str
+    verwendungszweck: str
+    betrag: Decimal
+
+
+@dataclass
+class Sammelauftrag:
+    auftragsnummer: str
+    ausfuehrung: date | None
+    posten: list[SammelPosten]
+    gesamt: Decimal | None
+    anzahl: int | None
+    dateiname: str = ""
+
+
+_PL_KOPF = re.compile(r"Verwendungszweck\s+Betrag\s+Währung")
+_PL_ENDE = re.compile(r"Gesamtbetrag|Seite \d+ von")
+_PL_BETRAG = re.compile(r"(?P<betrag>\d{1,3}(?:\.\d{3})*,\d{2}) (?P<waehrung>[A-Z]{3})[ \t]*$", re.M)
+_PL_SUMME = re.compile(r"Posten\s*:\s*(\d+)\s+(\d{1,3}(?:\.\d{3})*,\d{2})")
+
+
+def ist_postenliste(text: str) -> bool:
+    return "Postenliste" in text and "SEPA Zahlung" in text
+
+
+def parse_postenliste(seiten: list[str], dateiname: str = "") -> tuple[Sammelauftrag | None, list[str]]:
+    """UC-eBanking-Postenliste einer SEPA-Sammelüberweisung auswerten.
+
+    Erste Seite(n) = Liste; folgende Belegseiten (Rechnungen, Mails, Scans)
+    werden ignoriert."""
+    warnungen: list[str] = []
+    liste_seiten = []
+    for text in seiten:
+        if not _PL_KOPF.search(text):
+            if liste_seiten:
+                break
+            continue
+        liste_seiten.append(text)
+        if "Gesamtbetrag" in text:
+            break
+    if not liste_seiten:
+        return None, [f"{dateiname}: Postenliste ohne Detailtabelle – übersprungen."]
+    kopf = liste_seiten[0]
+    m = re.search(r"Auftragsnummer\s+(\S+)", kopf)
+    nummer = m.group(1) if m else dateiname
+    m = re.search(r"Ausführungsdatum\s+(\d{2}\.\d{2}\.\d{4})", kopf)
+    ausfuehrung = _datum(m.group(1)) if m else None
+    gesamt = anzahl = None
+    m = _PL_SUMME.search("\n".join(liste_seiten))
+    if m:
+        anzahl, gesamt = int(m.group(1)), _betrag_wert(m.group(2))
+
+    posten: list[SammelPosten] = []
+    for text in liste_seiten:
+        start = _PL_KOPF.search(text).end()
+        ende = _PL_ENDE.search(text, start)
+        tabelle = text[start: ende.start() if ende else len(text)]
+        position = 0
+        for mb in _PL_BETRAG.finditer(tabelle):
+            stueck = tabelle[position: mb.start()]
+            position = mb.end()
+            fund = _iban_finden(stueck)
+            if fund is None:
+                warnungen.append(f"Sammelauftrag {nummer}: Posten ohne erkennbare IBAN "
+                                 f"({' '.join(stueck.split())[:60]} …) – übersprungen.")
+                continue
+            vor = stueck[: fund[0]].split()
+            if vor and _BIC_WORT.match(vor[-1]):
+                vor = vor[:-1]          # BIC-Spalte steht zwischen Empfänger und IBAN
+            posten.append(SammelPosten(
+                empfaenger=" ".join(vor)[:255],
+                iban=fund[2],
+                verwendungszweck=" ".join(stueck[fund[1]:].split())[:500],
+                betrag=_betrag_wert(mb.group("betrag")),
+            ))
+
+    summe = sum((p.betrag for p in posten), Decimal(0))
+    if gesamt is not None and (summe != gesamt or anzahl != len(posten)):
+        warnungen.append(
+            f"Sammelauftrag {nummer}: {len(posten)} Posten über {_eur(summe)} € erkannt, laut "
+            f"Liste {anzahl} Posten über {_eur(gesamt)} € – bitte prüfen."
+        )
+    return Sammelauftrag(nummer, ausfuehrung, posten, gesamt, anzahl, dateiname), warnungen
+
+
+# ----------------------------------------------------------------- ZIP-Paket
+
+ZIP_MAX_DATEIEN = 100
+ZIP_MAX_GROESSE = 200 * 1024 * 1024     # entpackt, gegen ZIP-Bomben
+_POSTEN_ANZAHL = re.compile(r"POSTEN\s+(\d+)")
+
+
+def parse_zip(daten: bytes) -> PdfErgebnis:
+    erg = PdfErgebnis()
+    try:
+        archiv = zipfile.ZipFile(BytesIO(daten))
+        eintraege = [
+            e for e in archiv.infolist()
+            if not e.is_dir() and not e.filename.startswith("__MACOSX/")
+            and not PurePosixPath(e.filename).name.startswith(".")
+        ]
+    except zipfile.BadZipFile as e:
+        erg.warnungen.append(f"ZIP-Datei nicht lesbar: {e}")
+        return erg
+    if len(eintraege) > ZIP_MAX_DATEIEN or sum(e.file_size for e in eintraege) > ZIP_MAX_GROESSE:
+        erg.warnungen.append("ZIP-Datei zu groß (max. 100 Dateien bzw. 200 MB entpackt).")
+        return erg
+
+    auszuege: list[tuple[str, PdfErgebnis]] = []
+    auftraege: list[Sammelauftrag] = []
+    uebersprungen: list[str] = []
+    for eintrag in sorted(eintraege, key=lambda e: e.filename):
+        name = PurePosixPath(eintrag.filename).name
+        inhalt = archiv.read(eintrag)
+        if not inhalt.startswith(b"%PDF"):
+            uebersprungen.append(name)
+            continue
+        # Belege können sehr umfangreich sein: Text seitenweise nur so weit
+        # lesen, wie es für die Einordnung nötig ist
+        try:
+            leser = _pdf_leser(inhalt)
+            seiten = [leser.pages[0].extract_text() or ""] if leser.pages else [""]
+        except Exception as e:
+            erg.warnungen.append(f"{name}: PDF nicht lesbar ({e}).")
+            continue
+        if ist_postenliste(seiten[0]):
+            for seite in leser.pages[1:]:
+                if "Gesamtbetrag" in seiten[-1]:
+                    break
+                seiten.append(seite.extract_text() or "")
+            auftrag, warn = parse_postenliste(seiten, name)
+            erg.warnungen.extend(warn)
+            if auftrag is not None:
+                auftraege.append(auftrag)
+        elif _ohne_textebene(seiten):
+            teil = _auszug_per_ocr(inhalt)
+            if teil.umsaetze:
+                auszuege.append((name, teil))
+            elif not ocr_verfuegbar():
+                erg.warnungen.extend(f"{name}: {w}" for w in teil.warnungen)
+            else:
+                uebersprungen.append(name)
+        elif re.search(r"saldo|auszug", seiten[0], re.I):
+            seiten += [s.extract_text() or "" for s in leser.pages[1:]]
+            teil = parse_text("\n".join(seiten))
+            if teil.umsaetze:
+                auszuege.append((name, teil))
+            else:
+                uebersprungen.append(name)
+        else:
+            uebersprungen.append(name)   # Rechnung o. ä.
+
+    for name, teil in auszuege:
+        erg.umsaetze.extend(teil.umsaetze)
+        erg.warnungen.extend(f"{name}: {w}" for w in teil.warnungen)
+        erg.hinweise.extend(f"{name}: {h}" for h in teil.hinweise)
+    _sammelauftraege_aufloesen(erg, auftraege, mit_auszug=bool(auszuege))
+    if uebersprungen:
+        erg.hinweise.append(
+            "Nicht als Kontoauszug oder Postenliste erkannt (z. B. Belege) und daher "
+            "nicht ausgewertet: " + ", ".join(uebersprungen)
+        )
+    if not erg.umsaetze and not erg.warnungen:
+        erg.warnungen.append("Im ZIP wurde weder ein Kontoauszug noch eine Postenliste erkannt.")
+    return erg
+
+
+def _sammelauftraege_aufloesen(erg: PdfErgebnis, auftraege: list[Sammelauftrag],
+                               mit_auszug: bool) -> None:
+    """Auszugszeilen von Sammelüberweisungen durch ihre Einzelposten ersetzen.
+
+    Zuordnung über den Gesamtbetrag (exakt), die Postenanzahl („POSTEN n“ im
+    Buchungstext, falls vorhanden) und die Nähe zum Ausführungsdatum."""
+    aufgeloest = 0
+    for auftrag in auftraege:
+        if not auftrag.posten:
+            continue
+        gesamt = auftrag.gesamt if auftrag.gesamt is not None else sum(
+            (p.betrag for p in auftrag.posten), Decimal(0))
+        kandidaten = []
+        for idx, u in enumerate(erg.umsaetze):
+            if u.sammelauftrag or u.betrag != -gesamt:
+                continue
+            if auftrag.ausfuehrung and not (
+                auftrag.ausfuehrung - timedelta(days=3) <= u.buchungstag
+                <= auftrag.ausfuehrung + timedelta(days=10)
+            ):
+                continue
+            m = _POSTEN_ANZAHL.search(u.verwendungszweck)
+            if m and int(m.group(1)) != len(auftrag.posten):
+                continue
+            kandidaten.append((0 if m else 1, abs((u.buchungstag - (auftrag.ausfuehrung or u.buchungstag)).days), idx))
+        if kandidaten:
+            _, _, idx = min(kandidaten)
+            zeile = erg.umsaetze[idx]
+            erg.umsaetze[idx: idx + 1] = [
+                PdfUmsatz(
+                    auszug_nr=zeile.auszug_nr,
+                    auszugsdatum=zeile.auszugsdatum,
+                    buchungstag=zeile.buchungstag,
+                    verwendungszweck=p.verwendungszweck,
+                    empfaenger=p.empfaenger,
+                    betrag=-p.betrag,
+                    sammelauftrag=auftrag.auftragsnummer,
+                    ursprung=(zeile.empfaenger, zeile.verwendungszweck),
+                )
+                for p in auftrag.posten
+            ]
+            aufgeloest += 1
+        elif mit_auszug:
+            erg.warnungen.append(
+                f"Sammelauftrag {auftrag.auftragsnummer} ({len(auftrag.posten)} Posten, "
+                f"{_eur(gesamt)} €) steht nicht im Kontoauszug – nicht übernommen."
+            )
+        elif auftrag.ausfuehrung:
+            # ZIP ohne (lesbaren) Auszug: Einzelposten zum Ausführungsdatum
+            erg.umsaetze.extend(
+                PdfUmsatz(
+                    auszug_nr="",
+                    auszugsdatum=auftrag.ausfuehrung,
+                    buchungstag=auftrag.ausfuehrung,
+                    verwendungszweck=p.verwendungszweck,
+                    empfaenger=p.empfaenger,
+                    betrag=-p.betrag,
+                    sammelauftrag=auftrag.auftragsnummer,
+                )
+                for p in auftrag.posten
+            )
+            aufgeloest += 1
+    if aufgeloest:
+        anzahl = sum(1 for u in erg.umsaetze if u.sammelauftrag)
+        erg.hinweise.append(
+            f"{aufgeloest} Sammelüberweisung(en) aus den Postenlisten in {anzahl} "
+            "Einzelzahlungen aufgelöst."
+        )
+    if auftraege and not mit_auszug and aufgeloest:
+        erg.warnungen.append(
+            "Kein lesbarer Kontoauszug im ZIP – die Einzelzahlungen wurden mit dem "
+            "Ausführungsdatum der Postenlisten übernommen (Bankbuchung ggf. einen Tag später)."
+        )

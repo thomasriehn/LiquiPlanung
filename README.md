@@ -37,6 +37,11 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   grünen Vermerk einzeln aufhebbar, ganze PDFs gesammelt über den Import.
   Bei sich überschneidenden Auszugszeiträumen werden bereits verbuchte
   Umsätze ausgegraut und sind nicht erneut verbuchbar (serverseitig gesperrt).
+  PDFs ohne Textebene (Scan bzw. „Als PDF drucken“) werden per Texterkennung
+  (tesseract) gelesen und gegen Anfangs-/Endsaldo geprüft. **ZIP-Pakete** aus
+  Kontoauszug und UC-eBanking-Postenlisten lösen Sammelüberweisungen in die
+  Einzelzahlungen je Empfänger auf, die sich dann einzeln Konten zuordnen
+  lassen; beigefügte Belege werden übergangen.
 - **Bankimport (MT940/CAMT.053)**: Kontoauszüge liefern tagesaktuelle Bestandsanker
   (Endsaldo je Auszug, IBAN-Zuordnung) und Bankumsätze zur Referenz – unabhängig vom
   Buchhaltungsexport, ohne Doppelzählung im Ist.
@@ -123,6 +128,11 @@ pip install -r requirements-dev.txt
 DATABASE_URL=sqlite:///dev.db uvicorn app.main:app --reload
 pytest
 ```
+
+Für die Texterkennung von Kontoauszügen ohne Textebene wird lokal
+`tesseract-ocr` mit deutschen Sprachdaten benötigt (`apt install tesseract-ocr
+tesseract-ocr-deu`; im Docker-Image enthalten) – ohne tesseract laufen alle
+übrigen Funktionen, die OCR-Tests werden übersprungen.
 
 Ohne `DATABASE_URL` erwartet die Anwendung PostgreSQL unter
 `postgresql+psycopg://liqui:liqui@localhost:5432/liqui`. API-Dokumentation: `/api/docs`.

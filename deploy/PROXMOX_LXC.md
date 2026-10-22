@@ -64,6 +64,17 @@ liqui.example.de {
 }
 ```
 
+Bei **nginx** das Upload-Limit anheben – ZIP-Pakete mit Kontoauszug und
+Belegen sind schnell mehrere MB groß (Standard: 1 MB):
+
+```
+client_max_body_size 50m;
+```
+
+Die Texterkennung für Kontoauszüge ohne Textebene (tesseract inkl. deutscher
+Sprachdaten) ist im Docker-Image enthalten. Wer die Anwendung ohne Docker
+betreibt: `apt install tesseract-ocr tesseract-ocr-deu`.
+
 ## 5. Datensicherung
 
 Tägliche Sicherung per Cron im LXC (zusätzlich zur Proxmox-Container-Sicherung):

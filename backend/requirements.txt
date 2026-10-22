@@ -12,3 +12,5 @@ reportlab>=4.1
 alembic>=1.13
 segno>=1.6
 pypdf>=4.2
+pypdfium2>=4.30
+pillow>=10.0
