@@ -11,6 +11,7 @@ from app.services.pdf_kontoauszug import (
     OcrWort,
     _iban_finden,
     _parse_uc_ocr,
+    _sepa_zweck,
     ocr_verfuegbar,
     parse_datei,
     parse_pdf,
@@ -40,14 +41,15 @@ IBAN_FACTORING = _iban("79550000", "8206450")
 IBAN_KUNDE = _iban("37040044", "532013000")
 
 
-def _postenliste(nummer: str, posten_text: str, anzahl: int, gesamt: str) -> str:
+def _postenliste(nummer: str, posten_text: str, anzahl: int, gesamt: str,
+                 ausfuehrung: str = "09.10.2026") -> str:
     return f"""UC eBanking prime › SEPA Zahlungen (Credit)
 Postenliste - SEPA Zahlung (CCT)
 Auftrag: {nummer}
 Allgemeine Informationen
 Details Auftragsnummer {nummer} Beschreibung
 Erstellungsdatum 09.10.2026 13:57:18 BIC HYVEDEMMXXX
-Auftraggeber Muster, Max Ausführungsdatum 09.10.2026
+Auftraggeber Muster, Max Ausführungsdatum {ausfuehrung}
 IBAN {_umbrochen(IBAN_EIGEN)}
 Währung EUR
 Kontoname Muster Technik GmbH logische Datei(en) 1
@@ -253,57 +255,68 @@ def test_ocr_layout_spalten_und_pruefsumme():
 
 # ------------------------------------------- echte Texterkennung (tesseract)
 
-def _auszug_als_bild_pdf() -> bytes:
-    """UC-Auszug zeichnen, rendern und nur als Bild wieder einbetten – wie
-    ein Scan bzw. „Microsoft Print to PDF“ ohne Textebene."""
+def _bild_pdf(seiten: list[list[tuple]]) -> bytes:
+    """Auszugsseiten im UC-Spaltenraster zeichnen, rendern und nur als Bild
+    wieder einbetten – wie ein Scan bzw. „Microsoft Print to PDF“ ohne
+    Textebene. Zeile = ((spalte, text), …[, "betrag"]); None = Leerzeile."""
     import pypdfium2 as pdfium
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.utils import ImageReader
     from reportlab.pdfgen import canvas
 
     breite, hoehe = A4
-    puffer = BytesIO()
-    c = canvas.Canvas(puffer, pagesize=A4)
-    c.setFont("Helvetica", 10)
     x = {"datum": .108 * breite, "valuta": .194 * breite, "info": .281 * breite,
          "partner": .528 * breite, "rechts": .942 * breite}
-    y = hoehe - 60
-
-    def zeile(*teile, betrag=None):
-        nonlocal y
-        for spalte, text in teile:
-            c.drawString(x[spalte], y, text)
-        if betrag:
-            c.drawRightString(x["rechts"], y, betrag)
-        y -= 15
-
-    zeile(("datum", "UC eBanking prime CAMT Auszüge"))
-    zeile(("datum", "Auszug Nr. 7"))
-    zeile(("info", "Anfangssaldo 10.000,00 EUR"))
-    zeile(("info", "Endsaldo 6.248,36 EUR"))
-    zeile(("info", "Kontoauszugsdatum 10.10.2026"))
-    y -= 10
-    zeile(("datum", "Datum"), ("valuta", "Valuta"), ("info", "Buchungsinformationen"),
-          betrag="Umsatz EUR")
-    zeile(("datum", "10.10.2026"), ("valuta", "10.10.2026"), ("info", "SEPA-Ueberweisungsdatei"),
-          betrag="-1.451,64")
-    zeile(("info", "POSTEN 3 DATEI"))
-    zeile(("datum", "10.10.2026"), ("valuta", "10.10.2026"), ("info", "Ueberweisung"),
-          ("partner", "Factoring Süd GmbH"), betrag="-2.300,00")
-    zeile(("info", "Ablöse Eigentumsvorbehalt"), ("partner", IBAN_FACTORING))
-    zeile(("partner", "BYLADEM1ASA"))
-    y -= 10
-    zeile(("datum", "Endsaldo (in EUR)"), betrag="6.248,36")
-    c.showPage()
+    puffer = BytesIO()
+    c = canvas.Canvas(puffer, pagesize=A4)
+    for seite in seiten:
+        c.setFont("Helvetica", 10)
+        y = hoehe - 60
+        for zeile in seite:
+            if zeile is not None:
+                for teil in zeile:
+                    if isinstance(teil, tuple):
+                        c.drawString(x[teil[0]], y, teil[1])
+                    else:
+                        c.drawRightString(x["rechts"], y, teil)
+            y -= 15
+        c.showPage()
     c.save()
 
-    bild = pdfium.PdfDocument(puffer.getvalue())[0].render(scale=200 / 72).to_pil()
+    vorlage = pdfium.PdfDocument(puffer.getvalue())
     ausgabe = BytesIO()
     c = canvas.Canvas(ausgabe, pagesize=A4)
-    c.drawImage(ImageReader(bild), 0, 0, width=breite, height=hoehe)
-    c.showPage()
+    for nr in range(len(vorlage)):
+        bild = vorlage[nr].render(scale=200 / 72).to_pil()
+        c.drawImage(ImageReader(bild), 0, 0, width=breite, height=hoehe)
+        c.showPage()
     c.save()
     return ausgabe.getvalue()
+
+
+_KOPF = (("datum", "Datum"), ("valuta", "Valuta"), ("info", "Buchungsinformationen"),
+         "Umsatz EUR")
+
+
+def _auszug_als_bild_pdf() -> bytes:
+    return _bild_pdf([[
+        (("datum", "UC eBanking prime CAMT Auszüge"),),
+        (("datum", "Auszug Nr. 7"),),
+        (("info", "Anfangssaldo 10.000,00 EUR"),),
+        (("info", "Endsaldo 6.248,36 EUR"),),
+        (("info", "Kontoauszugsdatum 10.10.2026"),),
+        None,
+        _KOPF,
+        (("datum", "10.10.2026"), ("valuta", "10.10.2026"), ("info", "SEPA-Ueberweisungsdatei"),
+         "-1.451,64"),
+        (("info", "POSTEN 3 DATEI"),),
+        (("datum", "10.10.2026"), ("valuta", "10.10.2026"), ("info", "Ueberweisung"),
+         ("partner", "Factoring Süd GmbH"), "-2.300,00"),
+        (("info", "Ablöse Eigentumsvorbehalt"), ("partner", IBAN_FACTORING)),
+        (("partner", "BYLADEM1ASA"),),
+        None,
+        (("datum", "Endsaldo (in EUR)"), "6.248,36"),
+    ]])
 
 
 ocr_noetig = pytest.mark.skipif(not ocr_verfuegbar(), reason="tesseract nicht installiert")
@@ -400,3 +413,181 @@ def test_zip_sammelzeile_schon_als_ganzes_verbucht(client):
     ).json()
     gesperrt = {u["sammelauftrag"]: u["bereits_verbucht"] for u in erg["umsaetze"]}
     assert gesperrt == {"PRM01A": True, "PRM01B": False, None: False}
+
+
+# ------------------- Sammelauftrag von der Bank einzeln gebucht, mehrseitig
+
+LISTE_C = _postenliste("PRM02C", f"""Bürobedarf Schmidt {_umbrochen(IBAN_BUERO)}
+Re 4711 79,09 EUR
+Spedition Nord GmbH & Co.
+KG
+{_umbrochen(IBAN_SPEDITION)}
+Re Nr. A-2 500,00 EUR
+Spedition Nord GmbH & Co.
+KG
+{_umbrochen(IBAN_SPEDITION)}
+Re Nr. A-1 500,00 EUR""", 3, "1.079,09", ausfuehrung="10.10.2026")
+
+# jeder Posten als eigene Auszugszeile (SEPA-Felder, Empfänger mit „KTO:“)
+EINZEL_AUSZUG = [
+    "UC eBanking prime › Kontoauszüge",
+    "Muster Technik GmbH",
+    "Auszug Nr. 8",
+    "Kontoauszugsdatum 10.10.2026",
+    "Buchung Valuta Buchungsinformationen",
+    "Umsatz EUR",
+    "10.10.2026 10.10.2026 SEPA-AUFTRAG", "EREF+NOTPROVIDED", "SVWZ+RE 4711",
+    "BUEROBEDARF SCHMIDT", IBAN_BUERO, "-79,09",
+    "10.10.2026 10.10.2026 SEPA-AUFTRAG", "EREF+NOTPROVIDED", "SVWZ+RE NR. A-1",
+    "SPEDITION NORD", "KTO: " + IBAN_SPEDITION, "-500,00",
+    "10.10.2026 10.10.2026 SEPA-AUFTRAG", "EREF+NOTPROVIDED", "SVWZ+RE NR. A-2",
+    "SPEDITION NORD", "KTO: " + IBAN_SPEDITION, "-500,00",
+    "10.10.2026 10.10.2026 GUTSCHRIFT", "RE 2027-1", "Kunde AG", IBAN_KUNDE, "250,00",
+    "Seite 1 von 1",
+]
+
+
+def _paket_c(auszug: bytes) -> bytes:
+    return _zip({"ZA 1.079,09.pdf": _pdf_aus_text(LISTE_C), "10.10.2026 #8.pdf": auszug})
+
+
+def test_sepa_zweck_ohne_referenzfelder():
+    zeilen = ["SEPA-AUFTRAG", "EREF+NOTPROVIDED", "KREF+AT30414012026093134115", "1",
+              "SVWZ+PIN SERVICE STATION NR", ". 5867"]
+    # 27-Zeichen-Zeile wurde mitten im Text umgebrochen → ohne Leerzeichen anfügen
+    assert _sepa_zweck(zeilen) == "SEPA-AUFTRAG PIN SERVICE STATION NR. 5867"
+    assert _sepa_zweck(["SEPA-AUFTRAG", "SVWZ+RE NR. 640459 LEIST. 2", "3.11.25"]) == \
+        "SEPA-AUFTRAG RE NR. 640459 LEIST. 23.11.25"
+    # OCR liest „SVWZ+“ gelegentlich als „SVWZH+“
+    assert _sepa_zweck(["SEPA-AUFTRAG", "SVWZH+RE NR. 1-66138"]) == "SEPA-AUFTRAG RE NR. 1-66138"
+    assert _sepa_zweck(["EINZELÜBERWEISUNG", "Rechnung 4711"]) is None
+
+
+def test_zip_sammelauftrag_einzeln_gebucht():
+    erg = parse_zip(_paket_c(_beispiel_pdf(EINZEL_AUSZUG)))
+    assert not erg.warnungen, erg.warnungen
+    assert [(u.empfaenger, u.verwendungszweck, u.betrag, u.sammelauftrag)
+            for u in erg.umsaetze] == [
+        ("Bürobedarf Schmidt", "Re 4711", Decimal("-79.09"), "PRM02C"),
+        # gleicher Betrag und Empfänger: der Verwendungszweck entscheidet
+        ("Spedition Nord GmbH & Co. KG", "Re Nr. A-1", Decimal("-500.00"), "PRM02C"),
+        ("Spedition Nord GmbH & Co. KG", "Re Nr. A-2", Decimal("-500.00"), "PRM02C"),
+        ("Kunde AG", "GUTSCHRIFT RE 2027-1", Decimal("250.00"), ""),
+    ]
+    # ursprüngliche Auszugszeile bleibt für die Doppelbuchungs-Sperre bekannt
+    assert erg.umsaetze[1].ursprung == ("SPEDITION NORD", "SEPA-AUFTRAG RE NR. A-1")
+    assert any("einzeln gebucht" in h and "3 Auszugszeilen" in h for h in erg.hinweise)
+
+
+def test_zip_einzeln_gebucht_teilweise():
+    """Fehlt ein Posten im Auszug, zählen nur Treffer mit bestätigter IBAN –
+    reine Betragsgleichheit könnte Zufall sein."""
+    ohne_a1 = EINZEL_AUSZUG[:12] + EINZEL_AUSZUG[18:]      # Block „RE NR. A-1“ fehlt
+    ohne_a1.remove(IBAN_BUERO)                              # Bürobedarf ohne IBAN
+    erg = parse_zip(_paket_c(_beispiel_pdf(ohne_a1)))
+    assert [(u.empfaenger, u.verwendungszweck, u.sammelauftrag) for u in erg.umsaetze] == [
+        ("BUEROBEDARF SCHMIDT", "SEPA-AUFTRAG RE 4711", ""),
+        ("Spedition Nord GmbH & Co. KG", "Re Nr. A-2", "PRM02C"),
+        ("Kunde AG", "GUTSCHRIFT RE 2027-1", ""),
+    ]
+    assert any("PRM02C" in w and "2 Posten nicht im Kontoauszug" in w for w in erg.warnungen)
+
+
+def _ocr_db_seiten() -> list[list[list[OcrWort]]]:
+    kopf = [_w("Buchung", .108, .14), _w("Valuta", .194, .22),
+            _w("Buchungsinformationen", .281, .377), _w("Umsatz", .894, .924),
+            _w("EUR", .927, .942)]
+    fuss = [_w("UC", .108, .117), _w("eBanking", .121, .154), _w("prime", .158, .18),
+            _w("Gedruckt", .277, .31), _w("durch", .313, .333), _w("Benutzer", .337, .37)]
+    seite1 = [
+        [_w("Auszug", .108, .152), _w("Nr.", .158, .174), _w("8", .180, .19)],
+        [_w("Anfangssaldo", .607, .688), _w("5.000,00", .754, .831), _w("EUR", .84, .867)],
+        [_w("Endsaldo", .634, .688), _w("4.920,91", .754, .831), _w("EUR", .84, .867)],
+        kopf,
+        [_w("10.10.2026", .109, .174), _w("10.10.2026", .195, .26), _w("SEPA-AUFTRAG", .281, .37),
+         _w("JURGEN", .528, .58), _w("SCHOLZ", .587, .63), _w("-79,09", .905, .942)],
+        [_w("EREF+NOTPROVIDED", .282, .4), _w("KTO:", .528, .55),
+         # OCR zerteilt IBANs gelegentlich
+         _w(IBAN_BUERO[:18], .563, .69), _w(IBAN_BUERO[18:], .701, .73)],
+        [_w("KREF+AT30414012026093134115", .282, .48), _w("BANK:", .528, .56),
+         _w("PAGMDEM1XXX", .572, .65)],
+        [_w("1", .282, .29), _w("KREF:", .528, .56), _w("KREF+", .572, .6)],
+        [_w("SVWZ+PIN", .281, .35), _w("SERVICE", .354, .41), _w("STATION", .416, .475),
+         _w("NR", .479, .495), _w("BREF:", .528, .56), _w("2601453021868233", .571, .68)],
+        [_w(".", .281, .284), _w("5867", .29, .32)],
+        fuss,
+    ]
+    seite2 = [
+        [_w("Auszug", .108, .152), _w("Nr.", .158, .174), _w("8", .180, .19),
+         _w("Seite", .89, .91), _w("2", .915, .92), _w("von", .925, .935), _w("2", .937, .942)],
+        kopf,
+        [_w("10.10.2026", .109, .174), _w("10.10.2026", .195, .26),
+         _w("SEPA", .281, .31), _w("GUTSCHRIFT", .315, .39),
+         _w("KUNDE", .528, .57), _w("AG", .575, .59), _w("0,00", .91, .942)],
+        [_w("10.10.2026", .109, .174), _w("10.10.2026", .195, .26), _w("ENTGELT", .281, .34),
+         _w("-0,00", .91, .942)],
+        [_w("Endsaldo", .108, .144), _w("(in", .147, .156), _w("EUR)", .16, .178),
+         _w("4.920,91", .871, .942)],
+        fuss,
+    ]
+    return [seite1, seite2]
+
+
+def test_ocr_mehrseitig_mit_kto_feldern():
+    erg = _parse_uc_ocr(_ocr_db_seiten())
+    erste = erg.umsaetze[0]
+    assert erste.empfaenger == "JURGEN SCHOLZ"           # ohne KTO:/BANK:/BREF:-Zeilen
+    assert erste.iban == IBAN_BUERO                       # trotz zerteilter IBAN
+    assert erste.verwendungszweck == "SEPA-AUFTRAG PIN SERVICE STATION NR. 5867"
+    # Seitenfuß beendet den Block, Seite 2 setzt mit eigener Kopfzeile fort
+    assert [u.empfaenger for u in erg.umsaetze] == ["JURGEN SCHOLZ", "KUNDE AG", ""]
+    assert any("Prüfsumme stimmt" in h for h in erg.hinweise), erg.warnungen
+
+
+def _db_auszug_zweiseitig() -> bytes:
+    def block(art, name, betrag, zweck, iban):
+        return [
+            (("datum", "10.10.2026"), ("valuta", "10.10.2026"), ("info", art),
+             ("partner", name), betrag),
+            (("info", "EREF+NOTPROVIDED"), ("partner", "KTO: " + iban)),
+            (("info", "SVWZ+" + zweck), ("partner", "BANK: COBADEFFXXX")),
+            None,
+        ]
+
+    fuss = (("datum", "UC eBanking prime   Gedruckt durch Benutzer"),)
+    return _bild_pdf([
+        [
+            (("datum", "UC eBanking prime Kontoauszüge"),),
+            (("datum", "Auszug Nr. 8"),),
+            (("info", "Anfangssaldo 5.000,00 EUR"),),
+            (("info", "Endsaldo 4.170,91 EUR"),),
+            (("info", "Kontoauszugsdatum 10.10.2026"),),
+            None,
+            _KOPF,
+            *block("SEPA GUTSCHRIFT", "KUNDE AG", "250,00", "RE 2026-117", IBAN_KUNDE),
+            *block("SEPA-AUFTRAG", "BUEROBEDARF SCHMIDT", "-79,09", "RE 4711", IBAN_BUERO),
+            fuss,
+        ],
+        [
+            (("datum", "Auszug Nr. 8"),),
+            None,
+            _KOPF,
+            *block("SEPA-AUFTRAG", "SPEDITION NORD", "-500,00", "RE NR. A-1", IBAN_SPEDITION),
+            *block("SEPA-AUFTRAG", "SPEDITION NORD", "-500,00", "RE NR. A-2", IBAN_SPEDITION),
+            (("datum", "Endsaldo (in EUR)"), "4.170,91"),
+            fuss,
+        ],
+    ])
+
+
+@ocr_noetig
+def test_ocr_zip_mehrseitig_einzeln_gebucht():
+    erg = parse_zip(_paket_c(_db_auszug_zweiseitig()))
+    assert not erg.warnungen, erg.warnungen
+    assert [(u.empfaenger, u.verwendungszweck, u.betrag) for u in erg.umsaetze] == [
+        ("KUNDE AG", "SEPA GUTSCHRIFT RE 2026-117", Decimal("250.00")),
+        ("Bürobedarf Schmidt", "Re 4711", Decimal("-79.09")),
+        ("Spedition Nord GmbH & Co. KG", "Re Nr. A-1", Decimal("-500.00")),
+        ("Spedition Nord GmbH & Co. KG", "Re Nr. A-2", Decimal("-500.00")),
+    ]
+    assert any("Prüfsumme stimmt" in h for h in erg.hinweise)

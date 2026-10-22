@@ -24,14 +24,18 @@ die Wortpositionen getrennt und die Umsätze gegen Anfangs-/Endsaldo geprüft.
 **ZIP-Pakete** bündeln einen Kontoauszug mit den UC-eBanking-Postenlisten
 der Sammelüberweisungen („SEPA Zahlung (CCT)“, mit angehängten Belegen): Die
 Auszugszeile einer Sammelüberweisung wird in die Einzelzahlungen je Empfänger
-aufgelöst, damit jede für sich einem Konto zugeordnet werden kann.
+aufgelöst, damit jede für sich einem Konto zugeordnet werden kann. Bucht die
+Bank die Posten bereits einzeln, werden die Auszugszeilen den Posten
+zugeordnet und mit deren Empfänger/Verwendungszweck ergänzt.
 """
 
+import os
 import re
 import shutil
 import subprocess
 import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -51,6 +55,7 @@ class PdfUmsatz:
     # (Empfänger, Zweck) der ursprünglichen Auszugszeile
     sammelauftrag: str = ""
     ursprung: tuple[str, str] | None = None
+    iban: str = ""          # Gegenkonto laut Auszug (für den Postenlisten-Abgleich)
 
 
 @dataclass
@@ -276,6 +281,12 @@ _UC_AUSZUG_NR = re.compile(r"Auszug Nr\.\s*(\d+)")
 _UC_AUSZUGSDATUM = re.compile(r"Kontoauszugsdatum\s*(\d{2}\.\d{2}\.\d{4})")
 
 
+def _uc_iban(zeile: str) -> str:
+    """IBAN einer Zeile „DE55…“ bzw. „KTO: DE55…“, sonst leer."""
+    wert = re.sub(r"^(KTO|IBAN)\s*:\s*", "", zeile).replace(" ", "")
+    return wert if _UC_IBAN.match(wert) else ""
+
+
 def _parse_uc_ebanking(text: str) -> PdfErgebnis:
     erg = PdfErgebnis()
     auszug_nr = ""
@@ -308,16 +319,18 @@ def _parse_uc_ebanking(text: str) -> PdfErgebnis:
                 # Empfänger steht vor der IBAN-Zeile; IBAN/BIC gehören nicht
                 # in den Verwendungszweck
                 iban_index = next(
-                    (i for i, z in enumerate(inhalt) if _UC_IBAN.match(z)), None
+                    (i for i, z in enumerate(inhalt) if _uc_iban(z)), None
                 )
                 if iban_index is not None and iban_index > 0:
                     empfaenger = inhalt[iban_index - 1]
                     zweck_zeilen = inhalt[: iban_index - 1]
                 else:
-                    uebrig = [z for z in inhalt if not _UC_IBAN.match(z) and not _UC_BIC.match(z)]
+                    uebrig = [z for z in inhalt if not _uc_iban(z) and not _UC_BIC.match(z)
+                              and not _PARTNER_FELD.match(z)]
                     empfaenger = uebrig[-1] if uebrig else ""
                     zweck_zeilen = uebrig[:-1]
-                zweck = " ".join([aktuell["art"]] + zweck_zeilen).strip()
+                zweck = (_sepa_zweck([aktuell["art"]] + zweck_zeilen)
+                         or " ".join([aktuell["art"]] + zweck_zeilen).strip())
                 erg.umsaetze.append(
                     PdfUmsatz(
                         auszug_nr=auszug_nr,
@@ -326,6 +339,7 @@ def _parse_uc_ebanking(text: str) -> PdfErgebnis:
                         verwendungszweck=zweck[:500],
                         empfaenger=empfaenger[:255],
                         betrag=betrag,
+                        iban=_uc_iban(inhalt[iban_index]) if iban_index is not None else "",
                     )
                 )
             aktuell = None
@@ -430,6 +444,15 @@ def _ocr_sprache() -> str:
 
 
 _PDFIUM_SPERRE = threading.Lock()     # pdfium ist nicht threadsicher
+OCR_PARALLEL = max(1, min(4, os.cpu_count() or 1))
+
+
+def _tesseract_tsv(png: bytes, sprache: str) -> str:
+    return subprocess.run(
+        ["tesseract", "stdin", "stdout", "-l", sprache, "--psm", "6", "tsv"],
+        input=png, capture_output=True, timeout=180,
+        env={**os.environ, "OMP_THREAD_LIMIT": "1"},
+    ).stdout.decode("utf-8", "replace")
 
 
 def _ocr_zeilen(daten: bytes, ab: int = 0, bis: int = OCR_MAX_SEITEN) -> list[list[list[OcrWort]]]:
@@ -447,14 +470,18 @@ def _ocr_zeilen(daten: bytes, ab: int = 0, bis: int = OCR_MAX_SEITEN) -> list[li
             dokument.close()
 
     sprache = _ocr_sprache()
-    seiten = []
+    pngs = []
     for bild in bilder:
         png = BytesIO()
         bild.save(png, "PNG")
-        tsv = subprocess.run(
-            ["tesseract", "stdin", "stdout", "-l", sprache, "--psm", "6", "tsv"],
-            input=png.getvalue(), capture_output=True, timeout=180,
-        ).stdout.decode("utf-8", "replace")
+        pngs.append(png.getvalue())
+    # Seiten parallel erkennen, je Prozess ein Thread: tesseracts eigenes
+    # OpenMP-Threading überbucht sich bei parallelen Prozessen massiv
+    with ThreadPoolExecutor(max_workers=max(1, min(OCR_PARALLEL, len(pngs)))) as pool:
+        tsvs = list(pool.map(lambda png: _tesseract_tsv(png, sprache), pngs))
+
+    seiten = []
+    for bild, tsv in zip(bilder, tsvs):
         breite = bild.size[0] or 1
         zeilen: dict[tuple, list[OcrWort]] = {}
         for roh in tsv.splitlines()[1:]:
@@ -514,6 +541,30 @@ _SALDO_MUSTER = {
     "anfang": re.compile(r"Anfangss?aldo\s+(-?\d{1,3}(?:\.\d{3})*,\d{2})"),
     "ende": re.compile(r"Endsaldo\s+(-?\d{1,3}(?:\.\d{3})*,\d{2})"),
 }
+# Empfängerspalte: nach dem Namen folgen Felder wie „KTO: DE…“, „BANK: …“, „BREF: …“
+_PARTNER_FELD = re.compile(r"^(KTO|IBAN|BANK|BIC|KREF|BREF|EREF|MREF|CRED)\s*:", re.I)
+# SEPA-Felder im Buchungstext; OCR liest „SVWZ+“ gelegentlich als „SVWZH+“
+_SEPA_FELD = re.compile(r"^(EREF|KREF|MREF|CRED|PURP|ABWA|ABWE|SVW[Z2]\w?)\+")
+_SVWZ = re.compile(r"^SVW[Z2]\w?\+")
+_DTA_ZEILE = 27     # Banken brechen Zweckzeilen nach 27 Zeichen mitten im Text um
+
+
+def _sepa_zweck(zeilen: list[str]) -> str | None:
+    """Buchungsart + eigentlicher Verwendungszweck (SVWZ+) ohne Referenz-
+    felder (EREF+, KREF+ …); None, wenn der Text keine SEPA-Felder hat."""
+    if len(zeilen) < 2 or not any(_SVWZ.match(z) for z in zeilen[1:]):
+        return None
+    text, im_zweck, vorige = "", False, ""
+    for z in zeilen[1:]:
+        if _SVWZ.match(z):
+            text, im_zweck = z.split("+", 1)[1], True
+        elif _SEPA_FELD.match(z):
+            if im_zweck:
+                break
+        elif im_zweck:
+            text += ("" if len(vorige) >= _DTA_ZEILE else " ") + z
+        vorige = z
+    return f"{zeilen[0]} {text}".strip()
 
 
 def _parse_uc_ocr(seiten: list[list[list[OcrWort]]]) -> PdfErgebnis:
@@ -578,16 +629,18 @@ def _parse_uc_ocr(seiten: list[list[list[OcrWort]]]) -> PdfErgebnis:
     for b in bloecke:
         empfaenger_zeilen = []
         for z in b["partner"]:
-            if _UC_IBAN.match(z.replace(" ", "")) or _UC_BIC.match(z):
+            if _PARTNER_FELD.match(z) or _UC_IBAN.match(z.replace(" ", "")) or _UC_BIC.match(z):
                 break
             empfaenger_zeilen.append(z)
+        iban = _iban_finden(" ".join(b["partner"]))
         erg.umsaetze.append(PdfUmsatz(
             auszug_nr=auszug_nr,
             auszugsdatum=auszugsdatum or b["buchung"],
             buchungstag=b["buchung"],
-            verwendungszweck=" ".join(b["zweck"])[:500],
+            verwendungszweck=(_sepa_zweck(b["zweck"]) or " ".join(b["zweck"]))[:500],
             empfaenger=" ".join(empfaenger_zeilen)[:255],
             betrag=b["betrag"],
+            iban=iban[2] if iban else "",
         ))
     if erg.umsaetze:
         _salden_pruefen(volltext, erg)
@@ -843,13 +896,63 @@ def parse_zip(daten: bytes) -> PdfErgebnis:
     return erg
 
 
+def _im_zeitfenster(auftrag: Sammelauftrag, u: PdfUmsatz) -> bool:
+    return auftrag.ausfuehrung is None or (
+        auftrag.ausfuehrung - timedelta(days=3) <= u.buchungstag
+        <= auftrag.ausfuehrung + timedelta(days=10)
+    )
+
+
+def _woerter(text: str) -> set[str]:
+    return set(re.findall(r"[A-Z0-9]+", text.upper()))
+
+
+def _einzelbuchungen_abgleichen(erg: PdfErgebnis, auftrag: Sammelauftrag) -> int:
+    """Posten eines Sammelauftrags, die als einzelne Auszugszeilen gebucht
+    sind, über Betrag, Empfänger-IBAN und Verwendungszweck zuordnen; die
+    Zeilen übernehmen Empfänger und Zweck aus der (textbasierten, also
+    verlässlicheren) Postenliste. Gibt die Zahl der Treffer zurück."""
+    treffer: dict[int, tuple[SammelPosten, bool]] = {}
+    for p in auftrag.posten:
+        beste = None
+        for idx, u in enumerate(erg.umsaetze):
+            if (idx in treffer or u.sammelauftrag or u.betrag != -p.betrag
+                    or not _im_zeitfenster(auftrag, u) or (u.iban and u.iban != p.iban)):
+                continue
+            # bei gleichem Betrag und Empfänger (z. B. zwei Rechnungen desselben
+            # Lieferanten) entscheidet die Übereinstimmung im Zweck
+            punkte = len(_woerter(p.verwendungszweck) & _woerter(u.verwendungszweck))
+            if beste is None or punkte > beste[0]:
+                beste = (punkte, idx)
+        if beste is not None:
+            treffer[beste[1]] = (p, erg.umsaetze[beste[1]].iban == p.iban)
+    if len(treffer) < len(auftrag.posten):
+        # unvollständig: Betragsgleichheit allein könnte Zufall sein
+        treffer = {idx: t for idx, t in treffer.items() if t[1]}
+    for idx, (p, _) in treffer.items():
+        zeile = erg.umsaetze[idx]
+        erg.umsaetze[idx] = PdfUmsatz(
+            auszug_nr=zeile.auszug_nr,
+            auszugsdatum=zeile.auszugsdatum,
+            buchungstag=zeile.buchungstag,
+            verwendungszweck=p.verwendungszweck,
+            empfaenger=p.empfaenger,
+            betrag=zeile.betrag,
+            sammelauftrag=auftrag.auftragsnummer,
+            ursprung=(zeile.empfaenger, zeile.verwendungszweck),
+            iban=p.iban,
+        )
+    return len(treffer)
+
+
 def _sammelauftraege_aufloesen(erg: PdfErgebnis, auftraege: list[Sammelauftrag],
                                mit_auszug: bool) -> None:
     """Auszugszeilen von Sammelüberweisungen durch ihre Einzelposten ersetzen.
 
     Zuordnung über den Gesamtbetrag (exakt), die Postenanzahl („POSTEN n“ im
     Buchungstext, falls vorhanden) und die Nähe zum Ausführungsdatum."""
-    aufgeloest = 0
+    aufgeloest = abgeglichene_zeilen = 0
+    abgeglichen: list[str] = []
     for auftrag in auftraege:
         if not auftrag.posten:
             continue
@@ -857,12 +960,7 @@ def _sammelauftraege_aufloesen(erg: PdfErgebnis, auftraege: list[Sammelauftrag],
             (p.betrag for p in auftrag.posten), Decimal(0))
         kandidaten = []
         for idx, u in enumerate(erg.umsaetze):
-            if u.sammelauftrag or u.betrag != -gesamt:
-                continue
-            if auftrag.ausfuehrung and not (
-                auftrag.ausfuehrung - timedelta(days=3) <= u.buchungstag
-                <= auftrag.ausfuehrung + timedelta(days=10)
-            ):
+            if u.sammelauftrag or u.betrag != -gesamt or not _im_zeitfenster(auftrag, u):
                 continue
             m = _POSTEN_ANZAHL.search(u.verwendungszweck)
             if m and int(m.group(1)) != len(auftrag.posten):
@@ -881,15 +979,27 @@ def _sammelauftraege_aufloesen(erg: PdfErgebnis, auftraege: list[Sammelauftrag],
                     betrag=-p.betrag,
                     sammelauftrag=auftrag.auftragsnummer,
                     ursprung=(zeile.empfaenger, zeile.verwendungszweck),
+                    iban=p.iban,
                 )
                 for p in auftrag.posten
             ]
             aufgeloest += 1
         elif mit_auszug:
-            erg.warnungen.append(
-                f"Sammelauftrag {auftrag.auftragsnummer} ({len(auftrag.posten)} Posten, "
-                f"{_eur(gesamt)} €) steht nicht im Kontoauszug – nicht übernommen."
-            )
+            # manche Banken buchen die Posten eines Sammelauftrags einzeln
+            treffer = _einzelbuchungen_abgleichen(erg, auftrag)
+            if treffer:
+                abgeglichen.append(auftrag.auftragsnummer)
+                abgeglichene_zeilen += treffer
+            if treffer < len(auftrag.posten):
+                fehlend = len(auftrag.posten) - treffer
+                erg.warnungen.append(
+                    f"Sammelauftrag {auftrag.auftragsnummer} ({len(auftrag.posten)} Posten, "
+                    f"{_eur(gesamt)} €): " + (
+                        "steht nicht im Kontoauszug – nicht übernommen." if not treffer else
+                        f"{fehlend} Posten nicht im Kontoauszug gefunden (die übrigen "
+                        "wurden den Auszugszeilen zugeordnet)."
+                    )
+                )
         elif auftrag.ausfuehrung:
             # ZIP ohne (lesbaren) Auszug: Einzelposten zum Ausführungsdatum
             erg.umsaetze.extend(
@@ -906,10 +1016,17 @@ def _sammelauftraege_aufloesen(erg: PdfErgebnis, auftraege: list[Sammelauftrag],
             )
             aufgeloest += 1
     if aufgeloest:
-        anzahl = sum(1 for u in erg.umsaetze if u.sammelauftrag)
+        anzahl = sum(1 for u in erg.umsaetze if u.sammelauftrag) - abgeglichene_zeilen
         erg.hinweise.append(
             f"{aufgeloest} Sammelüberweisung(en) aus den Postenlisten in {anzahl} "
             "Einzelzahlungen aufgelöst."
+        )
+    if abgeglichen:
+        erg.hinweise.append(
+            (f"Sammelauftrag {abgeglichen[0]} wurde" if len(abgeglichen) == 1 else
+             f"Sammelaufträge {', '.join(abgeglichen)} wurden")
+            + f" von der Bank einzeln gebucht: {abgeglichene_zeilen} Auszugszeilen mit "
+            "Empfänger und Verwendungszweck aus der Postenliste abgeglichen."
         )
     if auftraege and not mit_auszug and aufgeloest:
         erg.warnungen.append(

@@ -41,7 +41,10 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   (tesseract) gelesen und gegen Anfangs-/Endsaldo geprüft. **ZIP-Pakete** aus
   Kontoauszug und UC-eBanking-Postenlisten lösen Sammelüberweisungen in die
   Einzelzahlungen je Empfänger auf, die sich dann einzeln Konten zuordnen
-  lassen; beigefügte Belege werden übergangen.
+  lassen; bucht die Bank die Posten bereits einzeln, werden die Auszugszeilen
+  mit Empfänger und Verwendungszweck der Postenliste abgeglichen. Mehrseitige
+  Auszüge, SEPA-Felder (nur der eigentliche Verwendungszweck wird übernommen)
+  und beigefügte Belege (werden übergangen) sind berücksichtigt.
 - **Bankimport (MT940/CAMT.053)**: Kontoauszüge liefern tagesaktuelle Bestandsanker
   (Endsaldo je Auszug, IBAN-Zuordnung) und Bankumsätze zur Referenz – unabhängig vom
   Buchhaltungsexport, ohne Doppelzählung im Ist.

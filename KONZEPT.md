@@ -284,7 +284,18 @@ Termine werden bei Neugenerierung nicht überschrieben.
   „POSTEN n“ und Nähe zum Ausführungsdatum gefunden und durch die
   Einzelzahlungen ersetzt (Datum/Auszugsnummer aus der Auszugszeile). War die
   Sammelzeile früher bereits als Ganzes verbucht, gelten ihre Einzelzahlungen
-  als verbucht. Ohne lesbaren Auszug werden die Einzelzahlungen zum
+  als verbucht. Manche Banken (z. B. Deutsche Bank im selben UC-Layout) buchen
+  die Posten eines Sammelauftrags einzeln: Dann wird jeder Posten über Betrag,
+  Empfänger-IBAN (aus „KTO: …“ der Empfängerspalte, auch von der OCR zerteilt)
+  und Wortübereinstimmung im Verwendungszweck seiner Auszugszeile zugeordnet –
+  letztere trennt gleiche Beträge an denselben Empfänger. Die Zeile übernimmt
+  Empfänger und Zweck aus der textbasierten Postenliste (zuverlässiger als die
+  OCR). Bei unvollständigem Abgleich zählen nur IBAN-bestätigte Treffer.
+  Mehrseitige Auszüge: Spaltenkopf je Seite, der Seitenfuß beendet den
+  laufenden Block; die Seiten werden parallel erkannt (je tesseract-Prozess ein
+  Thread – das interne OpenMP-Threading überbucht sich sonst). SEPA-Buchungs-
+  texte werden auf Buchungsart + SVWZ+-Inhalt reduziert (EREF+/KREF+ entfallen;
+  27-Zeichen-Zeilen gelten als mitten im Text umbrochen). Ohne lesbaren Auszug werden die Einzelzahlungen zum
   Ausführungsdatum übernommen (mit Hinweis). Schutz gegen ZIP-Bomben:
   max. 100 Dateien bzw. 200 MB entpackt.
 
