@@ -8,6 +8,8 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
 
 - **Rollierende 13-Wochen-Matrix**: Spalten = Tage (umschaltbar auf Wochen oder Monate), Zeilen =
   Konten mit BWA-Aggregationsknoten; Ist bis heute, Plan ab morgen, Abweichungsansicht.
+  Der gewählte Stichtag (Fensterstart) bleibt beim Seitenwechsel innerhalb des
+  Mandanten erhalten (auch für die Szenario-Vergleichsansicht).
 - **Soll-/Ist-Vergleich** gegen eingefrorene Plan-Snapshots („Plan einfrieren“,
   Stichtag = Wochenbeginn des gewählten Fensterstarts).
 - **Bestände & Liquiditätsentwicklung**: je Bank-/Kassenkonto, Gesamtliquidität,
@@ -29,7 +31,9 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   erscheinen als Tabelle mit Kontoauswahl – die Auswahl verbucht den Betrag
   sofort zum Buchungsdatum als Ist-Buchung; Zahlungseingänge werden in einem
   zweiten Block offenen Posten zugewiesen (Anrechnung inkl. Teilzahlung und
-  Sammelposten-Vortrag plus Ist-Buchung). Jede Zuordnung ist über das ✕ am
+  Sammelposten-Vortrag plus Ist-Buchung) – außerordentliche Zahlungen ohne
+  offenen Posten lassen sich dort alternativ über die Kontosuche direkt auf
+  ein Konto verbuchen (auch aufgeteilt). Jede Zuordnung ist über das ✕ am
   grünen Vermerk einzeln aufhebbar, ganze PDFs gesammelt über den Import.
   Bei sich überschneidenden Auszugszeiträumen werden bereits verbuchte
   Umsätze ausgegraut und sind nicht erneut verbuchbar (serverseitig gesperrt).

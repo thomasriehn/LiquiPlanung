@@ -62,3 +62,17 @@ function datumDe(iso) {
 function wochentagKurz(iso) {
   return ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"][new Date(iso + "T12:00:00").getDay()];
 }
+
+// Gewählter Planungsstart (Stichtag) je Mandant: bleibt beim Seitenwechsel
+// innerhalb des Mandanten erhalten (Plan, Szenarienvergleich)
+function startMerken(mandantId, wert) {
+  try {
+    if (wert) localStorage.setItem(`liqui.start.${mandantId}`, wert);
+    else localStorage.removeItem(`liqui.start.${mandantId}`);
+  } catch (e) { /* z. B. privater Modus – dann eben ohne Persistenz */ }
+}
+
+function startGemerkt(mandantId) {
+  try { return localStorage.getItem(`liqui.start.${mandantId}`) || ""; }
+  catch (e) { return ""; }
+}

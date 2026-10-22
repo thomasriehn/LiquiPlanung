@@ -191,4 +191,5 @@ table.liste thead th.fix-spalte { background: var(--blau-hell); z-index: 5; }
   color: inherit; padding: 5px 9px; cursor: pointer; font-size: 12.5px; border-radius: 0;
 }
 .kombo-eintrag:hover { background: #eaf1fa; }
+.kombo-eintrag .konto-nr { color: var(--grau); margin-right: 5px; }
 .kombo-leer { padding: 7px 9px; color: #8a93a0; font-size: 12px; }

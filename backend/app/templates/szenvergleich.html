@@ -28,6 +28,7 @@ function datumVoll(iso) { const [j, m, t] = iso.split("-"); return `${t}.${m}.${
 
 async function lade() {
   const start = document.getElementById("start").value;
+  startMerken(MANDANT_ID, start);
   const wochen = document.getElementById("wochen").value || 13;
   let url = `/api/mandanten/${MANDANT_ID}/szenarien-vergleich?wochen=${wochen}`;
   if (start) url += `&start=${start}`;
@@ -88,6 +89,8 @@ async function lade() {
 }
 
 document.getElementById("laden").addEventListener("click", lade);
+const gemerkterStart = startGemerkt(MANDANT_ID);
+if (gemerkterStart) document.getElementById("start").value = gemerkterStart;
 lade();
 </script>
 {% endblock %}

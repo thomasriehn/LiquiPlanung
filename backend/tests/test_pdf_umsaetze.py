@@ -634,3 +634,34 @@ def test_pdf_verbuchung_aufteilung(client):
     ansicht = client.get(f"/api/importe/{erg['batch_id']}/pdf-ansicht").json()
     zeile = next(u for u in ansicht["umsaetze"] if u["empfaenger"] == "Stadtwerke Musterstadt")
     assert zeile["zuordnung"] is None and zeile["bereits_verbucht"] is False
+
+
+def test_pdf_eingang_direkt_auf_konto_mit_aufteilung(client):
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Ausserordentlich GmbH", "kurzname": "ao"}
+    ).json()["id"]
+    konten = {k["nummer"]: k for k in
+              client.get(f"/api/mandanten/{mandant_id}/konten").json()["konten"]}
+    erg = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze",
+                      files={"datei": ("a.pdf", _beispiel_pdf(PDF_ZEILEN), "application/pdf")}).json()
+    eingang = next(u for u in erg["umsaetze"] if u["betrag"] > 0)   # +26.300
+
+    # außerordentlicher Eingang, aufgeteilt auf zwei Erlös-/Ertragskonten
+    verbucht = client.post(f"/api/mandanten/{mandant_id}/pdf-umsaetze/verbuchen", json={
+        "batch_id": erg["batch_id"], "bank_konto_id": konten["1200"]["id"],
+        "datum": eingang["buchungstag"], "betrag": eingang["betrag"],
+        "text": f'{eingang["empfaenger"]} – {eingang["verwendungszweck"]}',
+        "aufteilung": [
+            {"konto_id": konten["8400"]["id"], "betrag": 20000},
+            {"konto_id": konten["2700"]["id"], "betrag": 6300},
+        ]}).json()
+    assert len(verbucht["ids"]) == 2
+    saetze = client.get(f"/api/importe/{erg['batch_id']}/saetze").json()["buchungen"]
+    # Einzahlung: Bank (Soll) an Sachkonto, je Anteil
+    assert sorted((b["gegenkonto_nr"], b["betrag"]) for b in saetze) == [
+        ("2700", 6300.0), ("8400", 20000.0)]
+    assert all(b["konto_nr"] == "1200" for b in saetze)
+    ansicht = client.get(f"/api/importe/{erg['batch_id']}/pdf-ansicht").json()
+    zeile = next(u for u in ansicht["umsaetze"] if u["betrag"] > 0)
+    assert "8400" in zeile["zuordnung"]["konto"] and "2700" in zeile["zuordnung"]["konto"]

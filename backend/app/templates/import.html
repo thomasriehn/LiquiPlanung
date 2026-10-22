@@ -73,7 +73,9 @@
     Die Zuweisung rechnet den Eingang auf den offenen Posten an (Teilzahlungen
     lassen den Posten mit Restbetrag offen, Überzahlungen auf Sammelposten werden
     auf spätere Sammelposten vorgetragen) und bucht den Betrag gleichzeitig im
-    Ist (Bankkonto an das Konto des Postens).
+    Ist (Bankkonto an das Konto des Postens). Außerordentliche Zahlungen ohne
+    offenen Posten lassen sich alternativ über die Kontosuche direkt auf ein
+    Konto verbuchen (auch aufgeteilt).
   </p>
   <table class="liste" id="pdf-eingaenge" style="display:none">
     <thead><tr><th>Auszugsdatum</th><th>Buchungsdatum</th><th>Verwendungszweck</th>
@@ -467,8 +469,8 @@ function aufteilungZeile(vorgabe) {
   return zeile;
 }
 
-function oeffneAufteilung(td, u) {
-  aufteilungKontext = { td, u };
+function oeffneAufteilung(td, u, zurueck) {
+  aufteilungKontext = { td, u, zurueck };
   document.getElementById("aufteilung-info").innerHTML =
     `${esc(u.empfaenger)} – ${eur(u.betrag)} € vom ${u.buchungstag}. Die Teilbeträge
      müssen zusammen den Umsatzbetrag ergeben; je Konto entsteht eine Ist-Buchung.`;
@@ -512,8 +514,7 @@ document.getElementById("aufteilung-ok").addEventListener("click", async () => {
       aufteilung: anteile,
     });
     schliesseAufteilung();
-    verbuchtBadge(td, `✓ verbucht auf ${esc(erg.konto)}`, erg.ids,
-      (zelle) => bindeAusgabe(zelle, u));
+    verbuchtBadge(td, `✓ verbucht auf ${esc(erg.konto)}`, erg.ids, aufteilungKontext.zurueck);
     ladeBatches();
   } catch (err) { toast(err.message); }
 });
@@ -584,7 +585,7 @@ function bindeAusgabe(td, u) {
   if (u.zuordnung) { zuordnungsBadge(td, u, (zelle) => bindeAusgabe(zelle, u)); return; }
   td.innerHTML = "";
   td.appendChild(kontoKombo(async (konto, aufteilen) => {
-    if (aufteilen) { oeffneAufteilung(td, u); return; }
+    if (aufteilen) { oeffneAufteilung(td, u, (zelle) => bindeAusgabe(zelle, u)); return; }
     try {
       const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/pdf-umsaetze/verbuchen`, {
         batch_id: pdfBatchId,
@@ -625,7 +626,24 @@ function zeigeEingaenge(eingaenge) {
 
 function bindeEingang(td, u) {
   if (u.zuordnung) { zuordnungsBadge(td, u, (zelle) => bindeEingang(zelle, u)); return; }
-  td.innerHTML = postenSelect(u.betrag);
+  td.innerHTML = postenSelect(u.betrag) +
+    `<div class="klein" style="margin:5px 0 3px">oder außerordentliche Zahlung direkt auf Konto:</div>`;
+  td.appendChild(kontoKombo(async (konto, aufteilen) => {
+    if (aufteilen) { oeffneAufteilung(td, u, (zelle) => bindeEingang(zelle, u)); return; }
+    try {
+      const erg = await api("POST", `/api/mandanten/${MANDANT_ID}/pdf-umsaetze/verbuchen`, {
+        batch_id: pdfBatchId,
+        konto_id: konto.id,
+        bank_konto_id: parseInt(document.getElementById("pdf-bank-konto").value),
+        datum: u.buchungstag,
+        betrag: u.betrag,
+        text: `${u.empfaenger} – ${u.verwendungszweck}`,
+      });
+      verbuchtBadge(td, `✓ verbucht auf ${esc(erg.konto)}`, erg.ids || [erg.id],
+        (zelle) => bindeEingang(zelle, u));
+      ladeBatches();
+    } catch (err) { toast(err.message); bindeEingang(td, u); }
+  }, true));
   td.querySelector("[data-pdf-posten]").addEventListener("change", async (e) => {
     const postenId = e.target.value;
     if (!postenId) return;

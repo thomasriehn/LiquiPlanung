@@ -14,6 +14,7 @@ async function ladeSzenarien() {
 
 async function lade() {
   const start = document.getElementById("start").value;
+  startMerken(MANDANT_ID, start);
   const wochen = document.getElementById("wochen").value || 13;
   const szenarioId = document.getElementById("szenario").value;
   let url = `/api/mandanten/${MANDANT_ID}/plan?wochen=${wochen}`;
@@ -286,4 +287,6 @@ if (einfrierenKnopf) {
     } catch (e) { toast(e.message); }
   });
 }
+const gemerkterStart = startGemerkt(MANDANT_ID);
+if (gemerkterStart) document.getElementById("start").value = gemerkterStart;
 ladeSzenarien().then(lade);
