@@ -8,6 +8,7 @@ an die Anwendungsversion gebunden, die sie erstellt hat (bzw. eine mit gleichem
 Schemastand). Ergänzend bleibt pg_dump auf Systemebene empfohlen.
 """
 
+import base64
 import json
 import re
 import zipfile
@@ -38,6 +39,8 @@ def _serialisiere(wert):
         return str(wert)
     if isinstance(wert, (date, datetime)):
         return wert.isoformat()
+    if isinstance(wert, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(wert)).decode("ascii")
     return wert
 
 
@@ -52,6 +55,8 @@ def _lade_wert(spalte: sa.Column, wert):
         return date.fromisoformat(str(wert))
     if isinstance(spalte.type, sa.Boolean):
         return bool(wert)
+    if isinstance(spalte.type, sa.LargeBinary):
+        return base64.b64decode(wert)
     return wert
 
 

@@ -90,3 +90,38 @@ def test_aufraeumen_nach_aufbewahrung(tmp_path):
     verbleibend = {p.name for p in Path(tmp_path).iterdir()}
     assert f"liqui-backup-{neu.strftime('%Y%m%d-%H%M%S')}.zip" in verbleibend
     assert "anderes.zip" in verbleibend
+
+
+def test_backup_mit_gespeicherter_importdatei(client, tmp_path, monkeypatch):
+    """Binärspalten (Originaldatei eines PDF/ZIP-Imports) überstehen die Sicherung."""
+    from app.config import get_settings
+    from test_api import _login
+    from test_pdf_umsaetze import PDF_ZEILEN, _beispiel_pdf
+
+    monkeypatch.setattr(get_settings(), "backup_verzeichnis", str(tmp_path))
+    _login(client)
+    mandant_id = client.post(
+        "/api/mandanten", json={"name": "Binär GmbH", "kurzname": "binaer"}
+    ).json()["id"]
+    pdf = _beispiel_pdf(PDF_ZEILEN)
+    batch_id = client.post(
+        f"/api/mandanten/{mandant_id}/pdf-umsaetze",
+        files={"datei": ("auszug.pdf", pdf, "application/pdf")},
+    ).json()["batch_id"]
+
+    erg = client.post("/api/backups")
+    assert erg.status_code == 201, erg.text
+    inhalt = client.get(f"/api/backups/{erg.json()['name']}").content
+    antwort = client.post(
+        "/api/backups/wiederherstellen",
+        files={"datei": ("sicherung.zip", inhalt, "application/zip")},
+        data={"bestaetigung": "WIEDERHERSTELLEN"},
+    )
+    assert antwort.status_code == 200, antwort.text
+
+    from app import database, models
+
+    with database.SessionLocal() as db:
+        assert db.get(models.ImportBatch, batch_id).datei == pdf
+    ansicht = client.get(f"/api/importe/{batch_id}/pdf-ansicht")
+    assert ansicht.status_code == 200 and len(ansicht.json()["umsaetze"]) == 2
