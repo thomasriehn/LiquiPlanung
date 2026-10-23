@@ -420,6 +420,9 @@ class Dauerbuchung(Base):
     gueltig_von: Mapped[date] = mapped_column(Date)
     gueltig_bis: Mapped[date | None] = mapped_column(Date, nullable=True)
     aktiv: Mapped[bool] = mapped_column(Boolean, default=True)
+    # nicht gebuchte fällige Zahlungen in der Ansicht „mit Vortrag“ auf den
+    # nächsten Bankarbeitstag vortragen
+    vortragen: Mapped[bool] = mapped_column(Boolean, default=True)
 
     konto: Mapped[Konto | None] = relationship()
 
@@ -510,6 +513,9 @@ class PlanSnapshot(Base):
     wochen: Mapped[int] = mapped_column(Integer, default=13)
     kommentar: Mapped[str | None] = mapped_column(String(255), nullable=True)
     erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # gewählte Soll-Referenz des Mandanten (höchstens ein Snapshot je Mandant);
+    # ohne Markierung gilt der jüngste passende Snapshot
+    referenz: Mapped[bool] = mapped_column(Boolean, default=False)
 
     werte: Mapped[list["PlanSnapshotWert"]] = relationship(
         back_populates="snapshot", cascade="all, delete-orphan"

@@ -3,31 +3,59 @@
 {% block inhalt %}
 <div class="seite-breit">
   <div class="werkzeuge">
-    <label>Eingefrorener Plan <select id="snapshot"></select></label>
+    <label title="Gilt auch auf der Plan-Seite (Abweichung) und im Excel-Export">Soll-Referenz
+      <select id="snapshot" {% if leser %}disabled{% endif %}></select></label>
     <button id="laden" class="sekundaer">Anzeigen</button>
     <span class="hinweis">Vergleich je Kalenderwoche: Soll (eingefroren) / Ist / Abweichung.
       Der Plan wird über „Plan einfrieren“ auf der Plan-Seite festgeschrieben.</span>
   </div>
   <div class="matrix-huelle"><table class="matrix" id="tabelle"></table></div>
+
+  <h3>Eingefrorene Planstände</h3>
+  <table class="liste" id="snapshot-liste">
+    <thead><tr><th>Stichtag</th><th>Wochen</th><th>Erstellt am</th><th>Kommentar</th>
+      <th>Soll-Referenz</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
 </div>
 {% endblock %}
 {% block skripte %}
 <script>
 const MANDANT_ID = {{ mandant.id }};
+const LESER = {{ 'true' if leser else 'false' }};
+let snapshots = [];
 
 async function ladeSnapshots() {
-  const snaps = await api("GET", `/api/mandanten/${MANDANT_ID}/plan/snapshots`);
-  const sel = document.getElementById("snapshot");
-  sel.innerHTML = snaps.length
-    ? snaps.map(s => `<option value="${s.id}">Stichtag ${s.stichtag} (erstellt ${new Date(s.erstellt_am).toLocaleDateString("de-DE")})</option>`).join("")
-    : `<option value="">– noch kein Snapshot –</option>`;
+  snapshots = await referenzAuswahlFuellen(MANDANT_ID, document.getElementById("snapshot"));
+  const tb = document.querySelector("#snapshot-liste tbody");
+  if (!snapshots.length) {
+    tb.innerHTML = `<tr><td colspan="6" class="klein">Noch kein eingefrorener Plan.</td></tr>`;
+    return;
+  }
+  tb.innerHTML = snapshots.map(s => `<tr>
+    <td>${datumVollDe(s.stichtag)}</td><td>${s.wochen}</td>
+    <td>${new Date(s.erstellt_am).toLocaleString("de-DE")}</td>
+    <td>${esc(s.kommentar || "")}</td>
+    <td>${s.referenz ? "★ gewählt" : ""}</td>
+    <td>${LESER ? "" : `<button class="gefahr" data-loeschen="${s.id}"
+      title="Eingefrorenen Planstand löschen">Löschen</button>`}</td></tr>`).join("");
+  tb.querySelectorAll("[data-loeschen]").forEach(knopf => knopf.addEventListener("click", async () => {
+    const s = snapshots.find(x => x.id === parseInt(knopf.dataset.loeschen));
+    if (!confirm(`Eingefrorenen Planstand vom ${datumVollDe(s.stichtag)} endgültig löschen?` +
+      (s.referenz ? "\nEr ist die gewählte Soll-Referenz – danach gilt wieder der jüngste Planstand." : ""))) return;
+    try {
+      await api("DELETE", `/api/mandanten/${MANDANT_ID}/plan/snapshots/${s.id}`);
+      toast("Planstand gelöscht.", false);
+      await ladeSnapshots();
+      lade();
+    } catch (e) { toast(e.message); }
+  }));
 }
 
 async function lade() {
-  const snapId = document.getElementById("snapshot").value;
-  const url = `/api/mandanten/${MANDANT_ID}/sollist` + (snapId ? `?snapshot_id=${snapId}` : "");
+  // ohne Angabe liefert der Server die gewählte Soll-Referenz bzw. den jüngsten Planstand
   let d;
-  try { d = await api("GET", url); } catch (e) { toast(e.message); return; }
+  try { d = await api("GET", `/api/mandanten/${MANDANT_ID}/sollist`); } catch (e) { toast(e.message); return; }
   const tabelle = document.getElementById("tabelle");
   if (!d.snapshot) {
     tabelle.innerHTML = "<tr><td style='padding:16px'>Noch kein eingefrorener Plan vorhanden – bitte zuerst auf der Plan-Seite „Plan einfrieren“ ausführen.</td></tr>";
@@ -58,6 +86,14 @@ async function lade() {
 }
 
 document.getElementById("laden").addEventListener("click", lade);
+document.getElementById("snapshot").addEventListener("change", async (e) => {
+  try {
+    await referenzSetzen(MANDANT_ID, e.target.value);
+    toast("Soll-Referenz gespeichert (gilt auch für den 13-Wochen-Plan und den Excel-Export).", false);
+    await ladeSnapshots();
+    lade();
+  } catch (err) { toast(err.message); ladeSnapshots(); }
+});
 ladeSnapshots().then(lade);
 </script>
 {% endblock %}

@@ -87,18 +87,28 @@ def ist_zahlungsfluesse(
     for b in buchungen:
         if b.konto_nr == b.gegenkonto_nr:
             continue  # Saldo Null, keine Aussagekraft
-        k_fin = b.konto_nr in finanz_nrn
-        g_fin = b.gegenkonto_nr in finanz_nrn
-        if k_fin:
+        if b.konto_nr in finanz_nrn:
             bank[b.konto_nr][b.datum] += _fluss_auf_finanzkonto(b, b.konto_nr)
-        if g_fin:
+        if b.gegenkonto_nr in finanz_nrn:
             bank[b.gegenkonto_nr][b.datum] += _fluss_auf_finanzkonto(b, b.gegenkonto_nr)
-        if k_fin and not g_fin:
-            # Fluss = Bestandsänderung der Finanzseite, zugeordnet dem Gegenkonto
-            sach[b.gegenkonto_nr][b.datum] += _fluss_auf_finanzkonto(b, b.konto_nr)
-        elif g_fin and not k_fin:
-            sach[b.konto_nr][b.datum] += _fluss_auf_finanzkonto(b, b.gegenkonto_nr)
+        fluss = _sachfluss(b, finanz_nrn)
+        if fluss is not None:
+            sach[fluss[0]][b.datum] += fluss[1]
     return sach, bank
+
+
+def _sachfluss(b: models.Buchung, finanz_nrn: set[str]) -> tuple[str, Decimal] | None:
+    """(Sachkonto-Nr, Zahlungsfluss) einer Buchung mit genau einer Finanzseite;
+    der Fluss ist die Bestandsänderung der Finanzseite."""
+    if b.konto_nr == b.gegenkonto_nr:
+        return None
+    k_fin = b.konto_nr in finanz_nrn
+    g_fin = b.gegenkonto_nr in finanz_nrn
+    if k_fin and not g_fin:
+        return b.gegenkonto_nr, _fluss_auf_finanzkonto(b, b.konto_nr)
+    if g_fin and not k_fin:
+        return b.konto_nr, _fluss_auf_finanzkonto(b, b.gegenkonto_nr)
+    return None
 
 
 def _termin_key(t_typ: str, konto_id: int | None) -> Key:
@@ -351,6 +361,137 @@ def _dauer_termine(d: models.Dauerbuchung, start: date, ende: date) -> list[date
     return termine
 
 
+VORTRAG_VORLAUF_TAGE = 14      # früher gebuchte Zahlungen zählen noch als erfolgt
+
+
+def _betragsgleich(ist: Decimal, soll: Decimal) -> bool:
+    """Betrag bis 1 % (mindestens 1 €) abweichend."""
+    return abs(abs(ist) - abs(soll)) <= max(Decimal("1"), abs(soll) / 100)
+
+
+def dauer_vortraege(
+    db: Session,
+    mandant: models.Mandant,
+    start: date,
+    ende: date,
+    heute: date,
+    finanz_nrn: set[str],
+    szenario: models.Szenario | None = None,
+) -> list[dict]:
+    """Fällige, aber nicht (vollständig) gebuchte Zahlungen aus
+    Dauerschuldverhältnissen.
+
+    Betrachtet werden Fälligkeiten im Fenster bis einschließlich heute (nur
+    Dauerschuldverhältnisse mit Konto und „vortragen“). Ist-Zahlungen gleicher
+    Richtung auf ihrem Konto werden angerechnet, jede höchstens einmal:
+      1. betragsgleiche Zahlungen bis 14 Tage um die Fälligkeit (trennt z. B.
+         zwei Raten am selben Tag sauber),
+      2. danach chronologisch alle übrigen Zahlungen ab 14 Tage vor der
+         Fälligkeit – Teilzahlungen mindern den Vortrag, der nicht verbrauchte
+         Rest einer angerechneten Zahlung gilt als Vorauszahlung für spätere
+         Fälligkeiten.
+    Der ungedeckte Rest wird auf den nächsten Bankarbeitstag ab morgen
+    vorgetragen (sofern im Fenster)."""
+    bl = mandant.bundesland
+    ziel = naechster_bankarbeitstag(heute + timedelta(days=1), bl)
+    bis = min(heute, ende)
+    if ziel > ende or bis < start:
+        return []
+
+    from .insolvenzgeld import igeld_fenster
+
+    igeld = igeld_fenster(mandant)
+    szenario_faktor = _szenario_aufloeser(szenario)
+    faellig: list[tuple[date, models.Dauerbuchung, Decimal]] = []
+    for d_ in db.scalars(
+        select(models.Dauerbuchung).where(
+            models.Dauerbuchung.mandant_id == mandant.id,
+            models.Dauerbuchung.aktiv.is_(True),
+            models.Dauerbuchung.vortragen.is_(True),
+            models.Dauerbuchung.konto_id.is_not(None),
+        )
+    ):
+        for roh in _dauer_termine(d_, start - timedelta(days=31), bis):
+            d = naechster_bankarbeitstag(roh, bl)
+            if d < start or d > bis:
+                continue
+            if (
+                igeld
+                and d_.art == PostenArt.KREDITOR.value
+                and d_.konto is not None
+                and d_.konto.typ in (models.KontoTyp.PERSONAL.value, models.KontoTyp.SV.value)
+                and igeld[0] <= d <= igeld[1]
+            ):
+                continue  # im Insolvenzgeldzeitraum gar nicht geplant
+            soll = d_.betrag_brutto if d_.art == PostenArt.DEBITOR.value else -d_.betrag_brutto
+            faellig.append((d, d_, soll))
+    if not faellig:
+        return []
+
+    # einzelne Ist-Zahlungen je Sachkonto (nicht Tagessummen: zwei Raten am
+    # selben Tag sollen einzeln zählen); [Datum, Betrag, noch verfügbar]
+    zahlungen: dict[str, list[list]] = defaultdict(list)
+    for b in db.scalars(
+        select(models.Buchung)
+        .where(
+            models.Buchung.mandant_id == mandant.id,
+            models.Buchung.datum >= start - timedelta(days=VORTRAG_VORLAUF_TAGE),
+            models.Buchung.datum <= heute,
+        )
+        .order_by(models.Buchung.datum, models.Buchung.id)
+    ):
+        fluss = _sachfluss(b, finanz_nrn)
+        if fluss is not None:
+            zahlungen[fluss[0]].append([b.datum, fluss[1], abs(fluss[1])])
+
+    faellig.sort(key=lambda x: (x[0], x[1].id))
+    offen = [abs(soll) for _, _, soll in faellig]
+    fenster = timedelta(days=VORTRAG_VORLAUF_TAGE)
+
+    # 1. betragsgleiche Zahlung nahe der Fälligkeit
+    for i, (d, d_, soll) in enumerate(faellig):
+        kandidaten = [
+            (abs((z[0] - d).days), j)
+            for j, z in enumerate(zahlungen.get(d_.konto.nummer, []))
+            if z[2] == abs(z[1]) and z[1] * soll > 0
+            and abs(z[0] - d) <= fenster and _betragsgleich(z[1], soll)
+        ]
+        if kandidaten:
+            zahlungen[d_.konto.nummer][min(kandidaten)[1]][2] = Decimal("0")
+            offen[i] = Decimal("0")
+
+    # 2. übrige Zahlungen chronologisch anrechnen (Teilzahlungen, Vorauszahlungen)
+    for i, (d, d_, soll) in enumerate(faellig):
+        for z in zahlungen.get(d_.konto.nummer, []):
+            if offen[i] <= 0:
+                break
+            angebrochen = Decimal("0") < z[2] < abs(z[1])
+            if z[2] <= 0 or z[1] * soll <= 0 or (z[0] < d - fenster and not angebrochen):
+                continue
+            anteil = min(z[2], offen[i])
+            z[2] -= anteil
+            offen[i] -= anteil
+
+    vortraege: list[dict] = []
+    for i, (d, d_, soll) in enumerate(faellig):
+        if offen[i] <= 0:
+            continue
+        rest = offen[i] if soll > 0 else -offen[i]
+        if d_.art == PostenArt.DEBITOR.value:
+            rest = (rest * szenario_faktor(d_.konto, Richtung.EIN.value)).quantize(CENT)
+        vortraege.append({
+            "dauer_id": d_.id,
+            "name": d_.name,
+            "konto_id": d_.konto_id,
+            "faellig": d,
+            "ziel": ziel,
+            "soll": soll,
+            "gezahlt": abs(soll) - offen[i],
+            "betrag": rest,
+        })
+    return vortraege
+
+
 def _monatstage(jahr: int, monat: int) -> int:
     if monat == 12:
         return 31
@@ -496,23 +637,35 @@ def _konto_richtung(konto: models.Konto) -> str:
     return Richtung.AUS.value
 
 
+def referenz_snapshot(db: Session, mandant_id: int) -> models.PlanSnapshot | None:
+    """Vom Anwender gewählte Soll-Referenz des Mandanten (oder None)."""
+    return db.scalars(
+        select(models.PlanSnapshot).where(
+            models.PlanSnapshot.mandant_id == mandant_id,
+            models.PlanSnapshot.referenz.is_(True),
+        )
+    ).first()
+
+
 def _snapshot_plan(
     db: Session, mandant_id: int, start: date, heute: date
 ) -> tuple[dict[Key, dict[date, Decimal]] | None, models.PlanSnapshot | None]:
-    """Jüngster Snapshot, dessen Fenster das angezeigte Fenster überlappt."""
-    snaps = db.scalars(
-        select(models.PlanSnapshot)
-        .where(
-            models.PlanSnapshot.mandant_id == mandant_id,
-            models.PlanSnapshot.stichtag <= heute,
+    """Gewählte Soll-Referenz, sonst der jüngste Snapshot, dessen Fenster das
+    angezeigte Fenster überlappt."""
+    snap = referenz_snapshot(db, mandant_id)
+    if snap is None:
+        snaps = db.scalars(
+            select(models.PlanSnapshot)
+            .where(
+                models.PlanSnapshot.mandant_id == mandant_id,
+                models.PlanSnapshot.stichtag <= heute,
+            )
+            .order_by(models.PlanSnapshot.stichtag.desc(), models.PlanSnapshot.id.desc())
         )
-        .order_by(models.PlanSnapshot.stichtag.desc(), models.PlanSnapshot.id.desc())
-    )
-    snap = None
-    for s in snaps:
-        if s.stichtag + timedelta(days=s.wochen * 7) > start:
-            snap = s
-            break
+        for s in snaps:
+            if s.stichtag + timedelta(days=s.wochen * 7) > start:
+                snap = s
+                break
     if snap is None:
         return None, None
     werte: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
@@ -564,6 +717,12 @@ def berechne_plan(
         db, mandant, start, ende, heute=heute, nur_offen=True, szenario=szenario
     )
 
+    # ---- Vortrag nicht gebuchter Dauerschuld-Zahlungen (Ansicht „mit Vortrag“) ----
+    vortraege = dauer_vortraege(db, mandant, start, ende, heute, finanz_nrn, szenario)
+    vortrag: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+    for v in vortraege:
+        vortrag[v["konto_id"]][v["ziel"]] += v["betrag"]
+
     # ---- Vergleichsbasis für vergangene Tage ----
     snap_plan, snap = _snapshot_plan(db, mandant.id, start, heute)
     vergleichsbasis = "SNAPSHOT" if snap_plan is not None else "LIVE"
@@ -593,7 +752,7 @@ def berechne_plan(
             return gruppe_by_code.get("A_STEUER")
         return None
 
-    alle_keys = set(plan.keys()) | set(ist.keys())
+    alle_keys = set(plan.keys()) | set(ist.keys()) | set(vortrag.keys())
     zeilen_je_gruppe: dict[int | None, list[Key]] = defaultdict(list)
     for key in alle_keys:
         g = gruppe_fuer_key(key)
@@ -643,6 +802,7 @@ def berechne_plan(
             "plan": {d.isoformat(): _f(v) for d, v in plan.get(key, {}).items() if v},
             "ist": {d.isoformat(): _f(v) for d, v in ist.get(key, {}).items() if v},
             "basis": {d.isoformat(): _f(v) for d, v in basis.get(key, {}).items() if v},
+            "vortrag": {d.isoformat(): _f(v) for d, v in vortrag.get(key, {}).items() if v},
         }
 
     zeilen: list[dict] = []
@@ -698,16 +858,29 @@ def berechne_plan(
         return {d.isoformat(): _f(v) for d, v in s.items() if v}
 
     summen = {
-        "einzahlungen": {"plan": summe_je_tag(plan, "EIN"), "ist": summe_je_tag(ist, "EIN"),
-                         "basis": summe_je_tag(basis, "EIN")},
-        "auszahlungen": {"plan": summe_je_tag(plan, "AUS"), "ist": summe_je_tag(ist, "AUS"),
-                         "basis": summe_je_tag(basis, "AUS")},
-        "netto": {"plan": summe_je_tag(plan, None), "ist": summe_je_tag(ist, None),
-                  "basis": summe_je_tag(basis, None)},
+        name: {
+            "plan": summe_je_tag(plan, nur),
+            "ist": summe_je_tag(ist, nur),
+            "basis": summe_je_tag(basis, nur),
+            "vortrag": summe_je_tag(vortrag, nur),
+        }
+        for name, nur in (("einzahlungen", "EIN"), ("auszahlungen", "AUS"), ("netto", None))
     }
 
     # ---- Bestände ----
     bestaende = _bestaende(db, mandant, finanzkonten, finanz_nrn, tage, heute, plan_projektion)
+    if vortraege:
+        # Vorträge liegen nach heute: fortgeschriebene Liquidität um ihre
+        # kumulierte Summe verschieben (Ansicht „mit Vortrag“)
+        vortrag_netto = summen["netto"]["vortrag"]
+        kumuliert = 0.0
+        bestaende["liquiditaet_vortrag"] = {}
+        bestaende["verfuegbar_vortrag"] = {}
+        for d in tage:
+            iso = d.isoformat()
+            kumuliert += vortrag_netto.get(iso, 0.0)
+            bestaende["liquiditaet_vortrag"][iso] = round(bestaende["liquiditaet"][iso] + kumuliert, 2)
+            bestaende["verfuegbar_vortrag"][iso] = round(bestaende["verfuegbar"][iso] + kumuliert, 2)
 
     # ---- Zahlungsgesperrte Insolvenzforderungen (nachrichtlich) ----
     gesperrt = Decimal("0")
@@ -761,9 +934,22 @@ def berechne_plan(
         "vergleichsbasis": vergleichsbasis,
         "snapshot": (
             {"id": snap.id, "stichtag": snap.stichtag.isoformat(),
-             "erstellt_am": snap.erstellt_am.isoformat()}
+             "erstellt_am": snap.erstellt_am.isoformat(), "referenz": snap.referenz}
             if snap else None
         ),
+        "vortraege": [
+            {
+                "name": v["name"],
+                "konto": (f"{konto_by_id[v['konto_id']].nummer} "
+                          f"{konto_by_id[v['konto_id']].bezeichnung}"),
+                "faellig": v["faellig"].isoformat(),
+                "ziel": v["ziel"].isoformat(),
+                "soll": _f(v["soll"]),
+                "gezahlt": _f(v["gezahlt"]),
+                "betrag": _f(v["betrag"]),
+            }
+            for v in vortraege
+        ],
         "unbekannte_konten": sorted(unbekannte),
     }
 
@@ -1028,14 +1214,15 @@ def soll_ist_vergleich(
     snapshot_id: int | None = None,
     heute: date | None = None,
 ) -> dict:
-    """Wochenweiser Soll-/Ist-Vergleich gegen einen eingefrorenen Plan."""
+    """Wochenweiser Soll-/Ist-Vergleich gegen einen eingefrorenen Plan
+    (ohne Angabe: gewählte Soll-Referenz, sonst der jüngste Snapshot)."""
     heute = heute or date.today()
     if snapshot_id is not None:
         snap = db.get(models.PlanSnapshot, snapshot_id)
         if snap is None or snap.mandant_id != mandant.id:
             raise ValueError("Snapshot nicht gefunden")
     else:
-        snap = db.scalars(
+        snap = referenz_snapshot(db, mandant.id) or db.scalars(
             select(models.PlanSnapshot)
             .where(models.PlanSnapshot.mandant_id == mandant.id)
             .order_by(models.PlanSnapshot.stichtag.desc(), models.PlanSnapshot.id.desc())
@@ -1104,6 +1291,7 @@ def soll_ist_vergleich(
             "wochen": snap.wochen,
             "kommentar": snap.kommentar,
             "erstellt_am": snap.erstellt_am.isoformat(),
+            "referenz": snap.referenz,
         },
         "heute": heute.isoformat(),
         "wochen": wochen_liste,

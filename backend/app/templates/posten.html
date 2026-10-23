@@ -93,11 +93,14 @@
       <label>Gültig von<input type="date" name="gueltig_von" required></label>
       <label>Gültig bis<input type="date" name="gueltig_bis"></label>
       <label>Konto<select name="konto_id" class="konto-auswahl"></select></label>
+      <label title="Ist eine fällige Rate nicht (vollständig) gebucht, wird der offene Betrag in der Planansicht „mit Vortrag“ auf den nächsten Bankarbeitstag vorgetragen">
+        &nbsp;<span style="display:flex;align-items:center;gap:6px;min-height:32px">
+          <input type="checkbox" name="vortragen" checked style="width:auto">Vortragen, falls nicht gebucht</span></label>
       <button type="submit" id="dauer-submit">Anlegen</button>
       <button type="button" id="dauer-abbrechen" class="sekundaer" style="display:none">Abbrechen</button>
     </form>
     <form id="dauer-import-form" class="formular-zeilen">
-      <label>Dauerschuldverhältnisse importieren (CSV: Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto)
+      <label>Dauerschuldverhältnisse importieren (CSV: Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto, optional Vortrag ja/nein)
         <input type="file" name="datei" required></label>
       <button type="submit" class="sekundaer">Dauerschuldverhältnisse importieren</button>
     </form>
@@ -105,7 +108,7 @@
     {% endif %}
     <table class="liste">
       <thead><tr><th>Name</th><th>Art</th><th class="zahl">Betrag</th><th>Intervall</th>
-        <th>Stichtag</th><th>Gültig</th><th>Konto</th><th>aktiv</th><th></th></tr></thead>
+        <th>Stichtag</th><th>Gültig</th><th>Konto</th><th title="Nicht gebuchte Raten vortragen">Vortrag</th><th>aktiv</th><th></th></tr></thead>
       <tbody id="dauer-tabelle"></tbody>
     </table>
   </div>
@@ -318,7 +321,9 @@ async function ladeDauer() {
       <td>${esc(d.name)}</td><td>${d.art === "KREDITOR" ? "Ausgabe" : "Einnahme"}</td>
       <td class="zahl">${eur(d.betrag_brutto)}</td><td>${d.intervall}</td>
       <td>${d.stichtag}</td><td>${d.gueltig_von}${d.gueltig_bis ? " – " + d.gueltig_bis : ""}</td>
-      <td>${kontoName(d.konto_id)}</td><td>${d.aktiv ? "✓" : "–"}</td>
+      <td>${kontoName(d.konto_id)}</td>
+      <td title="${d.konto_id ? "" : "Ohne Konto kann die Buchung nicht geprüft werden – kein Vortrag"}">${d.vortragen ? (d.konto_id ? "✓" : "(✓)") : "–"}</td>
+      <td>${d.aktiv ? "✓" : "–"}</td>
       <td>${LESER ? "" : `
         <button class="sekundaer" data-aktion="bearbeiten" data-id="${d.id}" title="Dauerschuldverhältnis bearbeiten">✎</button>
         <button class="sekundaer" data-aktion="toggle" data-id="${d.id}" data-aktiv="${d.aktiv}">${d.aktiv ? "deaktivieren" : "aktivieren"}</button>
@@ -448,6 +453,7 @@ function dauerBearbeiten(d) {
   dauerForm.gueltig_von.value = d.gueltig_von;
   dauerForm.gueltig_bis.value = d.gueltig_bis || "";
   dauerForm.konto_id.value = d.konto_id || "";
+  dauerForm.vortragen.checked = d.vortragen;
   document.getElementById("dauer-submit").textContent = "Speichern";
   document.getElementById("dauer-abbrechen").style.display = "";
   dauerForm.scrollIntoView({ behavior: "smooth" });
@@ -471,6 +477,7 @@ if (dauerForm) dauerForm.addEventListener("submit", async (e) => {
   daten.stichtag = parseInt(daten.stichtag);
   daten.konto_id = daten.konto_id ? parseInt(daten.konto_id) : null;
   if (!daten.gueltig_bis) daten.gueltig_bis = null;
+  daten.vortragen = dauerForm.vortragen.checked;
   try {
     if (dauerBearbeitet !== null) {
       await api("PATCH", `/api/dauerbuchungen/${dauerBearbeitet}`, daten);

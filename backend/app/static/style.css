@@ -117,6 +117,17 @@ table.matrix { border-collapse: separate; border-spacing: 0; font-size: 12px; }
 .matrix td.negativ { color: var(--rot); font-weight: 600; }
 .matrix td.positiv { color: var(--gruen); }
 .matrix td.ist-wert { text-decoration: underline dotted #9db4d0; text-underline-offset: 2px; }
+/* Ansicht „mit Vortrag“: vorgetragene Dauerschuld-Zahlungen; schraffiert, wenn
+   am selben Tag auch eine reguläre Planbuchung auf dem Konto liegt */
+.matrix td.vortrag, .legende-muster.vortrag { background: #fbe3b9 !important; }
+.matrix td.vortrag-schraffiert, .legende-muster.vortrag-schraffiert {
+  background: repeating-linear-gradient(135deg, #fbe3b9 0 5px, #eeb764 5px 7px) !important;
+}
+.legende-muster {
+  display: inline-block; width: 14px; height: 11px; margin-right: 5px;
+  vertical-align: -1px; border: 1px solid #e0b46a; border-radius: 2px;
+}
+.vortrag-liste { margin: 4px 0 0 18px; padding: 0; }
 .matrix .konto-nr { color: var(--grau); margin-right: 4px; }
 .legende { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--grau); }
 

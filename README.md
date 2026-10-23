@@ -10,8 +10,20 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Konten mit BWA-Aggregationsknoten; Ist bis heute, Plan ab morgen, Abweichungsansicht.
   Der gewählte Stichtag (Fensterstart) bleibt beim Seitenwechsel innerhalb des
   Mandanten erhalten (auch für die Szenario-Vergleichsansicht).
+- **Vortrag nicht gebuchter Dauerschuld-Zahlungen** (Werteauswahl „Ist bis heute,
+  Plan ab morgen mit Vortrag“): Ist eine fällige Rate eines Dauerschuldverhältnisses
+  nicht (vollständig) gebucht, wird der offene Rest auf den nächsten Bankarbeitstag
+  ab morgen vorgetragen – farbig hervorgehoben, schraffiert wenn er mit einer
+  regulären Planbuchung desselben Kontos zusammenfällt (Werte addiert); die
+  Liquiditätsfortschreibung berücksichtigt den Vortrag. Ist-Zahlungen auf dem
+  Konto werden angerechnet: betragsgleiche Zahlungen um die Fälligkeit zuerst,
+  danach chronologisch auch Teil- und Vorauszahlungen. Je Dauerschuldverhältnis
+  abschaltbar (Standard: vortragen; auch per CSV-Spalte „Vortrag“).
 - **Soll-/Ist-Vergleich** gegen eingefrorene Plan-Snapshots („Plan einfrieren“,
-  Stichtag = Wochenbeginn des gewählten Fensterstarts).
+  Stichtag = Wochenbeginn des gewählten Fensterstarts). Die **Soll-Referenz** ist
+  wählbar (auf der Plan- und der Soll/Ist-Seite, serverseitig gespeichert und damit
+  für alle Benutzer, die Abweichungsansicht und den Excel-Export gleich);
+  eingefrorene Planstände lassen sich löschen.
 - **Bestände & Liquiditätsentwicklung**: je Bank-/Kassenkonto, Gesamtliquidität,
   verfügbare Liquidität inkl. Kreditlinien, Warenbestand nachrichtlich.
 - **Import**: DATEV-Buchungsstapel (EXTF/DTVF), generisches CSV (Addison abbildbar),
@@ -89,8 +101,11 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   bleibt auf dem Basisplan. Detailregeln je Konto/BWA-Gruppe übersteuern die globalen
   Faktoren. Eigene **Vergleichsansicht** mit allen Szenarien
   nebeneinander (Liquidität je Wochenende, Netto-Cashflow, minimale Liquidität).
-- **Export**: 13-Wochen-Plan als Excel-Arbeitsmappe (Tage, Wochen mit Plan/Ist/Δ,
-  Soll-Ist) und als PDF-Bericht für Gericht, Sachwalter, Gläubigerausschuss.
+- **Export**: 13-Wochen-Plan als Excel-Arbeitsmappe (Tage, Wochen und Monate mit
+  Plan/Ist/Δ gegen die Soll-Referenz, Soll-Ist) und als PDF-Bericht für Gericht,
+  Sachwalter, Gläubigerausschuss – in der gewählten Spaltenansicht (Tage/Wochen/
+  Monate) und Werteauswahl; breite Pläne (z. B. 26 Wochen) laufen nach rechts auf
+  Folgeblätter weiter (13 Wochen bzw. 14 Tage je Blatt, Kontospalte wiederholt).
 - **Mandantenverwaltung**: Neue Mandanten wahlweise per Formular oder über den
   **Onboarding-Wizard** („Mit Wizard anlegen“) – acht geführte Schritte von den
   Stammdaten über Bankverbindung (IBAN) und Anfangssalden bis zu den Importen

@@ -76,3 +76,24 @@ function startGemerkt(mandantId) {
   try { return localStorage.getItem(`liqui.start.${mandantId}`) || ""; }
   catch (e) { return ""; }
 }
+
+// Soll-Referenz (eingefrorener Plan): serverseitig je Mandant gespeichert und
+// damit für Plan-Seite, Soll/Ist und Excel-Export identisch
+function datumVollDe(iso) {
+  return `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}`;
+}
+
+async function referenzAuswahlFuellen(mandantId, select) {
+  const snaps = await api("GET", `/api/mandanten/${mandantId}/plan/snapshots`);
+  select.innerHTML = `<option value="">automatisch (jüngster eingefrorener Plan)</option>` +
+    snaps.map(s => `<option value="${s.id}"${s.referenz ? " selected" : ""}>` +
+      `Stichtag ${datumVollDe(s.stichtag)} · ${s.wochen} Wo. · erstellt ` +
+      `${new Date(s.erstellt_am).toLocaleDateString("de-DE")}` +
+      `${s.kommentar ? " · " + esc(s.kommentar) : ""}</option>`).join("");
+  return snaps;
+}
+
+async function referenzSetzen(mandantId, snapshotId) {
+  await api("PUT", `/api/mandanten/${mandantId}/plan/referenz`,
+    { snapshot_id: snapshotId ? parseInt(snapshotId) : null });
+}

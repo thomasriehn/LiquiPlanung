@@ -2098,6 +2098,7 @@ def dauer_liste(
             "gueltig_von": d.gueltig_von.isoformat(),
             "gueltig_bis": d.gueltig_bis.isoformat() if d.gueltig_bis else None,
             "aktiv": d.aktiv,
+            "vortragen": d.vortragen,
         }
         for d in dauer
     ]
@@ -2112,6 +2113,7 @@ class DauerNeu(BaseModel):
     stichtag: int = 1
     gueltig_von: str
     gueltig_bis: str | None = None
+    vortragen: bool = True
 
 
 @router.post("/mandanten/{mandant_id}/dauerbuchungen", status_code=201)
@@ -2138,6 +2140,7 @@ def dauer_anlegen(
         stichtag=daten.stichtag,
         gueltig_von=_datum(daten.gueltig_von, "gueltig_von"),
         gueltig_bis=_datum(daten.gueltig_bis, "gueltig_bis") if daten.gueltig_bis else None,
+        vortragen=daten.vortragen,
     )
     db.add(d)
     db.commit()
@@ -2151,7 +2154,8 @@ async def dauer_import(
     benutzer=Depends(aktueller_benutzer),
     db: Session = Depends(get_db),
 ):
-    """Dauerbuchungs-Import (CSV): Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto.
+    """Dauerbuchungs-Import (CSV): Name;Art;Betrag;Intervall;Stichtag;GueltigVon;GueltigBis;Konto
+    (optional Vortrag: ja/nein, Standard ja).
 
     Konten werden über die Kontonummer aufgelöst. Bereits vorhandene
     Dauerbuchungen (gleicher Name, Art, Betrag, Intervall und Stichtag)
@@ -2197,6 +2201,7 @@ async def dauer_import(
                 stichtag=d["stichtag"],
                 gueltig_von=d["gueltig_von"],
                 gueltig_bis=d["gueltig_bis"],
+                vortragen=d["vortragen"],
             )
         )
         angelegt += 1
@@ -2237,6 +2242,8 @@ def dauer_aendern(
         elif feld == "konto_id":
             _konto_pruefen(db, d.mandant_id, wert)
             d.konto_id = wert
+        elif feld == "vortragen":
+            d.vortragen = bool(wert)
         elif feld in {"name", "art", "intervall", "stichtag", "aktiv"}:
             if feld == "art":
                 _enum_pruefen(wert, models.PostenArt, feld)
@@ -2892,9 +2899,76 @@ def snapshot_liste(
             "wochen": s.wochen,
             "kommentar": s.kommentar,
             "erstellt_am": s.erstellt_am.isoformat(),
+            "referenz": s.referenz,
         }
         for s in snaps
     ]
+
+
+@router.delete("/mandanten/{mandant_id}/plan/snapshots/{snapshot_id}")
+def snapshot_loeschen(
+    mandant_id: int,
+    snapshot_id: int,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Eingefrorenen Planstand löschen (war er Soll-Referenz, gilt danach
+    wieder der jüngste passende Snapshot)."""
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    snap = db.get(models.PlanSnapshot, snapshot_id)
+    if snap is None or snap.mandant_id != mandant.id:
+        raise HTTPException(404, "Snapshot nicht gefunden")
+    beschreibung = f"Stichtag {snap.stichtag.isoformat()}" + (" (Soll-Referenz)" if snap.referenz else "")
+    db.execute(delete(models.PlanSnapshotWert).where(
+        models.PlanSnapshotWert.snapshot_id == snap.id))
+    db.delete(snap)
+    audit(db, benutzer, mandant.id, "SNAPSHOT_GELOESCHT", beschreibung)
+    db.commit()
+    return {"ok": True}
+
+
+class ReferenzWahl(BaseModel):
+    snapshot_id: int | None = None      # None = automatisch (jüngster passender)
+
+
+@router.put("/mandanten/{mandant_id}/plan/referenz")
+def referenz_setzen(
+    mandant_id: int,
+    daten: ReferenzWahl,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Soll-Referenz für Plan (Abweichung), Soll/Ist und Excel-Export wählen."""
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    if daten.snapshot_id is not None:
+        snap = db.get(models.PlanSnapshot, daten.snapshot_id)
+        if snap is None or snap.mandant_id != mandant.id:
+            raise HTTPException(404, "Snapshot nicht gefunden")
+    db.execute(
+        update(models.PlanSnapshot)
+        .where(models.PlanSnapshot.mandant_id == mandant.id)
+        .values(referenz=models.PlanSnapshot.id == daten.snapshot_id
+                if daten.snapshot_id is not None else False)
+    )
+    audit(db, benutzer, mandant.id, "SOLL_REFERENZ",
+          f"Snapshot {daten.snapshot_id}" if daten.snapshot_id else "automatisch")
+    db.commit()
+    return {"ok": True, "snapshot_id": daten.snapshot_id}
+
+
+EXPORT_ANSICHTEN = ("tage", "wochen", "monate")
+EXPORT_METRIKEN = ("auto", "vortrag", "plan", "ist", "delta")
+
+
+def _export_parameter_pruefen(wochen: int, ansicht: str, metrik: str) -> None:
+    if not (1 <= wochen <= 26):
+        raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    if ansicht not in EXPORT_ANSICHTEN:
+        raise HTTPException(422, "Spalten: tage, wochen oder monate")
+    if metrik not in EXPORT_METRIKEN:
+        raise HTTPException(422, "Werte: " + ", ".join(EXPORT_METRIKEN))
 
 
 @router.get("/mandanten/{mandant_id}/export/plan.xlsx")
@@ -2903,18 +2977,21 @@ def export_plan_xlsx(
     start: str | None = None,
     wochen: int = 13,
     szenario_id: int | None = None,
+    metrik: str = "auto",
     benutzer=Depends(aktueller_benutzer),
     db: Session = Depends(get_db),
 ):
+    """Excel-Arbeitsmappe; Soll-Basis (Δ) und Blatt „Soll-Ist“ beziehen sich
+    auf die gewählte Soll-Referenz (sonst den jüngsten Snapshot)."""
     mandant = mandant_oder_403(db, benutzer, mandant_id)
-    if not (1 <= wochen <= 26):
-        raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    _export_parameter_pruefen(wochen, "tage", metrik)
     plan = berechne_plan(
         db, mandant, start=_datum(start, "start") if start else None, wochen=wochen,
         szenario=_szenario_oder_none(db, mandant.id, szenario_id),
     )
     sollist = soll_ist_vergleich(db, mandant)
-    daten = export.plan_xlsx(plan, sollist if sollist.get("snapshot") else None, mandant)
+    daten = export.plan_xlsx(plan, sollist if sollist.get("snapshot") else None, mandant,
+                             metrik=metrik)
     audit(db, benutzer, mandant.id, "EXPORT_XLSX", plan["start"])
     db.commit()
     return Response(
@@ -2933,17 +3010,20 @@ def export_plan_pdf(
     start: str | None = None,
     wochen: int = 13,
     szenario_id: int | None = None,
+    ansicht: str = "wochen",
+    metrik: str = "auto",
     benutzer=Depends(aktueller_benutzer),
     db: Session = Depends(get_db),
 ):
+    """PDF-Bericht in der Spaltenansicht der Plan-Seite; breite Pläne werden
+    nach rechts auf Folgeblätter fortgesetzt."""
     mandant = mandant_oder_403(db, benutzer, mandant_id)
-    if not (1 <= wochen <= 26):
-        raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    _export_parameter_pruefen(wochen, ansicht, metrik)
     plan = berechne_plan(
         db, mandant, start=_datum(start, "start") if start else None, wochen=wochen,
         szenario=_szenario_oder_none(db, mandant.id, szenario_id),
     )
-    daten = export.plan_pdf(plan, mandant)
+    daten = export.plan_pdf(plan, mandant, ansicht=ansicht, metrik=metrik)
     audit(db, benutzer, mandant.id, "EXPORT_PDF", plan["start"])
     db.commit()
     return Response(

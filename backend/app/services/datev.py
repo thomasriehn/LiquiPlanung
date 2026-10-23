@@ -326,6 +326,7 @@ _OP_ARTEN = {
 
 
 _SAMMEL_WAHR = {"1", "X", "JA", "J", "TRUE", "WAHR", "SAMMEL"}
+_VORTRAG_NEIN = {"0", "NEIN", "N", "FALSE", "FALSCH", "-"}
 
 
 def parse_op_csv(daten: bytes) -> ImportErgebnis:
@@ -439,7 +440,8 @@ def parse_dauer_csv(daten: bytes) -> ImportErgebnis:
     Art: ER/Ausgabe/Verbindlichkeit bzw. FO/Einnahme/Erlös. Intervall:
     monatlich/wöchentlich/vierteljährlich/jährlich (auch M/W/Q/J). Stichtag:
     Kalendertag 1–31, bei wöchentlich 0=Mo..6=So oder Mo/Di/…; Datumsformate
-    TT.MM.JJJJ oder JJJJ-MM-TT; GueltigVon leer = heute.
+    TT.MM.JJJJ oder JJJJ-MM-TT; GueltigVon leer = heute. Optionale Spalte
+    Vortrag (ja/nein): nicht gebuchte Raten vortragen, Standard ja.
     """
     text = _dekodiere(daten)
     erg = ImportErgebnis(format="DAUER")
@@ -457,6 +459,7 @@ def parse_dauer_csv(daten: bytes) -> ImportErgebnis:
     i_stichtag = _spalten_index(header, "stichtag", "tag")
     i_von = _spalten_index(header, "von", "beginn", "start")
     i_bis = _spalten_index(header, "bis", "ende")
+    i_vortrag = _spalten_index(header, "vortrag")
     i_konto = next(
         (i for i, name in enumerate(header)
          if "konto" in name and "gegen" not in name),
@@ -530,6 +533,8 @@ def parse_dauer_csv(daten: bytes) -> ImportErgebnis:
                 "gueltig_von": gueltig_von,
                 "gueltig_bis": gueltig_bis,
                 "konto_nr": feld(felder, i_konto) or None,
+                # leer = Standard (vortragen)
+                "vortragen": feld(felder, i_vortrag).upper() not in _VORTRAG_NEIN,
             }
         )
     return erg

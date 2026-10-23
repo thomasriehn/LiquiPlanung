@@ -128,8 +128,12 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
 18. ✔ **Demo-Mandant:** Auf Wunsch wird ein Beispielmandant mit Daten angelegt, damit die
     Darstellung sofort prüfbar ist.
 19. ✔ **Export (PDF/Excel):** 13-Wochen-Plan als Excel-Arbeitsmappe (Blätter Info,
-    Tage, Wochen mit Plan/Ist/Δ, Soll-Ist) und als PDF-Bericht (Querformat, Wochenspalten)
-    für Gericht, Sachwalter, Gläubigerausschuss.
+    Tage, Wochen und Monate mit Plan/Ist/Δ gegen die Soll-Referenz, Soll-Ist) und als
+    PDF-Bericht (Querformat) für Gericht, Sachwalter, Gläubigerausschuss. Das PDF
+    übernimmt Spaltenansicht (Tage/Wochen/Monate) und Werteauswahl der Plan-Seite;
+    breite Pläne werden horizontal auf Folgeblätter verteilt (13 Wochen bzw. Monate
+    oder 14 Tage je Blatt, einheitliche Spaltenbreite, Kontospalte und Kopfzeile je
+    Blatt wiederholt, „Blatt x von y“).
 20. ✔ **Integrierte Datensicherung:** Automatische Voll-Sicherung im konfigurierbaren
     Intervall (Standard: täglich) mit Aufbewahrungsfrist, dazu manuelle Sicherung,
     Download und Löschung in der Admin-Oberfläche. Sicherungen sind
@@ -217,8 +221,26 @@ nicht doppelt). Warenbestand wird nachrichtlich fortgeschrieben (letzter erfasst
 Wert). Verfügbare Liquidität = Bestand + freie Kreditlinien.
 
 **Soll/Ist:** Für vergangene Tage im Fenster wird das Ist gegen den eingefrorenen Plan
-(neuester Snapshot, dessen Fenster den Tag abdeckt) gestellt; Abweichung = Ist − Plan.
-Ohne Snapshot dient der Live-Plan als Vergleichsbasis (gekennzeichnet).
+gestellt; Abweichung = Ist − Plan. Maßgeblich ist die gewählte **Soll-Referenz**
+(Kennzeichen `plan_snapshots.referenz`, höchstens ein Snapshot je Mandant – bewusst
+keine Fremdschlüssel-Spalte am Mandanten, um einen Zyklus Mandant ↔ Snapshot zu
+vermeiden); ohne Wahl der neueste Snapshot, dessen Fenster den Tag abdeckt. Ohne
+Snapshot dient der Live-Plan als Vergleichsbasis (gekennzeichnet). Gelöschte
+Snapshots verlieren ihre Referenz-Rolle automatisch.
+
+**Vortrag (Ansicht „mit Vortrag“):** Fälligkeiten von Dauerschuldverhältnissen
+(Kennzeichen `vortragen`, nur mit Konto) im Fenster bis heute werden gegen die
+einzelnen Ist-Zahlungen ihres Kontos (gleiche Richtung, ab 14 Tage vor Fälligkeit)
+abgeglichen: (1) betragsgleiche Zahlung (±1 %, mind. 1 €) bis 14 Tage um die
+Fälligkeit, (2) danach chronologische Anrechnung der übrigen Zahlungen – Teilzahlungen
+mindern den offenen Rest, der Rest einer angerechneten Zahlung wirkt als
+Vorauszahlung auf spätere Fälligkeiten; jede Zahlung zählt höchstens einmal. Der
+ungedeckte Rest wird auf den nächsten Bankarbeitstag ab morgen vorgetragen (getrennt
+vom Plan als `vortrag` je Zeile ausgeliefert, damit die Oberfläche hervorheben und bei
+Zusammentreffen mit einer Planbuchung desselben Kontos schraffieren kann). Die
+Liquidität wird im Vortragsmodus um die kumulierten Vorträge fortgeschrieben.
+Grenze: Zahlungen auf demselben Konto, die zu anderen Vorgängen gehören (z. B. ein
+offener Posten), werden mangels Zuordnung mit angerechnet.
 
 ## 6. Zahlungskalender-Regeln (implementiert)
 

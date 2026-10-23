@@ -15,6 +15,7 @@
     <label>Werte
       <select id="metrik">
         <option value="auto">Ist bis heute, Plan ab morgen</option>
+        <option value="vortrag">Ist bis heute, Plan ab morgen mit Vortrag</option>
         <option value="plan">Plan</option>
         <option value="ist">Ist</option>
         <option value="delta">Abweichung (Ist − Soll)</option>
@@ -23,6 +24,9 @@
     <label>Szenario
       <select id="szenario"><option value="">Basisplan</option></select>
     </label>
+    <label title="Eingefrorener Plan, gegen den Abweichungen (Ist − Soll), der Soll/Ist-Vergleich und der Excel-Export rechnen – gilt auch im Menü Soll/Ist">Soll-Referenz
+      <select id="referenz" {% if leser %}disabled{% endif %}></select>
+    </label>
     <button id="laden" class="sekundaer">Aktualisieren</button>
     {% if not leser %}<button id="einfrieren" title="Aktuellen Plan als Soll-Vorgabe einfrieren">Plan einfrieren</button>{% endif %}
     <a id="export-xlsx" class="knopf" href="#" title="13-Wochen-Plan als Excel-Datei">Excel ↓</a>
@@ -30,12 +34,15 @@
     <span class="hinweis" id="basis-info"></span>
   </div>
   <div id="warnungen"></div>
+  <div id="vortrag-hinweis"></div>
   <div class="matrix-huelle"><table class="matrix" id="matrix"></table></div>
   <div class="legende">
     <span>▾/▸ Gruppen auf-/zuklappen</span>
     <span style="text-decoration: underline dotted #9db4d0;">Ist-Wert</span>
     <span style="color:var(--rot)">negative Liquidität / Unterdeckung</span>
     <span>Gelbe Spalte = heute</span>
+    <span><span class="legende-muster vortrag"></span>vorgetragen (Ansicht „mit Vortrag“)</span>
+    <span><span class="legende-muster vortrag-schraffiert"></span>Vortrag + Planbuchung desselben Tages (addiert)</span>
   </div>
 </div>
 {% endblock %}

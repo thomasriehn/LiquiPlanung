@@ -28,6 +28,9 @@ async function lade() {
   let infoText = daten.vergleichsbasis === "SNAPSHOT"
     ? `Soll-Basis: eingefrorener Plan vom ${datumVoll(daten.snapshot.stichtag)}`
     : "Soll-Basis: aktueller Plan (noch kein Snapshot eingefroren)";
+  if (daten.vergleichsbasis === "SNAPSHOT" && daten.snapshot.referenz) {
+    infoText = `Soll-Referenz: eingefrorener Plan vom ${datumVoll(daten.snapshot.stichtag)}`;
+  }
   if (daten.szenario) {
     const s = daten.szenario;
     const teile = [`Einzahlungen ${s.ein_faktor} %`, `variable Auszahlungen ${s.aus_faktor} %`];
@@ -35,10 +38,7 @@ async function lade() {
     infoText = `Szenario „${s.name}“ (${teile.join(", ")}) · ` + infoText;
   }
   info.textContent = infoText;
-  let q = `?wochen=${wochen}` + (document.getElementById("start").value ? `&start=${document.getElementById("start").value}` : "");
-  if (szenarioId) q += `&szenario_id=${szenarioId}`;
-  document.getElementById("export-xlsx").href = `/api/mandanten/${MANDANT_ID}/export/plan.xlsx${q}`;
-  document.getElementById("export-pdf").href = `/api/mandanten/${MANDANT_ID}/export/plan.pdf${q}`;
+  exportLinks();
   const warnBox = document.getElementById("warnungen");
   warnBox.innerHTML = "";
   if (daten.unbekannte_konten.length) {
@@ -66,6 +66,35 @@ async function lade() {
   zeichne();
 }
 
+// Export übernimmt Fenster, Szenario, Spaltenansicht und Werteauswahl
+function exportLinks() {
+  const start = document.getElementById("start").value;
+  const szenarioId = document.getElementById("szenario").value;
+  let q = `?wochen=${document.getElementById("wochen").value || 13}` + (start ? `&start=${start}` : "");
+  if (szenarioId) q += `&szenario_id=${szenarioId}`;
+  q += `&metrik=${document.getElementById("metrik").value}`;
+  document.getElementById("export-xlsx").href = `/api/mandanten/${MANDANT_ID}/export/plan.xlsx${q}`;
+  document.getElementById("export-pdf").href =
+    `/api/mandanten/${MANDANT_ID}/export/plan.pdf${q}&ansicht=${document.getElementById("ansicht").value}`;
+}
+
+function vortragsHinweis() {
+  const box = document.getElementById("vortrag-hinweis");
+  const vt = daten.vortraege || [];
+  if (document.getElementById("metrik").value !== "vortrag") { box.innerHTML = ""; return; }
+  if (!vt.length) {
+    box.innerHTML = `<div class="warnung gruen">Keine offenen Zahlungen aus Dauerschuldverhältnissen
+      vorzutragen – alle fälligen Raten im Fenster sind gebucht.</div>`;
+    return;
+  }
+  box.innerHTML = `<div class="warnung">Auf den ${datumVoll(vt[0].ziel)} vorgetragen
+    (nicht oder nur teilweise gebuchte Dauerschuldverhältnisse):
+    <ul class="vortrag-liste">${vt.map(v => `<li>${esc(v.name)} (${esc(v.konto)}), fällig
+      ${datumVoll(v.faellig)}: ${eur(Math.abs(v.betrag))} € offen` +
+      (v.gezahlt ? ` – ${eur(v.gezahlt)} € von ${eur(Math.abs(v.soll))} € bereits gezahlt` : "") +
+      `</li>`).join("")}</ul></div>`;
+}
+
 function datumVoll(iso) { const [j, m, t] = iso.split("-"); return `${t}.${m}.${j}`; }
 
 function wert(zeile, tag) {
@@ -75,15 +104,19 @@ function wert(zeile, tag) {
   if (metrik === "plan") return { v: plan, ist: false };
   if (metrik === "ist") return { v: vergangen ? ist : null, ist: true };
   if (metrik === "delta") return { v: vergangen ? ist - basis : null, ist: false, delta: true };
+  if (metrik === "vortrag" && !vergangen) {
+    const vortrag = (zeile.vortrag && zeile.vortrag[tag]) || 0;
+    return { v: plan + vortrag, ist: false, vortrag: vortrag !== 0, gemischt: vortrag !== 0 && plan !== 0 };
+  }
   return vergangen ? { v: ist, ist: true } : { v: plan, ist: false };
 }
 
 function summiere(zeilen) {
   // Aggregat über Kinder: plan/ist/basis je Tag addieren
-  const agg = { plan: {}, ist: {}, basis: {} };
+  const agg = { plan: {}, ist: {}, basis: {}, vortrag: {} };
   for (const z of zeilen) {
-    for (const feld of ["plan", "ist", "basis"]) {
-      for (const [tag, v] of Object.entries(z[feld])) {
+    for (const feld of ["plan", "ist", "basis", "vortrag"]) {
+      for (const [tag, v] of Object.entries(z[feld] || {})) {
         agg[feld][tag] = (agg[feld][tag] || 0) + v;
       }
     }
@@ -120,14 +153,16 @@ function spalten() {
 }
 
 function zellWert(zeile, sp) {
-  let summe = 0, istTeil = false, alleNull = true, deltaMod = false;
+  let summe = 0, istTeil = false, alleNull = true, deltaMod = false, vortrag = false, gemischt = false;
   for (const t of sp.tage) {
     const w = wert(zeile, t);
     if (w.delta) deltaMod = true;
     if (w.v !== null && w.v !== 0) { summe += w.v; alleNull = false; }
     if (w.ist && (zeile.ist[t] || 0) !== 0) istTeil = true;
+    if (w.vortrag) vortrag = true;
+    if (w.gemischt) gemischt = true;
   }
-  return { summe, istTeil, leer: alleNull, delta: deltaMod };
+  return { summe, istTeil, leer: alleNull, delta: deltaMod, vortrag, gemischt };
 }
 
 function td(inhalt, klassen = []) {
@@ -163,6 +198,8 @@ function datenZeile(zeile, sps, cssKlasse, einrueckung = "") {
       if (z.delta) klassen.push(z.summe < -0.005 ? "negativ" : (z.summe > 0.005 ? "positiv" : ""));
       else if (z.summe < 0 && cssKlasse === "summe") klassen.push("negativ");
       if (z.istTeil) klassen.push("ist-wert");
+      // Schraffur nur auf Kontozeilen: Vortrag trifft auf Planbuchung desselben Kontos
+      if (z.vortrag) klassen.push(z.gemischt && !cssKlasse ? "vortrag-schraffiert" : "vortrag");
     }
     tr.appendChild(td(z.leer ? "" : eur(z.summe), klassen));
   }
@@ -229,7 +266,7 @@ function zeichne() {
   // Gruppen mit Konten
   for (const gruppe of daten.zeilen) {
     const agg = summiere(gruppe.kinder);
-    const aggZeile = { name: gruppe.name, plan: agg.plan, ist: agg.ist, basis: agg.basis };
+    const aggZeile = { name: gruppe.name, plan: agg.plan, ist: agg.ist, basis: agg.basis, vortrag: agg.vortrag };
     const tr = datenZeile(aggZeile, sps, "gruppe");
     if (zu.has(gruppe.key)) tr.classList.add("zu");
     tr.addEventListener("click", () => {
@@ -252,23 +289,39 @@ function zeichne() {
 
   // Bestände
   const b = daten.bestaende;
+  const mitVortrag = document.getElementById("metrik").value === "vortrag" && b.liquiditaet_vortrag;
+  const liquiditaet = mitVortrag ? b.liquiditaet_vortrag : b.liquiditaet;
+  const verfuegbar = mitVortrag ? b.verfuegbar_vortrag : b.verfuegbar;
   for (const fk of b.finanzkonten) {
     koerper.appendChild(bestandsZeile(
       `<span class="konto-nr">${esc(fk.nummer)}</span>${esc(fk.name)}`,
       fk.bestand, sps, "", fk.kreditlinie > 0 ? fk.kreditlinie : null));
   }
-  koerper.appendChild(bestandsZeile("Liquidität (Bank + Kasse)", b.liquiditaet, sps, "gesamt"));
+  koerper.appendChild(bestandsZeile("Liquidität (Bank + Kasse)", liquiditaet, sps, "gesamt"));
   if (b.kreditlinien > 0) {
-    koerper.appendChild(bestandsZeile("Verfügbar (inkl. Kreditlinien)", b.verfuegbar, sps, "gesamt"));
+    koerper.appendChild(bestandsZeile("Verfügbar (inkl. Kreditlinien)", verfuegbar, sps, "gesamt"));
   }
   koerper.appendChild(bestandsZeile("Warenbestand (nachrichtlich)", b.waren, sps));
 
   tabelle.appendChild(koerper);
+  vortragsHinweis();
 }
 
 document.getElementById("laden").addEventListener("click", lade);
-document.getElementById("ansicht").addEventListener("change", zeichne);
-document.getElementById("metrik").addEventListener("change", zeichne);
+for (const id of ["ansicht", "metrik"]) {
+  document.getElementById(id).addEventListener("change", () => { zeichne(); exportLinks(); });
+}
+document.getElementById("referenz").addEventListener("change", async (e) => {
+  try {
+    await referenzSetzen(MANDANT_ID, e.target.value);
+    toast("Soll-Referenz gespeichert (gilt auch für Soll/Ist und den Excel-Export).", false);
+    lade();
+  } catch (err) { toast(err.message); ladeReferenz(); }
+});
+
+function ladeReferenz() {
+  return referenzAuswahlFuellen(MANDANT_ID, document.getElementById("referenz")).catch(() => {});
+}
 document.getElementById("szenario").addEventListener("change", lade);
 const einfrierenKnopf = document.getElementById("einfrieren");
 if (einfrierenKnopf) {
@@ -283,10 +336,11 @@ if (einfrierenKnopf) {
         wochen: parseInt(document.getElementById("wochen").value) || 13,
       });
       toast(`Plan eingefroren (Stichtag ${datumVoll(erg.stichtag)}).`, false);
+      ladeReferenz();
       lade();
     } catch (e) { toast(e.message); }
   });
 }
 const gemerkterStart = startGemerkt(MANDANT_ID);
 if (gemerkterStart) document.getElementById("start").value = gemerkterStart;
-ladeSzenarien().then(lade);
+Promise.all([ladeSzenarien(), ladeReferenz()]).then(lade);
