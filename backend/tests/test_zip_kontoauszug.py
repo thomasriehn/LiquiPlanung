@@ -591,3 +591,60 @@ def test_ocr_zip_mehrseitig_einzeln_gebucht():
         ("Spedition Nord GmbH & Co. KG", "Re Nr. A-2", Decimal("-500.00")),
     ]
     assert any("Prüfsumme stimmt" in h for h in erg.hinweise)
+
+
+# ------------------- UC-Auszug mit Textebene, SEPA-Feldern und Saldenprüfung
+
+UC_SEPA_TEXT = f"""UC eBanking prime › Banking › Kontoauszüge › Auszugsdetails
+Muster Spedition GmbH
+Auszug Nr. 65
+Anfangssaldo 10.000,00  EUR
+Kontonummer 4711 Endsaldo 8.479,10  EUR
+Bankleitzahl 70020270 Kontoauszugsdatum 28.09.2026
+Buchung Valuta Buchungsinformationen
+Umsatz EUR
+28.09.2026 28.09.2026 SEPA Echtzeit Uew Gehalt
+EREF+4-220926-000896-000000
+9
+SVWZ+Abschlag f. September
+2026  Zahlungsdatum: 22.09.
+2026
+Max Mustermann
+KTO: {IBAN_BUERO}
+BANK: BYLADEM1KMS
+BREF: 0936395512006921
+-1.500,00
+Seite 1 von 2
+UC eBanking prime
+Version 6.2.0
+28.09.2026 28.09.2026 SEPA Echtzeitueberweisung
+EREF+NOTPROVIDED
+SVWZ+Betriebsnr.: 69608500
+ Gesamtbeitrag 09/2026
+Krankenkasse Muster
+KTO: {IBAN_TELEFON}
+BANK: DRESDEFF700
+BREF: 0936395512006934
+-20,90
+Endsaldo (in EUR) 8.479,10
+"""
+
+
+def test_uc_text_mit_sepa_feldern_und_pruefsumme():
+    from app.services.pdf_kontoauszug import parse_text
+
+    erg = parse_text(UC_SEPA_TEXT)
+    assert not erg.warnungen
+    assert [(u.empfaenger, u.iban, u.verwendungszweck, u.betrag) for u in erg.umsaetze] == [
+        ("Max Mustermann", IBAN_BUERO,
+         # 27-Zeichen-Zeile „… 22.09.“ + „2026“ ohne Leerzeichen, Mehrfach-Leerzeichen bereinigt
+         "SEPA Echtzeit Uew Gehalt Abschlag f. September 2026 Zahlungsdatum: 22.09.2026",
+         Decimal("-1500.00")),
+        ("Krankenkasse Muster", IBAN_TELEFON,
+         "SEPA Echtzeitueberweisung Betriebsnr.: 69608500 Gesamtbeitrag 09/2026",
+         Decimal("-20.90")),
+    ]
+    assert any("Prüfsumme stimmt" in h for h in erg.hinweise)
+
+    erg = parse_text(UC_SEPA_TEXT.replace("Endsaldo 8.479,10", "Endsaldo 8.000,00"))
+    assert any("nicht alle Umsätze erkannt" in w for w in erg.warnungen)

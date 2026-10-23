@@ -345,6 +345,8 @@ def _parse_uc_ebanking(text: str) -> PdfErgebnis:
             aktuell = None
             continue
         aktuell["zeilen"].append(zeile)
+    if erg.umsaetze:
+        _salden_pruefen(text, erg, ocr=False)
     return erg
 
 
@@ -564,7 +566,7 @@ def _sepa_zweck(zeilen: list[str]) -> str | None:
         elif im_zweck:
             text += ("" if len(vorige) >= _DTA_ZEILE else " ") + z
         vorige = z
-    return f"{zeilen[0]} {text}".strip()
+    return " ".join(f"{zeilen[0]} {text}".split())
 
 
 def _parse_uc_ocr(seiten: list[list[list[OcrWort]]]) -> PdfErgebnis:
@@ -647,8 +649,9 @@ def _parse_uc_ocr(seiten: list[list[list[OcrWort]]]) -> PdfErgebnis:
     return erg
 
 
-def _salden_pruefen(text: str, erg: PdfErgebnis) -> None:
-    """Gegen OCR-Lesefehler: Umsatzsumme muss der Saldoveränderung entsprechen."""
+def _salden_pruefen(text: str, erg: PdfErgebnis, ocr: bool = True) -> None:
+    """Umsatzsumme muss der Saldoveränderung entsprechen – fängt OCR-Lesefehler
+    bzw. bei Text-PDFs nicht erkannte Umsätze ab."""
     werte = {}
     for name, muster in _SALDO_MUSTER.items():
         m = muster.search(text)
@@ -665,10 +668,12 @@ def _salden_pruefen(text: str, erg: PdfErgebnis) -> None:
         else:
             erg.warnungen.append(
                 f"Prüfsumme weicht ab: Umsätze ergeben {_eur(summe)} €, laut Anfangs-/Endsaldo "
-                f"wären es {_eur(soll)} € – mögliche Lesefehler der Texterkennung, bitte "
-                "Beträge mit dem Auszug abgleichen."
+                f"wären es {_eur(soll)} € – "
+                + ("mögliche Lesefehler der Texterkennung, bitte Beträge mit dem Auszug abgleichen."
+                   if ocr else "möglicherweise wurden nicht alle Umsätze erkannt, bitte mit "
+                   "dem Auszug abgleichen.")
             )
-    else:
+    elif ocr:
         erg.warnungen.append(
             "Anfangs-/Endsaldo nicht erkannt – die per Texterkennung gelesenen Beträge "
             "bitte mit dem Auszug abgleichen."
