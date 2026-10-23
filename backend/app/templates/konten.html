@@ -18,12 +18,16 @@
       <option value="AUS">Auszahlungen</option><option value="EIN">Einzahlungen</option>
       <option value="INFO">nachrichtlich</option></select></label>
     <label>Sortierung<input name="sortierung" type="number" value="0" style="width:80px"></label>
+    <label title="Insolvenzspezifischer Sondereffekt – wird in den KPI-Kennzahlen „ohne Effekte“ herausgerechnet">Sondereffekt
+      <span style="display:flex;align-items:center;min-height:32px"><input type="checkbox" name="sondereffekt" style="width:auto"></span></label>
     <button type="submit" class="sekundaer">Gruppe anlegen</button>
   </form>
   {% endif %}
   <table class="liste" id="gruppen-tabelle">
     <thead><tr><th>Code</th><th>Name</th><th>Richtung</th>
-      <th class="zahl">Sortierung</th><th class="zahl">Konten</th><th></th></tr></thead>
+      <th class="zahl">Sortierung</th>
+      <th title="Insolvenzspezifischer Sondereffekt – in den KPI-Kennzahlen „ohne Effekte“ herausgerechnet">Sondereffekt</th>
+      <th class="zahl">Konten</th><th></th></tr></thead>
     <tbody></tbody>
   </table>
 
@@ -90,6 +94,7 @@ function ladeGruppen(d) {
       <td><select data-gfeld="richtung">${Object.entries(RICHTUNGEN).map(([w, n]) =>
         `<option value="${w}" ${w === g.richtung ? "selected" : ""}>${n}</option>`).join("")}</select></td>
       <td class="zahl"><input data-gfeld="sortierung" type="number" value="${g.sortierung ?? 0}" style="width:80px"></td>
+      <td><input data-gfeld="sondereffekt" type="checkbox" ${g.sondereffekt ? "checked" : ""} style="width:auto"></td>
       <td class="zahl">${anzahl}</td>
       <td>${LESER ? "" : `<button class="gefahr" data-gruppe-weg="${g.id}">✕</button>`}</td>`;
     tb.appendChild(tr);
@@ -106,7 +111,8 @@ document.querySelector("#gruppen-tabelle").addEventListener("change", async (e) 
   const feld = e.target.dataset.gfeld;
   if (!feld) return;
   const id = e.target.closest("tr").dataset.id;
-  const wert = feld === "sortierung" ? parseInt(e.target.value) || 0 : e.target.value;
+  const wert = feld === "sortierung" ? parseInt(e.target.value) || 0
+    : feld === "sondereffekt" ? e.target.checked : e.target.value;
   try { await api("PATCH", `/api/gruppen/${id}`, { [feld]: wert }); lade(); }
   catch (err) { toast(err.message); lade(); }
 });
@@ -119,6 +125,7 @@ if (gruppeForm) gruppeForm.addEventListener("submit", async (e) => {
     await api("POST", `/api/mandanten/${MANDANT_ID}/gruppen`, {
       code: f.get("code"), name: f.get("name"), richtung: f.get("richtung"),
       sortierung: parseInt(f.get("sortierung")) || 0,
+      sondereffekt: gruppeForm.sondereffekt.checked,
     });
     gruppeForm.reset(); lade();
   } catch (err) { toast(err.message); }

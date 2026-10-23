@@ -105,6 +105,11 @@ def kalender_seite(request: Request, mandant_id: int, db: Session = Depends(get_
     return _mandanten_seite(request, db, mandant_id, "kalender.html")
 
 
+@router.get("/mandanten/{mandant_id}/kpi")
+def kpi_seite(request: Request, mandant_id: int, db: Session = Depends(get_db)):
+    return _mandanten_seite(request, db, mandant_id, "kpi.html")
+
+
 @router.get("/mandanten/{mandant_id}/sollist")
 def sollist_seite(request: Request, mandant_id: int, db: Session = Depends(get_db)):
     return _mandanten_seite(request, db, mandant_id, "sollist.html")

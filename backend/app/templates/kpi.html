@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block titel %}KPI – {{ mandant.name }}{% endblock %}
+{% block inhalt %}
+<div class="seite-breit kpi-seite">
+  <div class="werkzeuge">
+    <label>Start <input type="date" id="start"></label>
+    <label>Wochen <input type="number" id="wochen" value="13" min="1" max="26" style="width:60px"></label>
+    <label title="Früherer Planstand für den Planvergleich (z. B. Vorwoche oder Plan zum Antrag)">Vergleich mit Planstand
+      <select id="vergleich"></select></label>
+    <button id="laden" class="sekundaer">Aktualisieren</button>
+    <span class="hinweis" id="kpi-info"></span>
+  </div>
+
+  <section class="kpi-kacheln" id="kacheln" aria-label="Kennzahlen"></section>
+
+  <h2>Liquidität</h2>
+  <div class="kpi-raster" id="bereich-liquiditaet"></div>
+
+  <h2>Ein- und Auszahlungen</h2>
+  <div class="kpi-raster" id="bereich-zahlungen"></div>
+
+  <h2 id="titel-vergleich">Planvergleich</h2>
+  <div class="kpi-raster" id="bereich-vergleich"></div>
+
+  <h2>Umsatz und Kosten</h2>
+  <div class="kpi-raster" id="bereich-verteilung"></div>
+  <p class="hinweis" id="sondereffekt-hinweis"></p>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>const MANDANT_ID = {{ mandant.id }};</script>
+<script src="/static/diagramme.js?v={{ static_version }}"></script>
+<script src="/static/kpi.js?v={{ static_version }}"></script>
+{% endblock %}

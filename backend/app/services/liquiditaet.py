@@ -647,6 +647,88 @@ def referenz_snapshot(db: Session, mandant_id: int) -> models.PlanSnapshot | Non
     ).first()
 
 
+def gruppen_aufloeser(konto_by_id: dict[int, models.Konto], gruppen: list[models.KontoGruppe]):
+    """Liefert eine Funktion Planschlüssel → BWA-Gruppe (Konto: seine Gruppe;
+    Termine/Posten/Dauerbuchungen ohne Konto: feste Standardgruppen)."""
+    gruppe_by_code = {g.code: g for g in gruppen}
+
+    def gruppe_fuer_key(key: Key) -> models.KontoGruppe | None:
+        if isinstance(key, int):
+            k = konto_by_id.get(key)
+            return k.gruppe if k else None
+        if key.startswith("TERMIN:SV"):
+            return gruppe_by_code.get("A_SV") or gruppe_by_code.get("A_STEUER")
+        if key.startswith("TERMIN:OP_DEBITOR") or key.startswith("TERMIN:DAUER_DEBITOR"):
+            return gruppe_by_code.get("E_SONST")
+        if key.startswith("TERMIN:OP_") or key.startswith("TERMIN:DAUER_"):
+            return gruppe_by_code.get("A_SONST")
+        if key.startswith("TERMIN:"):
+            return gruppe_by_code.get("A_STEUER")
+        return None
+
+    return gruppe_fuer_key
+
+
+def liquiditaets_richtung(key: Key, konto_by_id: dict[int, models.Konto], gruppe_fuer_key) -> str | None:
+    """EIN/AUS einer Planzeile oder None, wenn sie nicht in die Liquidität
+    eingeht (Finanzkonten, nicht liquiditätswirksame und nachrichtliche Konten)."""
+    if isinstance(key, int):
+        k = konto_by_id.get(key)
+        if k is None or not k.liquiditaetswirksam or k.typ in (
+            models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value
+        ):
+            return None
+        richtung = _konto_richtung(k)
+    else:
+        g = gruppe_fuer_key(key)
+        richtung = g.richtung if g else Richtung.AUS.value
+    return None if richtung == Richtung.INFO.value else richtung
+
+
+def liquiditaet_zum(db: Session, mandant: models.Mandant, tag: date,
+                    heute: date | None = None) -> Decimal:
+    """Ist-Liquidität (aktive Bank- und Kassenkonten) zum Ende des Tages `tag`.
+
+    Wie im Plan zählen alle Bestandsanker bis heute – liegt der erste Anker
+    nach `tag` (z. B. Kontoauszug von heute), wird von ihm zurückgerechnet."""
+    heute = heute or date.today()
+    konten = _lade_konten(db, mandant.id)
+    finanz_typen = (models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value)
+    finanz_nrn = {k.nummer for k in konten if k.typ in finanz_typen}
+    finanzkonten = [k for k in konten if k.typ in finanz_typen and k.aktiv]
+    werte = _bestaende(db, mandant, finanzkonten, finanz_nrn, [tag], max(tag, heute), {})
+    return Decimal(str(werte["liquiditaet"][tag.isoformat()]))
+
+
+def snapshot_fluesse(snap: models.PlanSnapshot) -> dict[Key, dict[date, Decimal]]:
+    werte: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+    for w in snap.werte:
+        key: Key = w.konto_id if w.konto_id is not None else f"TERMIN:{w.termin_typ}"
+        werte[key][w.datum] += w.betrag
+    return werte
+
+
+def snapshot_liquiditaet(
+    db: Session, mandant: models.Mandant, snap: models.PlanSnapshot,
+    konto_by_id: dict[int, models.Konto], gruppe_fuer_key, heute: date | None = None,
+) -> dict[date, Decimal]:
+    """Geplante Liquidität eines eingefrorenen Planstands je Tag seines
+    Fensters: Ist-Liquidität am Vortag des Stichtags + kumulierte Planflüsse."""
+    netto: dict[date, Decimal] = defaultdict(Decimal)
+    for key, tageswerte in snapshot_fluesse(snap).items():
+        if liquiditaets_richtung(key, konto_by_id, gruppe_fuer_key) is None:
+            continue
+        for d, v in tageswerte.items():
+            netto[d] += v
+    stand = liquiditaet_zum(db, mandant, snap.stichtag - timedelta(days=1), heute)
+    verlauf: dict[date, Decimal] = {}
+    for i in range(snap.wochen * 7):
+        d = snap.stichtag + timedelta(days=i)
+        stand += netto.get(d, Decimal("0"))
+        verlauf[d] = stand
+    return verlauf
+
+
 def _snapshot_plan(
     db: Session, mandant_id: int, start: date, heute: date
 ) -> tuple[dict[Key, dict[date, Decimal]] | None, models.PlanSnapshot | None]:
@@ -668,11 +750,7 @@ def _snapshot_plan(
                 break
     if snap is None:
         return None, None
-    werte: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
-    for w in snap.werte:
-        key: Key = w.konto_id if w.konto_id is not None else f"TERMIN:{w.termin_typ}"
-        werte[key][w.datum] += w.betrag
-    return werte, snap
+    return snapshot_fluesse(snap), snap
 
 
 def berechne_plan(
@@ -736,21 +814,7 @@ def berechne_plan(
             .order_by(models.KontoGruppe.sortierung, models.KontoGruppe.id)
         )
     )
-    gruppe_by_code = {g.code: g for g in gruppen}
-
-    def gruppe_fuer_key(key: Key) -> models.KontoGruppe | None:
-        if isinstance(key, int):
-            k = konto_by_id.get(key)
-            return k.gruppe if k else None
-        if key.startswith("TERMIN:SV"):
-            return gruppe_by_code.get("A_SV") or gruppe_by_code.get("A_STEUER")
-        if key.startswith("TERMIN:OP_DEBITOR") or key.startswith("TERMIN:DAUER_DEBITOR"):
-            return gruppe_by_code.get("E_SONST")
-        if key.startswith("TERMIN:OP_") or key.startswith("TERMIN:DAUER_"):
-            return gruppe_by_code.get("A_SONST")
-        if key.startswith("TERMIN:"):
-            return gruppe_by_code.get("A_STEUER")
-        return None
+    gruppe_fuer_key = gruppen_aufloeser(konto_by_id, gruppen)
 
     alle_keys = set(plan.keys()) | set(ist.keys()) | set(vortrag.keys())
     zeilen_je_gruppe: dict[int | None, list[Key]] = defaultdict(list)
@@ -837,17 +901,7 @@ def berechne_plan(
     def summe_je_tag(quelle: dict[Key, dict[date, Decimal]], nur: str | None) -> dict[str, float]:
         s: dict[date, Decimal] = defaultdict(Decimal)
         for key, tageswerte in quelle.items():
-            if isinstance(key, int):
-                k = konto_by_id.get(key)
-                if k is None:
-                    continue
-                if k.typ in finanz_typen or not k.liquiditaetswirksam:
-                    continue
-                richtung = _konto_richtung(k)
-            else:
-                g = gruppe_fuer_key(key)
-                richtung = g.richtung if g else Richtung.AUS.value
-            if richtung == Richtung.INFO.value:
+            if liquiditaets_richtung(key, konto_by_id, gruppe_fuer_key) is None:
                 continue
             for d, v in tageswerte.items():
                 if nur == "EIN" and v <= 0:

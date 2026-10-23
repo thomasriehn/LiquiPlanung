@@ -240,6 +240,9 @@ class KontoGruppe(Base):
     parent_id: Mapped[int | None] = mapped_column(
         ForeignKey("konto_gruppen.id", ondelete="SET NULL"), nullable=True
     )
+    # insolvenzspezifischer Sondereffekt (z. B. Verfahrenskosten, Anfechtungen):
+    # in den KPI-Kennzahlen „ohne Effekte“ herausgerechnet
+    sondereffekt: Mapped[bool] = mapped_column(Boolean, default=False)
 
     konten: Mapped[list["Konto"]] = relationship(back_populates="gruppe")
 

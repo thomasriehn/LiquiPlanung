@@ -208,3 +208,57 @@ table.liste thead th.fix-spalte { background: var(--blau-hell); z-index: 5; }
   background: var(--blau-hell); color: #1d4e89; font-size: 11px;
 }
 .kombo-leer { padding: 7px 9px; color: #8a93a0; font-size: 12px; }
+
+/* ---- KPI-Seite ---- */
+.kpi-seite.laedt .kpi-kacheln, .kpi-seite.laedt .kpi-raster { opacity: .55; transition: opacity .15s; }
+.kpi-kacheln {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px; margin: 14px 0 6px;
+}
+.kpi-kachel { background: #fff; border: 1px solid var(--rand); border-radius: 8px; padding: 12px 14px; }
+.kpi-kachel-label { font-size: 12.5px; color: #52514e; }
+.kpi-kachel-wert { font-size: 22px; font-weight: 600; margin: 4px 0 2px; color: var(--text); }
+.kpi-kachel-zeile { font-size: 12px; color: #52514e; margin-top: 2px; }
+.kpi-kachel-zeile.gut { color: #006300; }
+.kpi-kachel-zeile.schlecht { color: var(--rot); }
+.kpi-status {
+  display: inline-block; font-size: 12px; font-weight: 600; margin: 2px 0;
+  padding: 1px 8px; border-radius: 10px;
+}
+.status-kritisch .kpi-status { background: #fbe4e4; color: #a32a2a; }
+.status-gut .kpi-status { background: #e3f4e3; color: #006300; }
+.kpi-raster { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.kpi-karte {
+  margin: 0; background: #fff; border: 1px solid var(--rand); border-radius: 8px;
+  padding: 12px 14px; min-width: 0;
+}
+.kpi-karte.breit { grid-column: 1 / -1; }
+.kpi-karte-kopf { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.kpi-karte h3 { font-size: 14px; margin: 0; }
+.kpi-untertitel { font-size: 12px; color: var(--grau); margin-top: 2px; }
+.klein-knopf { padding: 3px 9px; font-size: 12px; }
+.dg-legende { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: #52514e; margin: 8px 0 2px; }
+.dg-legende > span { display: inline-flex; align-items: center; gap: 6px; }
+.dg-schluessel { display: inline-block; flex-shrink: 0; }
+.dg-schluessel.flaeche { width: 10px; height: 10px; border-radius: 2px; }
+.dg-schluessel.linie { width: 14px; height: 2px; border-radius: 1px; }
+.dg-plot { margin-top: 6px; width: 100%; }
+.dg-plot svg { display: block; overflow: visible; }
+.dg-ziffern { font-variant-numeric: tabular-nums; }
+.dg-marke { transition: opacity .1s; }
+.dg-marke.aktiv { opacity: .78; }
+.dg-tooltip {
+  position: fixed; z-index: 50; display: none; pointer-events: none; background: #fff;
+  border: 1px solid rgba(11, 11, 11, .12); border-radius: 6px; box-shadow: 0 4px 14px rgba(0, 0, 0, .12);
+  padding: 7px 10px; font-size: 12px; min-width: 150px;
+}
+.dg-tooltip-titel { color: #52514e; margin-bottom: 4px; }
+.dg-tooltip-zeile { display: flex; align-items: center; gap: 7px; margin-top: 2px; }
+.dg-tooltip-zeile strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.dg-tooltip-name { color: #52514e; }
+.dg-tabelle { margin-top: 8px; max-height: 340px; overflow: auto; }
+.dg-leer { padding: 24px; color: var(--grau); text-align: center; }
+.kpi-tabelle-huelle { overflow-x: auto; margin-top: 8px; }
+.liste td.negativ { color: var(--rot); }
+.liste td.positiv { color: var(--gruen); }
+@media (max-width: 1000px) { .kpi-raster { grid-template-columns: minmax(0, 1fr); } }

@@ -323,6 +323,37 @@ Termine werden bei Neugenerierung nicht überschrieben.
 
 Unbekannte Konten werden beim Import gemeldet und können direkt angelegt werden.
 
+## 7a. KPI-Seite (Fact Sheet)
+
+Nach dem Vorbild des Excel-„Fact Sheet“ (Liquidität · Ein-/Auszahlungen ·
+Anpassungen gegenüber früheren Planständen · KPIs zu Umsatz und Kosten). Alle
+Werte stammen aus `berechne_plan` (Ist bis heute, Plan ab morgen) und rechnen
+damit identisch zum 13-Wochen-Plan (`services/kpi.py`, `GET /mandanten/{id}/kpi`).
+
+- **Soll-Liquidität eines Planstands:** Ist-Liquidität am Vortag des Stichtags
+  (Bestandsanker bis heute, ggf. von einem späteren Kontoauszug zurückgerechnet)
+  plus kumulierte liquiditätswirksame Planflüsse des Snapshots. Die Soll-Linie nutzt
+  die Soll-Referenz bzw. den jüngsten passenden Planstand.
+- **Planvergleich („Anpassungen“):** aktueller Stand (Ist + Prognose) gegen einen
+  frei wählbaren Planstand, im gemeinsamen Zeitraum je BWA-Gruppe und Monat
+  (Liquiditätswirkung, positiv = besser) sowie als Monatsendliquidität. Mehrere
+  Vergleiche des Fact Sheets (Vorwoche, Antrag, Stichtag) entsprechen der Wahl
+  verschiedener Snapshots.
+- **Kennzahlen:** tiefster Stand und erste Unterdeckung ab heute; Ist gegen Soll
+  zum Ende der letzten abgeschlossenen Woche (sonst heute); Cash-Marge
+  (Netto-Cashflow ÷ Einzahlungen) mit und ohne Gruppen mit Kennzeichen
+  `konto_gruppen.sondereffekt` (bei der Migration für Gruppen mit „Insolvenz“ bzw.
+  „Anfechtung“ im Namen vorbelegt); offene Forderungen/Verbindlichkeiten als
+  Restbeträge.
+- **Darstellung:** eigene, abhängigkeitsfreie SVG-Diagramme (`static/diagramme.js`)
+  nach festen Regeln: schmale Marken mit gerundetem Datenende, Haarlinien-Raster,
+  eine y-Achse, Legende ab zwei Reihen, sparsame Direktbeschriftung, Tooltip
+  (Fadenkreuz bei Linien), Tabellenansicht je Diagramm; Farben gegen die weiße
+  Kartenfläche auf Farbfehlsichtigkeit geprüft (Blau/Orange, divergierend Blau/Rot,
+  Vergleichsstände als Grau-Hervorhebung). Die Kategorie-×-Monat-Matrix ist eine
+  Tabelle (zu viele Klassen für ein Diagramm); Verteilungen sind Balken statt
+  Torten (bessere Vergleichbarkeit bei vielen Kategorien).
+
 ## 8. Kontenrahmen
 
 SKR03 und SKR04 werden als Vorlage mit den planungsrelevanten Konten (inkl. USt-Satz und

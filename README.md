@@ -96,6 +96,16 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
 - **Insolvenzgeld-Assistent**: Zeitraum je Mandant (Vorschlag: 3 Monate vor erwarteter
   Eröffnung); unterdrückt Personal-/SV-Zahlungen und kürzt SV-/LSt-Termine anteilig
   (§§ 165 ff., 175 SGB III), mit Entlastungsvorschau je Position.
+- **KPI-Seite (Fact Sheet)**: Kennzahlen-Kacheln (Liquidität heute und zum Planende,
+  tiefster Stand, Reichweite bis zur Unterdeckung, Ist gegen Soll der letzten Woche,
+  Cash-Marge mit/ohne Sondereffekte, offene Forderungen/Verbindlichkeiten) und
+  Diagramme: Liquidität je Woche Soll (Soll-Referenz) gegen Ist/Prognose,
+  Monatsendliquidität, Netto-Cashflow sowie Ein-/Auszahlungen je Monat,
+  **Planvergleich** gegen einen wählbaren früheren Planstand (z. B. Vorwoche oder
+  Plan zum Antrag: Veränderung je Kategorie und Monat, Monatsendliquidität) und die
+  Verteilung der Ein- und Auszahlungen. Jedes Diagramm hat eine Tabellenansicht.
+  Kontogruppen lassen sich als **Sondereffekt** kennzeichnen (z. B. insolvenzspezifische
+  Kosten, Anfechtungen) – sie werden in den Kennzahlen „ohne Sondereffekte“ herausgerechnet.
 - **Szenarien (Best/Base/Worst)**: Faktoren auf Einzahlungen und variable Auszahlungen,
   Debitorenverzögerung; umschaltbar auf der Plan-Seite, im Export vermerkt; Soll/Ist
   bleibt auf dem Basisplan. Detailregeln je Konto/BWA-Gruppe übersteuern die globalen
@@ -179,6 +189,7 @@ backend/app
 │   ├── zahlungskalender.py  SV-/Steuertermine, Termin-Generierung
 │   ├── datev.py             DATEV-/CSV-/BWA-Parser
 │   ├── liquiditaet.py       13-Wochen-Engine, Snapshots, Soll/Ist
+│   ├── kpi.py               Kennzahlen und Planvergleich für die KPI-Seite
 │   ├── kontenrahmen.py      SKR03/SKR04-Vorlagen inkl. USt und BWA-Gruppen
 │   └── demo.py              Demo-Mandant
 ├── templates/ + static/     Oberfläche (Jinja2 + Vanilla-JS)

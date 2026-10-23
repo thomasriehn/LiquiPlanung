@@ -463,7 +463,7 @@ def konten_liste(
     return {
         "gruppen": [
             {"id": g.id, "code": g.code, "name": g.name, "richtung": g.richtung,
-             "sortierung": g.sortierung}
+             "sortierung": g.sortierung, "sondereffekt": g.sondereffekt}
             for g in gruppen
         ],
         "konten": [
@@ -586,6 +586,7 @@ class GruppeNeu(BaseModel):
     name: str
     richtung: str = "AUS"
     sortierung: int = 0
+    sondereffekt: bool = False
 
 
 def _gruppe_oder_404(db: Session, gruppe_id: int) -> models.KontoGruppe:
@@ -621,6 +622,7 @@ def gruppe_anlegen(
         name=daten.name.strip(),
         richtung=daten.richtung,
         sortierung=daten.sortierung,
+        sondereffekt=daten.sondereffekt,
     )
     db.add(gruppe)
     audit(db, benutzer, mandant.id, "GRUPPE_ANGELEGT", code)
@@ -644,6 +646,8 @@ def gruppe_aendern(
             gruppe.richtung = wert
         elif feld == "sortierung":
             gruppe.sortierung = int(wert or 0)
+        elif feld == "sondereffekt":
+            gruppe.sondereffekt = bool(wert)
         elif feld == "code":
             code = str(wert).strip()
             if not code:
@@ -3050,6 +3054,29 @@ def szenarien_vergleich_abrufen(
     return szenarien_vergleich(
         db, mandant, start=_datum(start, "start") if start else None, wochen=wochen
     )
+
+
+@router.get("/mandanten/{mandant_id}/kpi")
+def kpi_abrufen(
+    mandant_id: int,
+    start: str | None = None,
+    wochen: int = 13,
+    vergleich_id: int | None = None,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Kennzahlen für die KPI-Seite (Fact Sheet). Vergleich ohne Angabe:
+    Soll-Referenz bzw. jüngster passender Planstand."""
+    from ..services.kpi import kpi_daten
+
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    if not (1 <= wochen <= 26):
+        raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    try:
+        return kpi_daten(db, mandant, start=_datum(start, "start") if start else None,
+                         wochen=wochen, vergleich_id=vergleich_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 @router.get("/mandanten/{mandant_id}/sollist")
