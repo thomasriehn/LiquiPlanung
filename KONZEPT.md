@@ -185,6 +185,7 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
 | `termin_regeln`, `zahlungstermine` | Kalenderregeln (SV, USt-VA, LSt, GewSt, KSt) und generierte, editierbare Termine |
 | `bestaende` | Anfangs-/Stichtagsbestände Bank/Kasse/Waren |
 | `plan_snapshots`, `plan_snapshot_werte` | Eingefrorene Plandaten für den Soll-/Ist-Vergleich |
+| `plan_verschiebungen` | Manuelle Verschiebungen von Planwerten/Vorträgen einer Planzeile (Ursprungstag → Zieltag, Teilbetrag) |
 | `audit_log` | Protokoll wesentlicher Aktionen |
 
 Alle mandantenbezogenen Tabellen tragen `mandant_id`; jeder Zugriff läuft über eine
@@ -241,6 +242,37 @@ Zusammentreffen mit einer Planbuchung desselben Kontos schraffieren kann). Die
 Liquidität wird im Vortragsmodus um die kumulierten Vorträge fortgeschrieben.
 Grenze: Zahlungen auf demselben Konto, die zu anderen Vorgängen gehören (z. B. ein
 offener Posten), werden mangels Zuordnung mit angerechnet.
+
+**Manuelle Verschiebungen (`plan_verschiebungen`):** Der Zellendialog legt je
+Ursprungstag einen Datensatz an (Planzeile = Konto oder Termin-Typ, `von` → `nach`,
+Betrag mit Vorzeichen des Flusses; entnommen wird chronologisch aus den künftigen
+Tagen der Zelle). Ziel ist der gewählte Tag bzw. der erste Bankarbeitstag der
+Woche/des Monats, frühestens morgen. Die Engine wendet die Verschiebungen nach
+`plan_fluesse` in Anlagereihenfolge an, jeweils **begrenzt auf den am Ursprungstag
+noch geplanten Betrag** gleicher Richtung (Ursprung außerhalb des Fensters: Planbetrag
+dieses Tages aus einer Wochenberechnung). Planverschiebungen wirken dauerhaft
+(auch für den Soll/Ist-Vergleich vergangener Tage). Ist der Ursprungstag vorbei,
+der Zieltag aber nicht, sind überfällige offene Posten inzwischen auf den Rolltag
+gewandert – der noch fehlende Teil wird dann von dort genommen (nur aus dem
+gerollten Postenanteil, nicht aus anderen Planwerten des Rolltags). Die
+Restplan-Sicht der Bestandsfortschreibung übernimmt die Wirkung: künftige
+Ursprungstage werden entlastet, bei vergangenem Ursprungstag nur gerollte Posten;
+der Zieltag erhält den Betrag, solange er in der Zukunft liegt. Für den Vortrag
+gelten verschobene Dauerschuld-Raten am Ursprungstag als nicht fällig, am Zieltag
+als fällig. **Vortragsverschiebungen** greifen auf den jeweils aktuellen
+Vortragstag zu (begrenzt auf den offenen Vortrag) und enden mit ihrem Zieltag –
+danach ist ein weiterhin offener Betrag wieder regulär vorzutragen. Grenze: wird
+ein Posten nach einer Verschiebung auf einen früheren Tag dort nur teilweise
+bezahlt, mindert die Verschiebung den Rest am Ursprungstag weiterhin.
+Zeilen liefern `verschoben`/`verschoben_vortrag` (abgebende Tage negativ,
+empfangende positiv) für die Eckmarke der Oberfläche; eingefrorene Planstände
+enthalten die Planverschiebungen.
+
+**Ist-Buchungen einer Zelle:** `GET /mandanten/{id}/plan/ist-buchungen` liefert die
+Zahlungsbuchungen (genau eine Seite Bank/Kasse) der Planzeile im Zeitraum;
+`POST /buchungen/{id}/sachkonto` bucht die Sachkontoseite auf ein anderes
+(Nicht-Finanz-)Konto um – Bankseite, Betrag und Postenbezug bleiben, protokolliert
+im Audit-Log.
 
 ## 6. Zahlungskalender-Regeln (implementiert)
 
@@ -353,6 +385,11 @@ damit identisch zum 13-Wochen-Plan (`services/kpi.py`, `GET /mandanten/{id}/kpi`
   Vergleichsstände als Grau-Hervorhebung). Die Kategorie-×-Monat-Matrix ist eine
   Tabelle (zu viele Klassen für ein Diagramm); Verteilungen sind Balken statt
   Torten (bessere Vergleichbarkeit bei vielen Kategorien).
+- **PDF-Bericht** (`services/kpi_pdf.py`, `GET /mandanten/{id}/export/kpi.pdf`):
+  gleiche Daten und Parameter (Start, Wochen, Vergleichsstand) wie die Seite; die
+  Diagramme werden serverseitig mit reportlab-Grafiken nach denselben Regeln und
+  Farben gezeichnet (A4 quer, zwei Karten je Zeile), ergänzt um Wertetabellen
+  (Liquidität je Woche, Monatsübersicht, Verteilungen) für den Ausdruck.
 
 ## 8. Kontenrahmen
 

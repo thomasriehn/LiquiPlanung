@@ -191,6 +191,7 @@ def plan_fluesse(
     heute: date | None = None,
     nur_offen: bool = False,
     szenario: models.Szenario | None = None,
+    gerollt: dict[Key, Decimal] | None = None,
 ) -> dict[Key, dict[date, Decimal]]:
     """Planzahlungen je Konto/Tag für das Fenster [start, ende].
 
@@ -202,6 +203,8 @@ def plan_fluesse(
                hinter heute.
     szenario:  Was-wäre-wenn-Faktoren (Einzahlungen, budgetbasierte Auszahlungen,
                Debitorenverzögerung); None = Basisplan.
+    gerollt:   nimmt je Planschlüssel die auf den Rolltag verschobenen
+               überfälligen Postenbeträge auf (für manuelle Verschiebungen).
     """
     heute = heute or start
     bl = mandant.bundesland
@@ -259,6 +262,9 @@ def plan_fluesse(
             betrag = -grundbetrag
         key: Key = p.konto_id if p.konto_id is not None else f"TERMIN:OP_{p.art}"
         plan[key][d] += betrag
+        if gerollt is not None and p.status != PostenStatus.BEZAHLT.value and d == roll_ziel \
+                and zahltag < d:
+            gerollt[key] = gerollt.get(key, Decimal("0")) + betrag
 
     # 2) Dauerbuchungen: Raster mit Vorlauf erzeugen, erst verschieben, dann filtern,
     #    damit Raten nicht an der Fenstergrenze verloren gehen (z. B. 01.11. = Sonntag)
@@ -361,6 +367,145 @@ def _dauer_termine(d: models.Dauerbuchung, start: date, ende: date) -> list[date
     return termine
 
 
+# ---- Manuelle Verschiebungen von Planbeträgen ----
+# Eine Verschiebung bewegt einen (Teil-)Betrag einer Planzeile vom Tag `von`
+# auf den Tag `nach` (Vorzeichen wie der Zahlungsfluss). Sie wirkt dauerhaft,
+# ist aber stets auf den dort tatsächlich geplanten Betrag begrenzt – ändert
+# sich die Planbasis (Posten bezahlt, Dauerbuchung beendet), entsteht kein
+# Phantombetrag. Ist `von` vorbei, der Zieltag aber noch offen, sind
+# überfällige Posten inzwischen auf den Rolltag gewandert und werden von dort
+# genommen. Vorträge (Quelle VORTRAG) wirken nur bis zu ihrem Zieltag – danach
+# ist der noch offene Betrag wieder regulär vorzutragen.
+
+def verschiebung_key(v: models.PlanVerschiebung) -> Key:
+    return v.konto_id if v.konto_id is not None else f"TERMIN:{v.termin_typ}"
+
+
+def plan_verschiebungen(db: Session, mandant_id: int, quelle: str,
+                        offen_ab: date | None = None) -> list:
+    q = select(models.PlanVerschiebung).where(
+        models.PlanVerschiebung.mandant_id == mandant_id,
+        models.PlanVerschiebung.quelle == quelle,
+    )
+    if offen_ab is not None:
+        q = q.where(models.PlanVerschiebung.nach > offen_ab)
+    return list(db.scalars(q.order_by(models.PlanVerschiebung.id)))
+
+
+def _extern_plan(db: Session, mandant: models.Mandant, heute: date):
+    """Planbetrag eines Tages außerhalb des Fensters (wochenweise gecacht)."""
+    cache: dict[date, dict] = {}
+
+    def verfuegbar(key: Key, tag: date) -> Decimal:
+        w = wochen_start(tag)
+        if w not in cache:
+            cache[w] = plan_fluesse(db, mandant, w, w + timedelta(days=6), heute=heute)
+        return cache[w].get(key, {}).get(tag, Decimal("0"))
+
+    return verfuegbar
+
+
+def verschiebungen_anwenden(
+    plan: dict[Key, dict[date, Decimal]], verschiebungen: list, start: date, ende: date,
+    heute: date, roll_ziel: date, gerollt: dict[Key, Decimal], extern,
+) -> list[tuple]:
+    """Wendet Plan-Verschiebungen auf `plan` an. Liefert die tatsächlichen
+    Bewegungen (key, ursprungstag, zieltag, betrag, art, verschiebung_id) mit
+    art "fest" (vom Ursprungstag) oder "rollend" (vom Rolltag überfälliger Posten)."""
+    bewegungen: list[tuple] = []
+    pool = dict(gerollt)
+    for v in verschiebungen:
+        key = verschiebung_key(v)
+        vz = Decimal(1) if v.betrag > 0 else Decimal(-1)
+        rest = abs(v.betrag)
+        ziel_im_fenster = start <= v.nach <= ende
+        im_fenster = start <= v.von <= ende
+        verfuegbar = plan.get(key, {}).get(v.von, Decimal(0)) if im_fenster else extern(key, v.von)
+        if verfuegbar * vz > 0:
+            anteil = min(rest, abs(verfuegbar))
+            if im_fenster:
+                plan[key][v.von] -= vz * anteil
+            if ziel_im_fenster:
+                plan[key][v.nach] += vz * anteil
+            bewegungen.append((key, v.von, v.nach, vz * anteil, "fest", v.id))
+            rest -= anteil
+        if (rest > 0 and v.von <= heute < v.nach and v.von != roll_ziel
+                and start <= roll_ziel <= ende):
+            am_rolltag = plan.get(key, {}).get(roll_ziel, Decimal(0))
+            gerollt_rest = pool.get(key, Decimal(0))
+            if am_rolltag * vz > 0 and gerollt_rest * vz > 0:
+                anteil = min(rest, abs(am_rolltag), abs(gerollt_rest))
+                plan[key][roll_ziel] -= vz * anteil
+                pool[key] = gerollt_rest - vz * anteil
+                if ziel_im_fenster:
+                    plan[key][v.nach] += vz * anteil
+                bewegungen.append((key, roll_ziel, v.nach, vz * anteil, "rollend", v.id))
+    return bewegungen
+
+
+def verschiebungen_projektion(
+    projektion: dict[Key, dict[date, Decimal]], verschiebungen: list, bewegungen: list[tuple],
+    start: date, ende: date, heute: date, roll_ziel: date, gerollt: dict[Key, Decimal],
+    ist_liquide,
+) -> None:
+    """Überträgt die Verschiebungen auf die Restplan-Sicht (nur noch offene
+    Zahlungen): künftige Ursprungstage werden entlastet, bei vergangenem
+    Ursprungstag nur überfällige, auf den Rolltag gewanderte Posten (Dauer-
+    buchungen und Termine sind dort ohnehin nicht mehr enthalten). Der Zieltag
+    erhält den Betrag, solange er in der Zukunft liegt."""
+    bewegt: dict[int, Decimal] = defaultdict(Decimal)
+    for _, _, _, betrag, _, vid in bewegungen:
+        bewegt[vid] += betrag
+    pool = dict(gerollt)
+    for v in verschiebungen:
+        menge = bewegt.get(v.id, Decimal(0))
+        key = verschiebung_key(v)
+        if not menge or not ist_liquide(key):
+            continue
+        vz = Decimal(1) if menge > 0 else Decimal(-1)
+        zubuchen = menge
+        if v.von > heute:
+            if start <= v.von <= ende:
+                verfuegbar = projektion.get(key, {}).get(v.von, Decimal(0))
+                anteil = min(abs(menge), abs(verfuegbar)) if verfuegbar * vz > 0 else Decimal(0)
+                projektion[key][v.von] -= vz * anteil
+                zubuchen = vz * anteil
+        elif start <= roll_ziel <= ende:
+            am_rolltag = projektion.get(key, {}).get(roll_ziel, Decimal(0))
+            gerollt_rest = pool.get(key, Decimal(0))
+            if am_rolltag * vz > 0 and gerollt_rest * vz > 0:
+                anteil = min(abs(menge), abs(am_rolltag), abs(gerollt_rest))
+                projektion[key][roll_ziel] -= vz * anteil
+                pool[key] = gerollt_rest - vz * anteil
+        if zubuchen and v.nach > heute and start <= v.nach <= ende:
+            projektion[key][v.nach] += zubuchen
+
+
+def vortrag_verschiebungen_anwenden(
+    vortrag: dict[Key, dict[date, Decimal]], verschiebungen: list, start: date, ende: date,
+) -> list[tuple]:
+    """Vorträge liegen auf dem aktuellen Vortragstag – von dort wird (begrenzt
+    auf den noch offenen Vortrag) auf den Zieltag verschoben."""
+    bewegungen: list[tuple] = []
+    for v in verschiebungen:
+        key = verschiebung_key(v)
+        vz = Decimal(1) if v.betrag > 0 else Decimal(-1)
+        rest = abs(v.betrag)
+        for tag in sorted(vortrag.get(key, {})):
+            verfuegbar = vortrag[key][tag]
+            if verfuegbar * vz <= 0 or tag == v.nach:
+                continue
+            anteil = min(rest, abs(verfuegbar))
+            vortrag[key][tag] -= vz * anteil
+            if start <= v.nach <= ende:
+                vortrag[key][v.nach] += vz * anteil
+            bewegungen.append((key, tag, v.nach, vz * anteil, "vortrag", v.id))
+            rest -= anteil
+            if rest <= 0:
+                break
+    return bewegungen
+
+
 VORTRAG_VORLAUF_TAGE = 14      # früher gebuchte Zahlungen zählen noch als erfolgt
 
 
@@ -377,6 +522,7 @@ def dauer_vortraege(
     heute: date,
     finanz_nrn: set[str],
     szenario: models.Szenario | None = None,
+    verschiebungen: list[tuple[int, date, date, Decimal]] | None = None,
 ) -> list[dict]:
     """Fällige, aber nicht (vollständig) gebuchte Zahlungen aus
     Dauerschuldverhältnissen.
@@ -391,12 +537,19 @@ def dauer_vortraege(
          Rest einer angerechneten Zahlung gilt als Vorauszahlung für spätere
          Fälligkeiten.
     Der ungedeckte Rest wird auf den nächsten Bankarbeitstag ab morgen
-    vorgetragen (sofern im Fenster)."""
+    vorgetragen (sofern im Fenster). Manuell verschobene Raten
+    (`verschiebungen`: Konto, Ursprungstag, Zieltag, Betrag) sind statt am
+    Ursprungstag am Zieltag fällig."""
     bl = mandant.bundesland
     ziel = naechster_bankarbeitstag(heute + timedelta(days=1), bl)
     bis = min(heute, ende)
     if ziel > ende or bis < start:
         return []
+    weg: dict[tuple[int, date], list[list]] = defaultdict(list)
+    for konto_id, von, nach, betrag in verschiebungen or []:
+        weg[(konto_id, von)].append([nach, betrag])
+    von_min = min([start] + [von for _, von in weg])
+    bis_max = max([bis] + [von for _, von in weg])
 
     from .insolvenzgeld import igeld_fenster
 
@@ -411,9 +564,10 @@ def dauer_vortraege(
             models.Dauerbuchung.konto_id.is_not(None),
         )
     ):
-        for roh in _dauer_termine(d_, start - timedelta(days=31), bis):
+        for roh in _dauer_termine(d_, von_min - timedelta(days=31), bis_max):
             d = naechster_bankarbeitstag(roh, bl)
-            if d < start or d > bis:
+            im_fenster = start <= d <= bis
+            if not im_fenster and (d_.konto_id, d) not in weg:
                 continue
             if (
                 igeld
@@ -424,7 +578,17 @@ def dauer_vortraege(
             ):
                 continue  # im Insolvenzgeldzeitraum gar nicht geplant
             soll = d_.betrag_brutto if d_.art == PostenArt.DEBITOR.value else -d_.betrag_brutto
-            faellig.append((d, d_, soll))
+            vz = Decimal(1) if soll > 0 else Decimal(-1)
+            for eintrag in weg.get((d_.konto_id, d), []):
+                anteil = min(abs(eintrag[1]), abs(soll)) if eintrag[1] * soll > 0 else Decimal(0)
+                if not anteil:
+                    continue
+                eintrag[1] -= vz * anteil
+                soll -= vz * anteil
+                if start <= eintrag[0] <= bis:   # verschobener Teil: am Zieltag fällig
+                    faellig.append((eintrag[0], d_, vz * anteil))
+            if im_fenster and soll:
+                faellig.append((d, d_, soll))
     if not faellig:
         return []
 
@@ -790,23 +954,15 @@ def berechne_plan(
             ist[key][d] += betrag
 
     # ---- Plan (aktuelle Erwartung) und Projektionsplan ----
-    plan = plan_fluesse(db, mandant, start, ende, heute=heute, szenario=szenario)
+    gerollt_plan: dict[Key, Decimal] = {}
+    gerollt_proj: dict[Key, Decimal] = {}
+    plan = plan_fluesse(db, mandant, start, ende, heute=heute, szenario=szenario,
+                        gerollt=gerollt_plan)
     plan_projektion = plan_fluesse(
-        db, mandant, start, ende, heute=heute, nur_offen=True, szenario=szenario
+        db, mandant, start, ende, heute=heute, nur_offen=True, szenario=szenario,
+        gerollt=gerollt_proj,
     )
 
-    # ---- Vortrag nicht gebuchter Dauerschuld-Zahlungen (Ansicht „mit Vortrag“) ----
-    vortraege = dauer_vortraege(db, mandant, start, ende, heute, finanz_nrn, szenario)
-    vortrag: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
-    for v in vortraege:
-        vortrag[v["konto_id"]][v["ziel"]] += v["betrag"]
-
-    # ---- Vergleichsbasis für vergangene Tage ----
-    snap_plan, snap = _snapshot_plan(db, mandant.id, start, heute)
-    vergleichsbasis = "SNAPSHOT" if snap_plan is not None else "LIVE"
-    basis = snap_plan if snap_plan is not None else plan
-
-    # ---- Zeilenstruktur ----
     gruppen = list(
         db.scalars(
             select(models.KontoGruppe)
@@ -816,6 +972,54 @@ def berechne_plan(
     )
     gruppe_fuer_key = gruppen_aufloeser(konto_by_id, gruppen)
 
+    # ---- manuelle Verschiebungen (Plan und Restplan-Sicht) ----
+    bl = mandant.bundesland
+    verschiebungen = plan_verschiebungen(db, mandant.id, "PLAN")
+    plan_bewegungen = verschiebungen_anwenden(
+        plan, verschiebungen, start, ende, heute,
+        naechster_bankarbeitstag(max(start, heute), bl), gerollt_plan,
+        _extern_plan(db, mandant, heute),
+    )
+    verschiebungen_projektion(
+        plan_projektion, verschiebungen, plan_bewegungen, start, ende, heute,
+        naechster_bankarbeitstag(max(start, heute + timedelta(days=1)), bl), gerollt_proj,
+        lambda key: liquiditaets_richtung(key, konto_by_id, gruppe_fuer_key) is not None,
+    )
+
+    # ---- Vortrag nicht gebuchter Dauerschuld-Zahlungen (Ansicht „mit Vortrag“) ----
+    vortraege = dauer_vortraege(
+        db, mandant, start, ende, heute, finanz_nrn, szenario,
+        verschiebungen=[(key, tag, nach, betrag) for key, tag, nach, betrag, art, _ in plan_bewegungen
+                        if art == "fest" and isinstance(key, int)],
+    )
+    vortrag: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+    for v in vortraege:
+        vortrag[v["konto_id"]][v["ziel"]] += v["betrag"]
+    vortrag_bewegungen = vortrag_verschiebungen_anwenden(
+        vortrag, plan_verschiebungen(db, mandant.id, "VORTRAG", offen_ab=heute), start, ende)
+
+    # Markierung verschobener Zellen: abgebende Tage negativ, empfangende positiv
+    def markierung(bewegungen: list[tuple]) -> dict[Key, dict[date, Decimal]]:
+        m: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+        for key, tag, nach, betrag, _, _ in bewegungen:
+            if start <= tag <= ende:
+                m[key][tag] -= betrag
+            if start <= nach <= ende:
+                m[key][nach] += betrag
+        return m
+
+    verschoben = markierung(plan_bewegungen)
+    verschoben_vortrag = markierung(vortrag_bewegungen)
+    vortrag_verschoben: dict[tuple[Key, date], Decimal] = defaultdict(Decimal)
+    for key, _, nach, betrag, _, _ in vortrag_bewegungen:
+        vortrag_verschoben[(key, nach)] += betrag
+
+    # ---- Vergleichsbasis für vergangene Tage ----
+    snap_plan, snap = _snapshot_plan(db, mandant.id, start, heute)
+    vergleichsbasis = "SNAPSHOT" if snap_plan is not None else "LIVE"
+    basis = snap_plan if snap_plan is not None else plan
+
+    # ---- Zeilenstruktur ----
     alle_keys = set(plan.keys()) | set(ist.keys()) | set(vortrag.keys())
     zeilen_je_gruppe: dict[int | None, list[Key]] = defaultdict(list)
     for key in alle_keys:
@@ -867,6 +1071,9 @@ def berechne_plan(
             "ist": {d.isoformat(): _f(v) for d, v in ist.get(key, {}).items() if v},
             "basis": {d.isoformat(): _f(v) for d, v in basis.get(key, {}).items() if v},
             "vortrag": {d.isoformat(): _f(v) for d, v in vortrag.get(key, {}).items() if v},
+            "verschoben": {d.isoformat(): _f(v) for d, v in verschoben.get(key, {}).items() if v},
+            "verschoben_vortrag": {
+                d.isoformat(): _f(v) for d, v in verschoben_vortrag.get(key, {}).items() if v},
         }
 
     zeilen: list[dict] = []
@@ -1003,6 +1210,16 @@ def berechne_plan(
                 "betrag": _f(v["betrag"]),
             }
             for v in vortraege
+        ],
+        "vortrag_verschoben": [
+            {
+                "konto": (f"{konto_by_id[key].nummer} {konto_by_id[key].bezeichnung}"
+                          if isinstance(key, int) and key in konto_by_id else str(key)),
+                "nach": nach.isoformat(),
+                "betrag": _f(betrag),
+            }
+            for (key, nach), betrag in sorted(vortrag_verschoben.items(), key=lambda x: (x[0][1], str(x[0][0])))
+            if betrag
         ],
         "unbekannte_konten": sorted(unbekannte),
     }
@@ -1239,7 +1456,14 @@ def erstelle_snapshot(
     heute = heute or date.today()
     start = wochen_start(start or heute)
     ende = start + timedelta(days=wochen * 7 - 1)
-    plan = plan_fluesse(db, mandant, start, ende, heute=start)
+    gerollt: dict[Key, Decimal] = {}
+    plan = plan_fluesse(db, mandant, start, ende, heute=start, gerollt=gerollt)
+    # manuelle Verschiebungen gehören zum Plan (Sicht zum Stichtag)
+    verschiebungen_anwenden(
+        plan, plan_verschiebungen(db, mandant.id, "PLAN"), start, ende, start,
+        naechster_bankarbeitstag(start, mandant.bundesland), gerollt,
+        _extern_plan(db, mandant, start),
+    )
     snap = models.PlanSnapshot(
         mandant_id=mandant.id, stichtag=start, wochen=wochen, kommentar=kommentar
     )

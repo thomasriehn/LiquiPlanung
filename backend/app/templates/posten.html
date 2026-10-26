@@ -30,7 +30,7 @@
       <label>Fällig am<input type="date" name="faellig_am" required></label>
       <label>Zahlung geplant<input type="date" name="zahlung_geplant_am"></label>
       <label>Betrag brutto<input type="number" step="0.01" name="betrag_brutto" required></label>
-      <label>Konto<select name="konto_id" class="konto-auswahl"></select></label>
+      <label>Konto<div class="konto-feld" data-formular="op"></div></label>
       <label>Forderungsklasse
         <select name="forderungsklasse">
           <option value="">automatisch / –</option>
@@ -92,7 +92,7 @@
       <label>Stichtag (Tag bzw. 0=Mo..6=So)<input type="number" name="stichtag" value="1" min="0" max="31"></label>
       <label>Gültig von<input type="date" name="gueltig_von" required></label>
       <label>Gültig bis<input type="date" name="gueltig_bis"></label>
-      <label>Konto<select name="konto_id" class="konto-auswahl"></select></label>
+      <label>Konto<div class="konto-feld" data-formular="dauer"></div></label>
       <label title="Ist eine fällige Rate nicht (vollständig) gebucht, wird der offene Betrag in der Planansicht „mit Vortrag“ auf den nächsten Bankarbeitstag vorgetragen">
         &nbsp;<span style="display:flex;align-items:center;gap:6px;min-height:32px">
           <input type="checkbox" name="vortragen" checked style="width:auto">Vortragen, falls nicht gebucht</span></label>
@@ -155,12 +155,18 @@ function kontoName(id) {
   return k ? esc(`${k.nummer} ${k.bezeichnung}`) : "–";
 }
 
+// Kontoauswahl (durchsuchbar, nach BWA-Gruppen gegliedert) je Formular
+const kontoFelder = {};
+
 async function ladeKonten() {
   const d = await api("GET", `/api/mandanten/${MANDANT_ID}/konten`);
   konten = d.konten.filter(k => k.aktiv);
-  const optionen = `<option value="">–</option>` + konten.map(k =>
-    `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}</option>`).join("");
-  document.querySelectorAll(".konto-auswahl").forEach(sel => sel.innerHTML = optionen);
+  const gruppen = kontoGruppenAus(d);
+  document.querySelectorAll(".konto-feld").forEach(feld => {
+    const auswahl = kontoAuswahl({ gruppen, name: "konto_id", leerText: "– kein Konto –", konten: d.konten });
+    feld.replaceChildren(auswahl);
+    kontoFelder[feld.dataset.formular] = auswahl;
+  });
 }
 
 const KLASSEN = {
@@ -357,7 +363,7 @@ function opBearbeiten(p) {
   opForm.faellig_am.value = p.faellig_am;
   opForm.zahlung_geplant_am.value = p.zahlung_geplant_am || "";
   opForm.betrag_brutto.value = p.betrag_brutto;
-  opForm.konto_id.value = p.konto_id || "";
+  kontoFelder.op.setzeWert(p.konto_id);
   opForm.forderungsklasse.value = p.forderungsklasse || "";
   opForm.notiz.value = p.notiz || "";
   opForm.sammel.checked = !!p.sammel;
@@ -369,6 +375,7 @@ function opBearbeiten(p) {
 function opFormZuruecksetzen() {
   opBearbeitet = null;
   opForm.reset();
+  if (kontoFelder.op) kontoFelder.op.setzeWert(null);
   document.getElementById("op-submit").textContent = "Anlegen";
   document.getElementById("op-abbrechen").style.display = "none";
 }
@@ -452,7 +459,7 @@ function dauerBearbeiten(d) {
   dauerForm.stichtag.value = d.stichtag;
   dauerForm.gueltig_von.value = d.gueltig_von;
   dauerForm.gueltig_bis.value = d.gueltig_bis || "";
-  dauerForm.konto_id.value = d.konto_id || "";
+  kontoFelder.dauer.setzeWert(d.konto_id);
   dauerForm.vortragen.checked = d.vortragen;
   document.getElementById("dauer-submit").textContent = "Speichern";
   document.getElementById("dauer-abbrechen").style.display = "";
@@ -462,6 +469,7 @@ function dauerBearbeiten(d) {
 function dauerFormZuruecksetzen() {
   dauerBearbeitet = null;
   dauerForm.reset();
+  if (kontoFelder.dauer) kontoFelder.dauer.setzeWert(null);
   document.getElementById("dauer-submit").textContent = "Anlegen";
   document.getElementById("dauer-abbrechen").style.display = "none";
 }

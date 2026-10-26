@@ -121,3 +121,36 @@ def test_kpi_api_seite_und_sondereffekt_kennzeichen(client):
     assert client.get(f"/api/mandanten/{mid}/kpi", params={"wochen": 40}).status_code == 422
     seite = client.get(f"/mandanten/{mid}/kpi")
     assert seite.status_code == 200 and "diagramme.js" in seite.text
+
+
+def test_kpi_pdf_mit_planvergleich(db, szenario):
+    from io import BytesIO
+
+    from pypdf import PdfReader
+
+    from app.services.kpi_pdf import euro_kompakt, kpi_pdf
+
+    m, _ = szenario
+    pdf = kpi_pdf(kpi_daten(db, m, start=START, wochen=4, heute=HEUTE), m)
+    text = "\n".join(s.extract_text() for s in PdfReader(BytesIO(pdf)).pages)
+    for teil in ("KPI-Übersicht", "Liquidität je Wochenende: Soll / Ist", "Veränderung je Kategorie",
+                 "Planvergleich: aktueller Stand gegenüber Antrag", "Monatsübersicht",
+                 "Wertetabellen", "10.690,00 €"):
+        assert teil in text, teil
+    assert (euro_kompakt(950), euro_kompakt(12500), euro_kompakt(-125000), euro_kompakt(1.25e6)) == (
+        "950", "12,5 T", "-125 T", "1,2 Mio.")
+
+
+def test_kpi_pdf_api_ohne_daten(client):
+    from io import BytesIO
+
+    from pypdf import PdfReader
+
+    _login(client)
+    mid = client.post("/api/mandanten", json={"name": "Leer GmbH", "kurzname": "leer"}).json()["id"]
+    r = client.get(f"/api/mandanten/{mid}/export/kpi.pdf?wochen=4")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
+    text = "\n".join(s.extract_text() for s in PdfReader(BytesIO(r.content)).pages)
+    assert "Noch kein eingefrorener Planstand" in text
+    assert client.get(f"/api/mandanten/{mid}/export/kpi.pdf?vergleich_id=999").status_code == 404
+    assert client.get(f"/api/mandanten/{mid}/export/kpi.pdf?wochen=40").status_code == 422

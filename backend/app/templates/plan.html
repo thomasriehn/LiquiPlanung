@@ -43,10 +43,23 @@
     <span>Gelbe Spalte = heute</span>
     <span><span class="legende-muster vortrag"></span>vorgetragen (Ansicht „mit Vortrag“)</span>
     <span><span class="legende-muster vortrag-schraffiert"></span>Vortrag + Planbuchung desselben Tages (addiert)</span>
+    <span><span class="legende-muster verschoben-muster"></span>manuell verschoben</span>
+    <span>Klick auf eine Kontozelle: Ist-Buchungen ansehen/umbuchen bzw. Betrag verschieben</span>
   </div>
+
+  <dialog id="zellen-dialog" class="zellen-dialog">
+    <div class="zd-kopf">
+      <div>
+        <h3 id="zd-titel"></h3>
+        <div class="hinweis" id="zd-zeitraum"></div>
+      </div>
+      <button type="button" id="zd-schliessen" class="sekundaer klein-knopf" title="Schließen">✕</button>
+    </div>
+    <div id="zd-inhalt"></div>
+  </dialog>
 </div>
 {% endblock %}
 {% block skripte %}
-<script>const MANDANT_ID = {{ mandant.id }};</script>
+<script>const MANDANT_ID = {{ mandant.id }}; const LESER = {{ 'true' if leser else 'false' }};</script>
 <script src="/static/plan.js?v={{ static_version }}"></script>
 {% endblock %}

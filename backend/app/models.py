@@ -525,6 +525,29 @@ class PlanSnapshot(Base):
     )
 
 
+class PlanVerschiebung(Base):
+    """Manuelle Verschiebung eines Planbetrags (oder Vortrags) einer Planzeile
+    von einem Tag auf einen anderen – auch als Teilbetrag. Wird auf den
+    berechneten Plan angewendet, unabhängig von dessen Quelle (Posten,
+    Dauerschuldverhältnis, Budget, Termin)."""
+
+    __tablename__ = "plan_verschiebungen"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mandant_id: Mapped[int] = mapped_column(ForeignKey("mandanten.id", ondelete="CASCADE"), index=True)
+    konto_id: Mapped[int | None] = mapped_column(ForeignKey("konten.id", ondelete="CASCADE"), nullable=True)
+    termin_typ: Mapped[str | None] = mapped_column(String(32), nullable=True)  # Planzeilen ohne Konto
+    quelle: Mapped[str] = mapped_column(String(10), default="PLAN")             # PLAN | VORTRAG
+    von: Mapped[date] = mapped_column(Date)
+    nach: Mapped[date] = mapped_column(Date)
+    betrag: Mapped[Decimal] = mapped_column(Numeric(14, 2))     # Vorzeichen wie der Zahlungsfluss
+    kommentar: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    benutzer_id: Mapped[int | None] = mapped_column(ForeignKey("benutzer.id", ondelete="SET NULL"), nullable=True)
+
+    benutzer: Mapped["Benutzer | None"] = relationship()
+
+
 class PlanSnapshotWert(Base):
     __tablename__ = "plan_snapshot_werte"
 

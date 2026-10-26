@@ -19,6 +19,25 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Konto werden angerechnet: betragsgleiche Zahlungen um die Fälligkeit zuerst,
   danach chronologisch auch Teil- und Vorauszahlungen. Je Dauerschuldverhältnis
   abschaltbar (Standard: vortragen; auch per CSV-Spalte „Vortrag“).
+- **Zellendialog im Plan** (Klick auf eine Kontozelle):
+  - **Verschieben** von geplanten Werten und Vorträgen in einen anderen Zeitraum –
+    in der Tagesansicht auf einen Tag, in der Wochen-/Monatsansicht auf den ersten
+    Bankarbeitstag der gewählten Woche bzw. des Monats. Der Betrag ist frei
+    wählbar (Standard: Gesamtbetrag), z. B. bleiben von 6.000 € 2.000 € stehen und
+    4.000 € wandern in eine spätere Woche. Verschobene Zellen tragen eine
+    orange Eckmarke (Tooltip mit Beträgen); jede Verschiebung ist im Dialog mit
+    Kommentar und Benutzer aufgeführt und per ✕ zurücknehmbar. Verschiebungen
+    sind auf den tatsächlich geplanten Betrag begrenzt (fällt die Planbasis weg,
+    entsteht kein Phantombetrag); verschobene Dauerschuld-Raten werden für den
+    Vortrag erst am Zieltag fällig, ein verschobener Vortrag gilt bis zu seinem
+    Zieltag. Eingefrorene Planstände übernehmen die Verschiebungen.
+  - **Ist-Buchungen** einer Zelle bis heute mit Text, Beleg, Zahlungsmittel und
+    Import-Herkunft; die Kontoverknüpfung lässt sich per ✕ lösen und über dieselbe
+    durchsuchbare, nach BWA-Gruppen gegliederte Kontoauswahl wie beim PDF-Import
+    neu festlegen (die Sachkontoseite wird umgebucht, die Bankseite bleibt).
+- **Kontoauswahl** (durchsuchbar, nach BWA-Gruppen gegliedert) einheitlich im
+  PDF-Import, im Ist-Buchungsdialog und in den Bearbeitungsformularen der
+  offenen Posten und Dauerschuldverhältnisse.
 - **Soll-/Ist-Vergleich** gegen eingefrorene Plan-Snapshots („Plan einfrieren“,
   Stichtag = Wochenbeginn des gewählten Fensterstarts). Die **Soll-Referenz** ist
   wählbar (auf der Plan- und der Soll/Ist-Seite, serverseitig gespeichert und damit
@@ -106,6 +125,8 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Verteilung der Ein- und Auszahlungen. Jedes Diagramm hat eine Tabellenansicht.
   Kontogruppen lassen sich als **Sondereffekt** kennzeichnen (z. B. insolvenzspezifische
   Kosten, Anfechtungen) – sie werden in den Kennzahlen „ohne Sondereffekte“ herausgerechnet.
+  „PDF ↓“ exportiert die Seite als **KPI-Bericht** (A4 quer: Kacheln, alle Diagramme
+  in gleicher Gestaltung, Wertetabellen) mit Start, Wochen und Vergleichsstand der Seite.
 - **Szenarien (Best/Base/Worst)**: Faktoren auf Einzahlungen und variable Auszahlungen,
   Debitorenverzögerung; umschaltbar auf der Plan-Seite, im Export vermerkt; Soll/Ist
   bleibt auf dem Basisplan. Detailregeln je Konto/BWA-Gruppe übersteuern die globalen
@@ -190,6 +211,7 @@ backend/app
 │   ├── datev.py             DATEV-/CSV-/BWA-Parser
 │   ├── liquiditaet.py       13-Wochen-Engine, Snapshots, Soll/Ist
 │   ├── kpi.py               Kennzahlen und Planvergleich für die KPI-Seite
+│   ├── kpi_pdf.py           KPI-Bericht als PDF (Diagramme mit reportlab)
 │   ├── kontenrahmen.py      SKR03/SKR04-Vorlagen inkl. USt und BWA-Gruppen
 │   └── demo.py              Demo-Mandant
 ├── templates/ + static/     Oberfläche (Jinja2 + Vanilla-JS)

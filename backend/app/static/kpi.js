@@ -40,10 +40,21 @@ async function lade() {
   catch (e) { toast(e.message); return; }
   finally { seite.classList.remove("laedt"); }
   if (!start) document.getElementById("start").value = kpi.start;
+  exportLink();
   document.getElementById("kpi-info").textContent =
     `Zeitraum ${datumVollDe(kpi.start)} – ${datumVollDe(kpi.ende)} · Ist bis ${datumVollDe(kpi.heute)}, danach Plan` +
     (kpi.referenz ? ` · Soll-Referenz: ${planstandText(kpi.referenz)}` : " · noch kein eingefrorener Planstand");
   zeichne();
+}
+
+// PDF übernimmt Start, Wochen und Vergleichsstand der Seite
+function exportLink() {
+  const start = document.getElementById("start").value;
+  const vergleich = document.getElementById("vergleich").value;
+  let q = `?wochen=${document.getElementById("wochen").value || 13}`;
+  if (start) q += `&start=${start}`;
+  if (vergleich) q += `&vergleich_id=${vergleich}`;
+  document.getElementById("export-pdf").href = `/api/mandanten/${MANDANT_ID}/export/kpi.pdf${q}`;
 }
 
 // ---------------------------------------------------------------- Kacheln

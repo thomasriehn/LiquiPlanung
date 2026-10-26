@@ -31,6 +31,7 @@ from ..services.kontenrahmen import (
     lege_kontenrahmen_an,
     lege_standard_szenarien_an,
 )
+from ..services.feiertage import naechster_bankarbeitstag
 from ..services.liquiditaet import (
     berechne_plan,
     erstelle_snapshot,
@@ -211,6 +212,7 @@ def mandant_loeschen(
         models.TerminRegel,
         models.Bestand,
         models.ImportBatch,
+        models.PlanVerschiebung,
     ]
     for modell in fuer_mandant:
         db.execute(delete(modell).where(modell.mandant_id == mid))
@@ -1052,6 +1054,105 @@ def buchung_aendern(
           f"Buchung {buchung.id}: {sorted(daten.keys())}")
     db.commit()
     return {"ok": True}
+
+
+@router.get("/mandanten/{mandant_id}/plan/ist-buchungen")
+def plan_ist_buchungen(
+    mandant_id: int,
+    key: str,
+    von: str,
+    bis: str,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Buchungen hinter einer Ist-Zelle des 13-Wochen-Plans: Zahlungsflüsse
+    (genau eine Seite Bank/Kasse) auf dem Sachkonto der Planzeile im Zeitraum."""
+    from ..services.liquiditaet import _sachfluss
+
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    konten = list(db.scalars(select(models.Konto).where(models.Konto.mandant_id == mandant.id)))
+    if key.startswith("NR:"):
+        nummer = key[3:]
+    else:
+        konto = next((k for k in konten if str(k.id) == key), None)
+        if konto is None:
+            raise HTTPException(404, "Zeile ohne Konto – keine Ist-Buchungen zuordenbar")
+        nummer = konto.nummer
+    finanz_nrn = {k.nummer for k in konten
+                  if k.typ in (models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value)}
+    namen = {k.nummer: k.bezeichnung for k in konten}
+    batches = {b.id: b for b in db.scalars(
+        select(models.ImportBatch).where(models.ImportBatch.mandant_id == mandant.id))}
+    ergebnis = []
+    for b in db.scalars(
+        select(models.Buchung)
+        .where(
+            models.Buchung.mandant_id == mandant.id,
+            models.Buchung.datum >= _datum(von, "von"),
+            models.Buchung.datum <= _datum(bis, "bis"),
+            (models.Buchung.konto_nr == nummer) | (models.Buchung.gegenkonto_nr == nummer),
+        )
+        .order_by(models.Buchung.datum, models.Buchung.id)
+    ):
+        fluss = _sachfluss(b, finanz_nrn)
+        if fluss is None or fluss[0] != nummer:
+            continue
+        finanz = b.gegenkonto_nr if b.konto_nr == nummer else b.konto_nr
+        batch = batches.get(b.batch_id)
+        ergebnis.append({
+            "id": b.id,
+            "datum": b.datum.isoformat(),
+            "fluss": float(fluss[1]),
+            "text": b.text,
+            "belegfeld": b.belegfeld,
+            "sachkonto": f"{nummer} {namen.get(nummer, '(nicht angelegt)')}",
+            "finanzkonto": f"{finanz} {namen.get(finanz, '')}".strip(),
+            "posten_id": b.posten_id,
+            "import": f"{batch.dateiname} ({batch.format})" if batch else None,
+        })
+    return ergebnis
+
+
+class SachkontoWahl(BaseModel):
+    konto_id: int
+
+
+@router.post("/buchungen/{buchung_id}/sachkonto")
+def buchung_sachkonto_setzen(
+    buchung_id: int,
+    daten: SachkontoWahl,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Kontoverknüpfung einer Zahlungsbuchung neu festlegen: die Sachkonto-
+    Seite (nicht Bank/Kasse) wird auf das gewählte Konto umgebucht."""
+    from ..services.liquiditaet import _sachfluss
+
+    nur_schreibend(benutzer)
+    buchung = db.get(models.Buchung, buchung_id)
+    if buchung is None:
+        raise HTTPException(404, "Buchung nicht gefunden")
+    mandant_oder_403(db, benutzer, buchung.mandant_id)
+    konto = db.get(models.Konto, daten.konto_id)
+    if konto is None or konto.mandant_id != buchung.mandant_id:
+        raise HTTPException(404, "Konto nicht gefunden")
+    finanz_typen = (models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value)
+    if konto.typ in finanz_typen:
+        raise HTTPException(422, "Bitte ein Sachkonto wählen (nicht Bank/Kasse)")
+    finanz_nrn = {k.nummer for k in db.scalars(select(models.Konto).where(
+        models.Konto.mandant_id == buchung.mandant_id, models.Konto.typ.in_(finanz_typen)))}
+    fluss = _sachfluss(buchung, finanz_nrn)
+    if fluss is None:
+        raise HTTPException(422, "Keine Zahlungsbuchung (genau eine Seite Bank/Kasse)")
+    alt = fluss[0]
+    if buchung.konto_nr == alt:
+        buchung.konto_nr = konto.nummer
+    else:
+        buchung.gegenkonto_nr = konto.nummer
+    audit(db, benutzer, buchung.mandant_id, "BUCHUNG_UMGEBUCHT",
+          f"Buchung {buchung.id}: Sachkonto {alt} → {konto.nummer}")
+    db.commit()
+    return {"ok": True, "konto": f"{konto.nummer} {konto.bezeichnung}"}
 
 
 @router.delete("/buchungen/{buchung_id}")
@@ -2962,6 +3063,185 @@ def referenz_setzen(
     return {"ok": True, "snapshot_id": daten.snapshot_id}
 
 
+# ------------------------------------------------- Verschiebungen im Plan
+
+class VerschiebungNeu(BaseModel):
+    key: str                      # Planzeile: Konto-ID oder "TERMIN:<Typ>"
+    quelle: str = "PLAN"          # PLAN (geplanter Wert) | VORTRAG
+    von: str                      # angeklickte Zelle: erster Tag …
+    bis: str                      # … und letzter Tag
+    nach: str                     # Zieltag bzw. ein Tag des Zielzeitraums
+    ansicht: str = "tage"         # tage | wochen | monate (Ziel: erster Bankarbeitstag)
+    betrag: float                 # zu verschiebender Betrag (positiv)
+    start: str | None = None      # Fenster der Plan-Seite
+    wochen: int = 13
+    szenario_id: int | None = None
+    kommentar: str | None = None
+
+
+def _eur_text(betrag: Decimal) -> str:
+    return f"{betrag:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _verschiebung_dict(v: models.PlanVerschiebung, heute: date) -> dict:
+    return {
+        "id": v.id,
+        "key": str(v.konto_id) if v.konto_id is not None else f"TERMIN:{v.termin_typ}",
+        "quelle": v.quelle,
+        "von": v.von.isoformat(),
+        "nach": v.nach.isoformat(),
+        "betrag": float(v.betrag),
+        "kommentar": v.kommentar,
+        "erstellt_am": v.erstellt_am.isoformat() if v.erstellt_am else None,
+        "benutzer": v.benutzer.name if v.benutzer else None,
+        # Vortragsverschiebungen enden mit ihrem Zieltag, Planverschiebungen wirken dauerhaft
+        "abgelaufen": v.quelle == "VORTRAG" and v.nach <= heute,
+    }
+
+
+def _plan_zeile(plan: dict, key: str) -> dict | None:
+    for gruppe in plan["zeilen"]:
+        for kind in gruppe["kinder"]:
+            if kind["key"] == key:
+                return kind
+    return None
+
+
+@router.get("/mandanten/{mandant_id}/plan/verschiebungen")
+def verschiebungen_liste(
+    mandant_id: int,
+    key: str | None = None,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    q = select(models.PlanVerschiebung).where(models.PlanVerschiebung.mandant_id == mandant.id)
+    if key is not None:
+        if key.isdigit():
+            q = q.where(models.PlanVerschiebung.konto_id == int(key))
+        elif key.startswith("TERMIN:"):
+            q = q.where(models.PlanVerschiebung.konto_id.is_(None),
+                        models.PlanVerschiebung.termin_typ == key[7:])
+        else:
+            return []
+    heute = date.today()
+    return [_verschiebung_dict(v, heute)
+            for v in db.scalars(q.order_by(models.PlanVerschiebung.von, models.PlanVerschiebung.id))]
+
+
+@router.post("/mandanten/{mandant_id}/plan/verschiebungen", status_code=201)
+def verschiebung_anlegen(
+    mandant_id: int,
+    daten: VerschiebungNeu,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Geplanten Wert oder Vortrag einer Planzelle (ganz oder teilweise) in
+    einen anderen Zeitraum verschieben. Ziel ist der gewählte Tag bzw. der
+    erste Bankarbeitstag der gewählten Woche/des Monats, frühestens morgen.
+    Entnommen wird chronologisch aus den künftigen Tagen der Zelle."""
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    heute = date.today()
+    if daten.quelle not in ("PLAN", "VORTRAG"):
+        raise HTTPException(422, "Quelle: PLAN oder VORTRAG")
+    if daten.ansicht not in EXPORT_ANSICHTEN:
+        raise HTTPException(422, "Spalten: tage, wochen oder monate")
+    if not (1 <= daten.wochen <= 26):
+        raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    von, bis, nach = _datum(daten.von, "von"), _datum(daten.bis, "bis"), _datum(daten.nach, "nach")
+    if bis < von:
+        raise HTTPException(422, "Zeitraum: bis liegt vor von")
+    konto_id, termin_typ = None, None
+    if daten.key.isdigit():
+        konto = db.get(models.Konto, int(daten.key))
+        if konto is None or konto.mandant_id != mandant.id:
+            raise HTTPException(404, "Konto nicht gefunden")
+        konto_id = konto.id
+    elif daten.key.startswith("TERMIN:") and len(daten.key) > 7:
+        termin_typ = daten.key[7:]
+    else:
+        raise HTTPException(422, "Nur Planzeilen eines Kontos oder Zahlungstermins sind verschiebbar")
+
+    if daten.ansicht == "wochen":
+        ziel_basis = wochen_start(nach)
+    elif daten.ansicht == "monate":
+        ziel_basis = nach.replace(day=1)
+    else:
+        ziel_basis = nach
+    ziel = naechster_bankarbeitstag(max(ziel_basis, heute + timedelta(days=1)), mandant.bundesland)
+    if von <= ziel <= bis:
+        raise HTTPException(422, "Der Zielzeitraum entspricht dem Ausgangszeitraum")
+
+    szenario = _szenario_oder_none(db, mandant.id, daten.szenario_id)
+    plan = berechne_plan(
+        db, mandant, start=_datum(daten.start, "start") if daten.start else None,
+        wochen=daten.wochen, szenario=szenario, heute=heute,
+    )
+    zeile = _plan_zeile(plan, daten.key)
+    feld = "plan" if daten.quelle == "PLAN" else "vortrag"
+    werte = sorted(
+        (date.fromisoformat(t), Decimal(str(w)))
+        for t, w in (zeile or {}).get(feld, {}).items()
+        if von <= date.fromisoformat(t) <= bis and date.fromisoformat(t) > heute
+    )
+    netto = sum((w for _, w in werte), Decimal("0"))
+    if not netto:
+        raise HTTPException(
+            422, "Kein verschiebbarer " + ("Planwert" if feld == "plan" else "Vortrag")
+            + " ab morgen in diesem Zeitraum")
+    vz = Decimal(1) if netto > 0 else Decimal(-1)
+    verfuegbar = sum((abs(w) for _, w in werte if w * vz > 0), Decimal("0"))
+    try:
+        betrag = Decimal(str(daten.betrag)).quantize(Decimal("0.01"))
+    except InvalidOperation:
+        raise HTTPException(422, "Ungültiger Betrag")
+    if betrag <= 0:
+        raise HTTPException(422, "Der Betrag muss größer als 0 sein")
+    if betrag > verfuegbar:
+        raise HTTPException(422, f"Höchstens {_eur_text(verfuegbar)} € verschiebbar")
+
+    rest, angelegt = betrag, []
+    for tag, w in werte:
+        if w * vz <= 0 or rest <= 0:
+            continue
+        anteil = min(rest, abs(w))
+        v = models.PlanVerschiebung(
+            mandant_id=mandant.id, konto_id=konto_id, termin_typ=termin_typ,
+            quelle=daten.quelle, von=tag, nach=ziel, betrag=vz * anteil,
+            kommentar=(daten.kommentar or "").strip()[:255] or None, benutzer_id=benutzer.id,
+        )
+        db.add(v)
+        angelegt.append(v)
+        rest -= anteil
+    audit(db, benutzer, mandant.id, "PLAN_VERSCHOBEN",
+          f"{zeile['nummer']} {zeile['name']}: {_eur_text(betrag)} € "
+          f"({'Vortrag' if feld == 'vortrag' else 'Plan'}) {von.isoformat()}–{bis.isoformat()} "
+          f"→ {ziel.isoformat()}")
+    db.commit()
+    return {"ziel": ziel.isoformat(), "betrag": float(betrag), "anzahl": len(angelegt),
+            "ids": [v.id for v in angelegt]}
+
+
+@router.delete("/mandanten/{mandant_id}/plan/verschiebungen/{verschiebung_id}")
+def verschiebung_loeschen(
+    mandant_id: int,
+    verschiebung_id: int,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    v = db.get(models.PlanVerschiebung, verschiebung_id)
+    if v is None or v.mandant_id != mandant.id:
+        raise HTTPException(404, "Verschiebung nicht gefunden")
+    audit(db, benutzer, mandant.id, "PLAN_VERSCHIEBUNG_GELOESCHT",
+          f"{v.quelle} {v.von.isoformat()} → {v.nach.isoformat()}: {_eur_text(abs(v.betrag))} €")
+    db.delete(v)
+    db.commit()
+    return {"ok": True}
+
+
 EXPORT_ANSICHTEN = ("tage", "wochen", "monate")
 EXPORT_METRIKEN = ("auto", "vortrag", "plan", "ist", "delta")
 
@@ -3077,6 +3357,39 @@ def kpi_abrufen(
                          wochen=wochen, vergleich_id=vergleich_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
+
+
+@router.get("/mandanten/{mandant_id}/export/kpi.pdf")
+def export_kpi_pdf(
+    mandant_id: int,
+    start: str | None = None,
+    wochen: int = 13,
+    vergleich_id: int | None = None,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """KPI-Übersicht als PDF (Kacheln, Diagramme, Wertetabellen) mit
+    denselben Einstellungen wie die KPI-Seite."""
+    from ..services.kpi import kpi_daten
+    from ..services.kpi_pdf import kpi_pdf
+
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    if not (1 <= wochen <= 26):
+        raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    try:
+        kpi = kpi_daten(db, mandant, start=_datum(start, "start") if start else None,
+                        wochen=wochen, vergleich_id=vergleich_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    daten = kpi_pdf(kpi, mandant)
+    audit(db, benutzer, mandant.id, "EXPORT_KPI_PDF", kpi["start"])
+    db.commit()
+    return Response(
+        content=daten,
+        media_type="application/pdf",
+        headers={"Content-Disposition":
+                 f'inline; filename="kpi_{mandant.kurzname}_{kpi["start"]}.pdf"'},
+    )
 
 
 @router.get("/mandanten/{mandant_id}/sollist")

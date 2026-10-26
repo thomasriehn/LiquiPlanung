@@ -129,18 +129,7 @@ async function ladeKonten() {
       konten.filter(k => k.aktiv && (k.typ === "BANK" || k.typ === "KASSE")).map(k =>
         `<option value="${k.id}">${esc(k.nummer + " " + k.bezeichnung)}${k.iban ? " (" + esc(k.iban) + ")" : ""}</option>`).join("");
   }
-  const sachkonten = konten.filter(k => k.aktiv && k.typ !== "BANK" && k.typ !== "KASSE");
-  kontoGruppen = d.gruppen
-    .slice().sort((a, b) => (a.sortierung || 0) - (b.sortierung || 0))
-    .map(g => ({
-      name: g.name,
-      konten: sachkonten.filter(k => k.gruppe_id === g.id)
-        .sort((a, b) => a.nummer.localeCompare(b.nummer)),
-    }))
-    .filter(g => g.konten.length);
-  const ohneGruppe = sachkonten.filter(k => !k.gruppe_id)
-    .sort((a, b) => a.nummer.localeCompare(b.nummer));
-  if (ohneGruppe.length) kontoGruppen.push({ name: "Ohne Gruppe", konten: ohneGruppe });
+  kontoGruppen = kontoGruppenAus(d);
   const pdfSel = document.getElementById("pdf-bank-konto");
   if (pdfSel) {
     const zahlungsmittel = konten
@@ -407,47 +396,10 @@ function zuordnungsBadge(td, u, zurueck) {
 
 let kontoGruppen = [];
 
-// Durchsuchbare Kontoauswahl mit Kategorie-Überschriften; optional mit dem
-// Eintrag „auf mehrere Konten aufteilen“
+// Durchsuchbare Kontoauswahl (static/kontowahl.js); optional mit dem Eintrag
+// „auf mehrere Konten aufteilen“
 function kontoKombo(beiAuswahl, mitAufteilen) {
-  const huelle = document.createElement("div");
-  huelle.className = "kombo";
-  huelle.innerHTML = `<input placeholder="Konto suchen …" autocomplete="off">
-    <div class="kombo-liste" hidden></div>`;
-  const eingabe = huelle.querySelector("input");
-  const liste = huelle.querySelector(".kombo-liste");
-  function fuelle() {
-    const f = eingabe.value.trim().toLowerCase();
-    let html = "";
-    if (mitAufteilen) {
-      html += `<button type="button" class="kombo-eintrag" data-aufteilen>
-        <strong>Auf mehrere Konten aufteilen …</strong></button>`;
-    }
-    for (const g of kontoGruppen) {
-      const treffer = g.konten.filter(k =>
-        !f || (k.nummer + " " + k.bezeichnung).toLowerCase().includes(f));
-      if (!treffer.length) continue;
-      html += `<div class="kombo-gruppe">${esc(g.name)}</div>`;
-      html += treffer.map(k => `<button type="button" class="kombo-eintrag" data-id="${k.id}">
-        <span class="konto-nr">${esc(k.nummer)}</span>${esc(k.bezeichnung)}</button>`).join("");
-    }
-    liste.innerHTML = html || `<div class="kombo-leer">Kein Konto gefunden.</div>`;
-  }
-  eingabe.addEventListener("focus", () => { fuelle(); liste.hidden = false; });
-  eingabe.addEventListener("input", () => { fuelle(); liste.hidden = false; });
-  document.addEventListener("click", (e) => {
-    if (huelle.isConnected && !huelle.contains(e.target)) liste.hidden = true;
-  });
-  liste.addEventListener("click", (e) => {
-    const eintrag = e.target.closest(".kombo-eintrag");
-    if (!eintrag) return;
-    liste.hidden = true;
-    if (eintrag.dataset.aufteilen !== undefined) { beiAuswahl(null, true); return; }
-    const konto = konten.find(k => k.id === parseInt(eintrag.dataset.id));
-    eingabe.value = `${konto.nummer} ${konto.bezeichnung}`;
-    beiAuswahl(konto, false);
-  });
-  return huelle;
+  return kontoAuswahl({ gruppen: kontoGruppen, beiAuswahl, mitAufteilen });
 }
 
 // ---- Aufteilung einer Ausgabe auf mehrere Konten ----

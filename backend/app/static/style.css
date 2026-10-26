@@ -129,7 +129,47 @@ table.matrix { border-collapse: separate; border-spacing: 0; font-size: 12px; }
 }
 .vortrag-liste { margin: 4px 0 0 18px; padding: 0; }
 .matrix .konto-nr { color: var(--grau); margin-right: 4px; }
-.legende { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--grau); }
+/* Kontozellen öffnen den Zellendialog; manuell verschobene Beträge mit Eckmarke */
+.matrix td.klickbar { cursor: pointer; }
+.matrix td.klickbar:hover { outline: 2px solid #9db4d0; outline-offset: -2px; }
+.matrix td.verschoben, .legende-muster.verschoben-muster { position: relative; }
+.matrix td.verschoben::after, .legende-muster.verschoben-muster::after {
+  content: ""; position: absolute; top: 0; right: 0; width: 0; height: 0;
+  border-top: 7px solid #eb6834; border-left: 7px solid transparent;
+}
+.legende-muster.verschoben-muster { border-color: var(--rand); background: #fff; }
+
+.zellen-dialog {
+  border: 1px solid #c9d4e0; border-radius: 8px; padding: 16px 20px;
+  width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 48px);
+}
+.zellen-dialog::backdrop { background: rgba(20, 35, 55, .35); }
+.zd-kopf { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.zd-kopf h3 { margin: 0 0 2px; }
+.zd-abschnitt { border-top: 1px solid var(--rand); margin-top: 12px; padding-top: 10px; }
+.zd-abschnitt h4 { margin: 0 0 8px; font-size: 14px; }
+.zd-abschnitt table.liste { width: 100%; }
+.zd-abschnitt td.zahl, .zd-abschnitt th.zahl { text-align: right; white-space: nowrap; }
+.zd-konto { display: inline-flex; align-items: center; gap: 4px; }
+.zd-konto .badge-konto {
+  display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 12px;
+  background: #e8f5ec; color: #1e5c38; border: 1px solid #9fd3ae; white-space: nowrap;
+}
+.zd-konto button.loesen {
+  border: none; background: none; color: #1e5c38; cursor: pointer; font-weight: 700; padding: 0 2px;
+}
+.zd-formular { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; }
+.zd-formular label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; }
+.zd-formular .quellen { display: flex; gap: 14px; align-items: center; }
+.zd-formular .quellen label { flex-direction: row; gap: 5px; align-items: center; }
+.zd-liste { margin: 0; padding: 0; list-style: none; }
+.zd-liste li {
+  display: flex; gap: 10px; align-items: baseline; padding: 4px 0;
+  border-bottom: 1px solid #edf0f4; font-size: 12.5px;
+}
+.zd-liste li .abgelaufen { color: var(--grau); font-style: italic; }
+.zd-liste li button { margin-left: auto; }
+.legende { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 12px; color: var(--grau); }
 
 #toast {
   position: fixed; bottom: 20px; right: 20px; z-index: 99;
@@ -201,7 +241,10 @@ table.liste thead th.fix-spalte { background: var(--blau-hell); z-index: 5; }
   display: block; width: 100%; text-align: left; background: none; border: none;
   color: inherit; padding: 5px 9px; cursor: pointer; font-size: 12.5px; border-radius: 0;
 }
-.kombo-eintrag:hover { background: #eaf1fa; }
+.kombo-eintrag:hover, .kombo-eintrag.markiert { background: #eaf1fa; }
+.kombo-eintrag.gewaehlt { font-weight: 600; }
+.kombo-eintrag.kombo-leer-eintrag { color: var(--grau); font-style: italic; }
+.konto-feld .kombo { display: block; min-width: 220px; }
 .kombo-eintrag .konto-nr { color: var(--grau); margin-right: 5px; }
 .sammel-vermerk {
   display: inline-block; margin-top: 3px; padding: 0 6px; border-radius: 8px;
