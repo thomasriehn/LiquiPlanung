@@ -125,6 +125,17 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Verteilung der Ein- und Auszahlungen. Jedes Diagramm hat eine Tabellenansicht.
   Kontogruppen lassen sich als **Sondereffekt** kennzeichnen (z. B. insolvenzspezifische
   Kosten, Anfechtungen) – sie werden in den Kennzahlen „ohne Sondereffekte“ herausgerechnet.
+  Wie im Fact Sheet („Entwicklung KW“ / „Entwicklung Antrag“) gibt es je einen Bereich
+  **Vergleich zur Vorwoche** und **Vergleich zum Antrag**: letzte abgeschlossene Woche
+  Ist gegen den Planstand (Liquidität, Über-/Unterdeckung und je Kategorie),
+  Ergebnisveränderung (Liquidität zum Ende des gemeinsamen Zeitraums), Abweichung
+  Woche → Ergebnis mit Differenz (Zeitverschiebungen und Planänderungen),
+  Veränderung je Kategorie und Monat sowie der Monatsendliquidität; dazu für die
+  Vorwoche die Ein-/Auszahlungen der kommenden vier Wochen und für den Antrag die
+  Gegenüberstellung Antragsplan / Vorwochenplan / Ist. Als Vorwoche gilt automatisch
+  der jüngste vor der laufenden Woche eingefrorene Planstand, als Antrag der
+  Planstand mit „Antrag“ im Kommentar (sonst der älteste) – beides auf der Seite
+  übersteuerbar.
   „PDF ↓“ exportiert die Seite als **KPI-Bericht** (A4 quer: Kacheln, alle Diagramme
   in gleicher Gestaltung, Wertetabellen) mit Start, Wochen und Vergleichsstand der Seite.
 - **Szenarien (Best/Base/Worst)**: Faktoren auf Einzahlungen und variable Auszahlungen,

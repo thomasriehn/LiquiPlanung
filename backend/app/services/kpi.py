@@ -5,7 +5,13 @@ KPI-Seite, 13-Wochen-Plan und Exporte identisch rechnen. Eingefrorene
 Planstände (Snapshots) liefern
   - die Soll-Linie der Liquidität (gewählte Soll-Referenz bzw. Plan-Basis) und
   - den Planvergleich („Anpassungen“): aktueller Stand gegen einen frei
-    wählbaren früheren Planstand (z. B. Vorwoche oder Plan zum Antrag).
+    wählbaren früheren Planstand (z. B. Plan zum Antrag) und
+  - die Vergleiche zur Vorwoche und zum Antrag (Fact-Sheet-Blöcke
+    „Entwicklung KW“ und „Entwicklung Antrag“): Soll/Ist der letzten
+    abgeschlossenen Woche gegen den Planstand (gesamt und je Kategorie),
+    Veränderung des Ergebnisses (Liquidität zum Ende des gemeinsamen
+    Zeitraums), Abweichung Woche gegen Ergebnis, Veränderungen je Kategorie
+    und Monat sowie die Ein-/Auszahlungen der kommenden Wochen.
 """
 
 from collections import defaultdict
@@ -21,6 +27,7 @@ from .liquiditaet import (
     _lade_konten,
     berechne_plan,
     gruppen_aufloeser,
+    wochen_start,
     liquiditaet_zum,
     liquiditaets_richtung,
     snapshot_fluesse,
@@ -31,6 +38,7 @@ MONATSNAMEN = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun",
                "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
 OHNE_GRUPPE = "OHNE"
 MAX_EINZAHLUNGSKONTEN = 7       # darüber hinaus: „Übrige“
+FORECAST_WOCHEN = 4             # Ein-/Auszahlungen der kommenden Wochen
 
 
 def _r(wert) -> float | None:
@@ -44,6 +52,8 @@ def kpi_daten(
     wochen: int = 13,
     vergleich_id: int | None = None,
     heute: date | None = None,
+    vorwoche_id: int | None = None,
+    antrag_id: int | None = None,
 ) -> dict:
     heute = heute or date.today()
     plan = berechne_plan(db, mandant, start=start, wochen=wochen, heute=heute)
@@ -113,11 +123,14 @@ def kpi_daten(
     soll_liq = liq_verlauf(referenz)
     vgl_liq = soll_liq if vergleich is referenz else liq_verlauf(vergleich)
 
-    # Vergleichsplan je Kategorie und Tag (nur liquiditätswirksame Zeilen)
-    vgl_gruppe: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    vgl_tage: set[str] = set()
-    if vergleich is not None:
-        for key, tageswerte in snapshot_fluesse(vergleich).items():
+    def vergleichs_fluesse(snap):
+        """Planflüsse eines Planstands je Kategorie und Tag (nur liquiditäts-
+        wirksame Zeilen), dazu Ein-/Auszahlungen je Tag und seine Tage."""
+        je_gruppe: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        ein_aus: dict[str, dict[str, float]] = {"ein": defaultdict(float), "aus": defaultdict(float)}
+        if snap is None:
+            return je_gruppe, ein_aus, set()
+        for key, tageswerte in snapshot_fluesse(snap).items():
             richtung = liquiditaets_richtung(key, konto_by_id, gruppe_fuer_key)
             if richtung is None:
                 continue
@@ -130,10 +143,36 @@ def kpi_daten(
                     "sondereffekt": g.sondereffekt if g else False,
                 }
             for d, v in tageswerte.items():
-                vgl_gruppe[code][d.isoformat()] += float(v)
-        vgl_tage = {(vergleich.stichtag + timedelta(days=i)).isoformat()
-                    for i in range(vergleich.wochen * 7)}
-    ueberlappung = [t for t in tage if t in vgl_tage]
+                je_gruppe[code][d.isoformat()] += float(v)
+                ein_aus["ein" if v > 0 else "aus"][d.isoformat()] += float(v)
+        snap_tage = {(snap.stichtag + timedelta(days=i)).isoformat() for i in range(snap.wochen * 7)}
+        return je_gruppe, ein_aus, snap_tage
+
+    def kategorien_vergleich(vgl_gruppe, vgl_tage) -> list[dict]:
+        """Liquiditätswirkung aktuell − Planstand je Kategorie im gemeinsamen
+        Zeitraum, je Monat aufgeschlüsselt."""
+        gemeinsam = [t for t in tage if t in vgl_tage]
+        ergebnis = []
+        for code, info in gruppen_info.items():
+            akt = sum(aktuell[code].get(t, 0.0) for t in gemeinsam)
+            vgl = sum(vgl_gruppe[code].get(t, 0.0) for t in gemeinsam)
+            if not akt and not vgl:
+                continue
+            je_monat = {}
+            for m in monate:
+                tage_m = [t for t in m["tage"] if t in vgl_tage]
+                if tage_m:
+                    je_monat[m["schluessel"]] = _r(
+                        sum(aktuell[code].get(t, 0.0) - vgl_gruppe[code].get(t, 0.0) for t in tage_m))
+            ergebnis.append({
+                "code": code, "name": info["name"], "richtung": info["richtung"],
+                "aktuell": _r(akt), "vergleich": _r(vgl), "veraenderung": _r(akt - vgl),
+                "je_monat": je_monat,
+            })
+        ergebnis.sort(key=lambda k: (k["richtung"] != Richtung.EIN.value, -abs(k["veraenderung"] or 0)))
+        return ergebnis
+
+    vgl_gruppe, _, vgl_tage = vergleichs_fluesse(vergleich)
 
     # ---- Liquidität je Wochenende: Soll (Referenz) und Ist/Prognose ----
     liquiditaet_wochen = [
@@ -167,25 +206,30 @@ def kpi_daten(
         })
 
     # ---- Planvergleich je Kategorie (Liquiditätswirkung aktuell − Vergleich) ----
-    kategorien = []
-    if vergleich is not None:
-        for code, info in gruppen_info.items():
-            akt = sum(aktuell[code].get(t, 0.0) for t in ueberlappung)
-            vgl = sum(vgl_gruppe[code].get(t, 0.0) for t in ueberlappung)
-            if not akt and not vgl:
-                continue
-            je_monat = {}
-            for m in monate:
-                tage_m = [t for t in m["tage"] if t in vgl_tage]
-                if tage_m:
-                    je_monat[m["schluessel"]] = _r(
-                        sum(aktuell[code].get(t, 0.0) - vgl_gruppe[code].get(t, 0.0) for t in tage_m))
-            kategorien.append({
-                "code": code, "name": info["name"], "richtung": info["richtung"],
-                "aktuell": _r(akt), "vergleich": _r(vgl), "veraenderung": _r(akt - vgl),
-                "je_monat": je_monat,
-            })
-        kategorien.sort(key=lambda k: (k["richtung"] != Richtung.EIN.value, -abs(k["veraenderung"] or 0)))
+    kategorien = kategorien_vergleich(vgl_gruppe, vgl_tage) if vergleich is not None else []
+
+    # ---- Vergleiche zur Vorwoche und zum Antrag ----
+    def planstand(snap_id, automatisch):
+        if snap_id is None:
+            return automatisch
+        snap = db.get(models.PlanSnapshot, snap_id)
+        if snap is None or snap.mandant_id != mandant.id:
+            raise ValueError("Planstand nicht gefunden")
+        return snap
+
+    def block(snap, auto: bool):
+        if snap is None:
+            return None
+        erg = _planstand_vergleich(
+            db, mandant, heute, snap, plan, tage, monate, liquiditaet, liq_verlauf(snap),
+            vergleichs_fluesse(snap), kategorien_vergleich, gruppen_info, summe_auto, summen)
+        erg["automatisch"] = auto
+        return erg
+
+    vorwoche = planstand(vorwoche_id, vorwoche_planstand(db, mandant.id, heute))
+    antrag = planstand(antrag_id, antrag_planstand(db, mandant.id))
+    vorwoche_block = block(vorwoche, vorwoche_id is None)
+    antrag_block = block(antrag, antrag_id is None)
 
     # ---- Verteilungen über das Fenster ----
     einzahlungen_konten: list[dict] = []
@@ -272,16 +316,12 @@ def kpi_daten(
                  else float(liquiditaet_zum(db, mandant, heute, heute)))
     ende = tage[-1]
 
-    def snap_info(s):
-        return {"id": s.id, "stichtag": s.stichtag.isoformat(), "wochen": s.wochen,
-                "kommentar": s.kommentar, "referenz": s.referenz} if s else None
-
     return {
         "start": plan["start"],
         "ende": plan["ende"],
         "heute": h,
-        "referenz": snap_info(referenz),
-        "vergleich": snap_info(vergleich),
+        "referenz": _snap_info(referenz),
+        "vergleich": _snap_info(vergleich),
         "kennzahlen": {
             "liquiditaet_heute": _r(liq_heute),
             "liquiditaet_ende": _r(liquiditaet[ende]),
@@ -305,4 +345,124 @@ def kpi_daten(
         "kategorien": kategorien,
         "einzahlungen_konten": einzahlungen_konten,
         "auszahlungen_gruppen": auszahlungen_gruppen,
+        "vorwoche": vorwoche_block,
+        "antrag": antrag_block,
+    }
+
+
+def _snap_info(s: models.PlanSnapshot | None) -> dict | None:
+    return {"id": s.id, "stichtag": s.stichtag.isoformat(), "wochen": s.wochen,
+            "kommentar": s.kommentar, "referenz": s.referenz} if s else None
+
+
+def vorwoche_planstand(db: Session, mandant_id: int, heute: date) -> models.PlanSnapshot | None:
+    """Jüngster vor der laufenden Woche eingefrorene Planstand (bei wöchentlichem
+    Einfrieren der Plan der Vorwoche)."""
+    return db.scalars(
+        select(models.PlanSnapshot)
+        .where(models.PlanSnapshot.mandant_id == mandant_id,
+               models.PlanSnapshot.stichtag < wochen_start(heute))
+        .order_by(models.PlanSnapshot.stichtag.desc(), models.PlanSnapshot.id.desc())
+    ).first()
+
+
+def antrag_planstand(db: Session, mandant_id: int) -> models.PlanSnapshot | None:
+    """Plan zum Antrag: jüngster Planstand mit „Antrag“ im Kommentar, sonst
+    der älteste eingefrorene Planstand."""
+    snaps = list(db.scalars(
+        select(models.PlanSnapshot)
+        .where(models.PlanSnapshot.mandant_id == mandant_id)
+        .order_by(models.PlanSnapshot.stichtag, models.PlanSnapshot.id)
+    ))
+    mit_antrag = [s for s in snaps if s.kommentar and "antrag" in s.kommentar.lower()]
+    if mit_antrag:
+        return mit_antrag[-1]
+    return snaps[0] if snaps else None
+
+
+def _planstand_vergleich(db, mandant, heute, snap, plan, tage, monate, liquiditaet, vw_liq,
+                         fluesse, kategorien_vergleich, gruppen_info, summe_auto, summen) -> dict:
+    """Aktueller Stand gegen einen Planstand (Fact-Sheet-Blöcke „Entwicklung KW“
+    für die Vorwoche bzw. „Entwicklung Antrag“)."""
+    vw_gruppe, vw_ein_aus, vw_tage = fluesse
+    h = plan["heute"]
+
+    # ---- letzte abgeschlossene Woche: Ist gegen Vorwochenplan ----
+    w_von = wochen_start(heute) - timedelta(days=7)
+    w_bis = w_von + timedelta(days=6)
+    woche = None
+    if w_bis.isoformat() in vw_tage and w_bis.isoformat() in vw_liq:
+        plan_w = berechne_plan(db, mandant, start=w_von, wochen=1, heute=heute)
+        w_tage = plan_w["tage"]
+        ist_je: dict[str, float] = defaultdict(float)
+        for g in plan_w["zeilen"]:
+            gruppen_info.setdefault(g["code"], {"name": g["name"], "richtung": g["richtung"],
+                                                "sondereffekt": False})
+            for kind in g["kinder"]:
+                ist_je[g["code"]] += sum(kind["ist"].get(t, 0.0) for t in w_tage)
+        kategorien_w = []
+        for code, info in gruppen_info.items():
+            soll = sum(vw_gruppe[code].get(t, 0.0) for t in w_tage)
+            ist = ist_je.get(code, 0.0)
+            if abs(soll) < 0.005 and abs(ist) < 0.005:
+                continue
+            kategorien_w.append({"code": code, "name": info["name"], "richtung": info["richtung"],
+                                 "soll": _r(soll), "ist": _r(ist), "differenz": _r(ist - soll)})
+        kategorien_w.sort(key=lambda k: (k["richtung"] != Richtung.EIN.value, -abs(k["differenz"] or 0)))
+        ist_liq = plan_w["bestaende"]["liquiditaet"][w_bis.isoformat()]
+        soll_liq = vw_liq[w_bis.isoformat()]
+        soll_netto = sum(k["soll"] for k in kategorien_w)
+        ist_netto = sum(k["ist"] for k in kategorien_w)
+        woche = {
+            "label": plan_w["wochen"][0]["label"], "von": w_von.isoformat(), "bis": w_bis.isoformat(),
+            "soll": _r(soll_liq), "ist": _r(ist_liq), "abweichung": _r(ist_liq - soll_liq),
+            "netto": {"soll": _r(soll_netto), "ist": _r(ist_netto), "differenz": _r(ist_netto - soll_netto)},
+            "kategorien": kategorien_w,
+        }
+
+    # ---- Ergebnis: Liquidität am Ende des gemeinsamen Zeitraums ----
+    gemeinsam = [t for t in tage if t in vw_tage and t in vw_liq]
+    ergebnis = None
+    if gemeinsam:
+        tag = gemeinsam[-1]
+        ergebnis = {"datum": tag, "planstand": _r(vw_liq[tag]), "aktuell": _r(liquiditaet[tag]),
+                    "differenz": _r(liquiditaet[tag] - vw_liq[tag])}
+    bruecke = None
+    if woche and ergebnis:
+        bruecke = {"woche": woche["abweichung"], "ergebnis": ergebnis["differenz"],
+                   "differenz": _r(ergebnis["differenz"] - woche["abweichung"])}
+
+    # ---- Ein-/Auszahlungen der kommenden Wochen: aktuell und Vorwochenplan ----
+    forecast = []
+    for w in plan["wochen"]:
+        if w["bis"] < h or len(forecast) >= FORECAST_WOCHEN:
+            continue
+        w_t = [t for t in w["tage"] if t in tage]
+        im_vw = [t for t in w_t if t in vw_tage]
+        forecast.append({
+            "label": w["label"], "von": w["von"], "bis": w["bis"],
+            "einzahlungen": _r(summe_auto(summen["einzahlungen"], w_t)),
+            "auszahlungen": _r(summe_auto(summen["auszahlungen"], w_t)),
+            "planstand_einzahlungen": _r(sum(vw_ein_aus["ein"].get(t, 0.0) for t in im_vw)) if im_vw else None,
+            "planstand_auszahlungen": _r(sum(vw_ein_aus["aus"].get(t, 0.0) for t in im_vw)) if im_vw else None,
+        })
+
+    return {
+        "planstand": _snap_info(snap),
+        "woche": woche,
+        "ergebnis": ergebnis,
+        "bruecke": bruecke,
+        "liquiditaet_wochen": [
+            {"label": w["label"], "bis": w["bis"], "wert": _r(liquiditaet.get(w["bis"])),
+             "prognose": w["bis"] > h, "planstand": _r(vw_liq.get(w["bis"]))}
+            for w in plan["wochen"]
+        ],
+        "monate": [
+            {"schluessel": m["schluessel"], "label": m["label"], "status": m["status"],
+             "liquiditaet_ende": _r(liquiditaet.get(m["tage"][-1])),
+             "planstand_liquiditaet_ende": _r(vw_liq.get(m["tage"][-1]))}
+            for m in monate
+        ],
+        "kategorien": kategorien_vergleich(vw_gruppe, vw_tage),
+        "forecast_wochen": forecast,
     }

@@ -3342,11 +3342,15 @@ def kpi_abrufen(
     start: str | None = None,
     wochen: int = 13,
     vergleich_id: int | None = None,
+    vorwoche_id: int | None = None,
+    antrag_id: int | None = None,
     benutzer=Depends(aktueller_benutzer),
     db: Session = Depends(get_db),
 ):
     """Kennzahlen für die KPI-Seite (Fact Sheet). Vergleich ohne Angabe:
-    Soll-Referenz bzw. jüngster passender Planstand."""
+    Soll-Referenz bzw. jüngster passender Planstand; Vorwoche ohne Angabe:
+    jüngster vor der laufenden Woche eingefrorener Planstand; Antrag ohne
+    Angabe: Planstand mit „Antrag“ im Kommentar, sonst der älteste."""
     from ..services.kpi import kpi_daten
 
     mandant = mandant_oder_403(db, benutzer, mandant_id)
@@ -3354,7 +3358,8 @@ def kpi_abrufen(
         raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
     try:
         return kpi_daten(db, mandant, start=_datum(start, "start") if start else None,
-                         wochen=wochen, vergleich_id=vergleich_id)
+                         wochen=wochen, vergleich_id=vergleich_id, vorwoche_id=vorwoche_id,
+                         antrag_id=antrag_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
 
@@ -3365,6 +3370,8 @@ def export_kpi_pdf(
     start: str | None = None,
     wochen: int = 13,
     vergleich_id: int | None = None,
+    vorwoche_id: int | None = None,
+    antrag_id: int | None = None,
     benutzer=Depends(aktueller_benutzer),
     db: Session = Depends(get_db),
 ):
@@ -3378,7 +3385,8 @@ def export_kpi_pdf(
         raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
     try:
         kpi = kpi_daten(db, mandant, start=_datum(start, "start") if start else None,
-                        wochen=wochen, vergleich_id=vergleich_id)
+                        wochen=wochen, vergleich_id=vergleich_id, vorwoche_id=vorwoche_id,
+                        antrag_id=antrag_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
     daten = kpi_pdf(kpi, mandant)

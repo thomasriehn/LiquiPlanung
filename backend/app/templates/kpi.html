@@ -7,6 +7,10 @@
     <label>Wochen <input type="number" id="wochen" value="13" min="1" max="26" style="width:60px"></label>
     <label title="Früherer Planstand für den Planvergleich (z. B. Vorwoche oder Plan zum Antrag)">Vergleich mit Planstand
       <select id="vergleich"></select></label>
+    <label title="Planstand der Vorwoche für den Wochenvergleich (automatisch: jüngster vor der laufenden Woche eingefrorene Plan)">Vorwoche
+      <select id="vorwoche"></select></label>
+    <label title="Plan zum Antrag (automatisch: Planstand mit „Antrag“ im Kommentar, sonst der älteste)">Antrag
+      <select id="antrag"></select></label>
     <button id="laden" class="sekundaer">Aktualisieren</button>
     <a id="export-pdf" class="knopf" href="#" target="_blank" title="KPI-Übersicht als PDF-Bericht">PDF ↓</a>
     <span class="hinweis" id="kpi-info"></span>
@@ -22,6 +26,14 @@
 
   <h2 id="titel-vergleich">Planvergleich</h2>
   <div class="kpi-raster" id="bereich-vergleich"></div>
+
+  <h2 id="titel-vorwoche">Vergleich zur Vorwoche</h2>
+  <section class="kpi-kacheln" id="kacheln-vorwoche" aria-label="Kennzahlen Vorwoche"></section>
+  <div class="kpi-raster" id="bereich-vorwoche"></div>
+
+  <h2 id="titel-antrag">Vergleich zum Antrag</h2>
+  <section class="kpi-kacheln" id="kacheln-antrag" aria-label="Kennzahlen Antrag"></section>
+  <div class="kpi-raster" id="bereich-antrag"></div>
 
   <h2>Umsatz und Kosten</h2>
   <div class="kpi-raster" id="bereich-verteilung"></div>

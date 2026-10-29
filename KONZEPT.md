@@ -371,6 +371,21 @@ damit identisch zum 13-Wochen-Plan (`services/kpi.py`, `GET /mandanten/{id}/kpi`
   (Liquiditätswirkung, positiv = besser) sowie als Monatsendliquidität. Mehrere
   Vergleiche des Fact Sheets (Vorwoche, Antrag, Stichtag) entsprechen der Wahl
   verschiedener Snapshots.
+- **Vergleich zur Vorwoche / zum Antrag** (Fact-Sheet-Blöcke „Entwicklung KW“ und
+  „Entwicklung Antrag“, beide mit identischer Logik `_planstand_vergleich`):
+  Planstand Vorwoche = jüngster Snapshot mit Stichtag vor dem Montag der laufenden
+  Woche (bei wöchentlichem Einfrieren der Plan der Vorwoche), Antrag = jüngster
+  Snapshot mit „Antrag“ im Kommentar, sonst der älteste; beide per Parameter
+  `vorwoche_id`/`antrag_id` übersteuerbar. Die letzte abgeschlossene Woche
+  (Montag–Sonntag vor der laufenden Woche) wird unabhängig vom angezeigten Fenster
+  berechnet: Soll = Liquidität des Planstands zum Sonntag, Ist = Ist-Liquidität;
+  je Kategorie Planflüsse des Snapshots gegen Ist-Flüsse der Woche, dazu die
+  Über-/Unterdeckung. „Ergebnis“ = Liquidität am letzten gemeinsamen Tag von
+  Fenster und Planstand; „Veränderung nach der Woche“ = Ergebnisveränderung −
+  Wochenabweichung (Anteil, der sich bis dahin durch Zeitverschiebungen bzw.
+  Planänderungen ausgleicht oder hinzukommt). Veränderungen je Kategorie und Monat
+  wie beim Planvergleich; Vorwoche zusätzlich mit den Ein-/Auszahlungen der
+  kommenden vier Wochen, Antrag mit der Gegenüberstellung Antrag/Vorwoche/Ist.
 - **Kennzahlen:** tiefster Stand und erste Unterdeckung ab heute; Ist gegen Soll
   zum Ende der letzten abgeschlossenen Woche (sonst heute); Cash-Marge
   (Netto-Cashflow ÷ Einzahlungen) mit und ohne Gruppen mit Kennzeichen
