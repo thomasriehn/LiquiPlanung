@@ -137,7 +137,9 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Planstand mit „Antrag“ im Kommentar (sonst der älteste) – beides auf der Seite
   übersteuerbar.
   „PDF ↓“ exportiert die Seite als **KPI-Bericht** (A4 quer: Kacheln, alle Diagramme
-  in gleicher Gestaltung, Wertetabellen) mit Start, Wochen und Vergleichsstand der Seite.
+  in gleicher Gestaltung, die zugehörigen Wertetabellen jeweils direkt darunter auf
+  derselben Seite – Blöcke und Tabellen werden nicht umbrochen) mit Start, Wochen und
+  den gewählten Planständen der Seite.
 - **Szenarien (Best/Base/Worst)**: Faktoren auf Einzahlungen und variable Auszahlungen,
   Debitorenverzögerung; umschaltbar auf der Plan-Seite, im Export vermerkt; Soll/Ist
   bleibt auf dem Basisplan. Detailregeln je Konto/BWA-Gruppe übersteuern die globalen

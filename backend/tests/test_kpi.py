@@ -135,7 +135,7 @@ def test_kpi_pdf_mit_planvergleich(db, szenario):
     text = "\n".join(s.extract_text() for s in PdfReader(BytesIO(pdf)).pages)
     for teil in ("KPI-Übersicht", "Liquidität je Wochenende: Soll / Ist", "Veränderung je Kategorie",
                  "Planvergleich: aktueller Stand gegenüber Antrag", "Monatsübersicht",
-                 "Wertetabellen", "10.690,00 €"):
+                 "Liquidität je Wochenende", "10.690,00 €"):
         assert teil in text, teil
     assert (euro_kompakt(950), euro_kompakt(12500), euro_kompakt(-125000), euro_kompakt(1.25e6)) == (
         "950", "12,5 T", "-125 T", "1,2 Mio.")
@@ -256,3 +256,38 @@ def test_kpi_api_planstaende_unbekannt(client):
     for param in ("vorwoche_id", "antrag_id"):
         assert client.get(f"/api/mandanten/{mid}/kpi?{param}=999").status_code == 404
         assert client.get(f"/api/mandanten/{mid}/export/kpi.pdf?{param}=999").status_code == 404
+
+
+@pytest.mark.parametrize("wochen", [4, 26])
+def test_kpi_pdf_bloecke_auf_einer_seite(db, wochen_szenario, wochen):
+    """Diagramme und ihre Wertetabellen stehen jeweils auf derselben Seite."""
+    from io import BytesIO
+
+    from pypdf import PdfReader
+
+    from app.services.kpi_pdf import kpi_pdf
+
+    m, _, _ = wochen_szenario
+    pdf = kpi_pdf(kpi_daten(db, m, start=START, wochen=wochen, heute=HEUTE), m)
+    seiten = [s.extract_text() for s in PdfReader(BytesIO(pdf)).pages]
+
+    def seite_mit(text: str) -> list[int]:
+        return [i for i, s in enumerate(seiten) if text in s]
+
+    paare = [
+        ("Liquidität je Wochenende: Soll / Ist", "Ist / Prognose"),
+        ("Netto-Cashflow je Monat", "Monatsübersicht"),
+        ("Planvergleich: aktueller Stand", "Veränderung Monatsendliquidität"),
+        ("Vergleich zur Vorwoche: aktueller Stand", "Abweichung Woche und Ergebnis"),
+        ("Vergleich zur Vorwoche: KW 31 und kommende Wochen", "KW 31: Soll (Vorwochenplan), Ist und Differenz"),
+        ("Anpassungen gegenüber dem Vorwochenplan", "Veränderung je Kategorie und Monat"),
+        ("Vergleich zum Antrag: KW 31 und Monatsübersicht", "KW 31: Soll (Antragsplan), Ist und Differenz"),
+        ("Anpassungen gegenüber dem Antragsplan", "Veränderung je Kategorie und Monat"),
+        ("Umsatz und Kosten", "ohne Sondereffekte"),
+    ]
+    for diagramm, tabelle in paare:
+        seite = seite_mit(diagramm)
+        assert len(seite) == 1, diagramm
+        assert tabelle in seiten[seite[0]], (diagramm, tabelle)
+    # Kennzahlen und Liquidität gemeinsam auf Seite 1
+    assert "Liquidität heute" in seiten[0] and "Liquidität je Wochenende" in seiten[0]

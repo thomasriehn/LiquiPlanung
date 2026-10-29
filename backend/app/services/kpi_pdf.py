@@ -18,7 +18,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.platypus import (
-    CondPageBreak, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
 from .. import models
@@ -461,26 +461,87 @@ def _kachel_raster(kacheln: list) -> Table:
     return t
 
 
-def _kategorie_monat_tabelle(kategorien: list[dict], monate_alle: list[dict], vergleich_name: str) -> list:
+def _tabellen_block(titel: str, untertitel: str | None, tabelle) -> list:
+    """Überschrift und Tabelle als unteilbare Einheit (kein Seitenumbruch in
+    der Tabelle, solange sie auf eine Seite passt)."""
+    teile = [Paragraph(_esc(titel), _STIL["karte"])]
+    if untertitel:
+        teile.append(Paragraph(_esc(untertitel), _STIL["unter"]))
+    else:
+        teile.append(Spacer(0, 2))
+    return [KeepTogether(teile + (tabelle if isinstance(tabelle, list) else [tabelle]))]
+
+
+def _tabellenzeile(links: list, rechts: list | None = None) -> Table:
+    """Zwei Wertetabellen nebeneinander (je unter ihrer Diagrammkarte); die
+    Tabellenzeile selbst wird nie umbrochen."""
+    def inhalt(teile):
+        if not teile:
+            return ""
+        return [f for x in teile for f in (x._content if isinstance(x, KeepTogether) else [x])]
+    t = Table([[inhalt(links), inhalt(rechts)]], colWidths=[SPALTE + 5, SPALTE + 5])
+    t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (0, -1), 5),
+        ("LEFTPADDING", (1, 0), (1, -1), 5), ("RIGHTPADDING", (1, 0), (1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return t
+
+
+QUER_SPALTEN = 13          # Wochen je Zeile einer Quertabelle
+
+
+def _quer_tabelle(spalten: list[str], zeilen: list[tuple[str, list]], breite: float = SEITE_BREITE,
+                  erste: float = 120, fett: tuple[str, ...] = ()) -> list:
+    """Werte mit Perioden als Spalten (wie im Plan); mehr als 13 Perioden
+    werden auf mehrere Tabellen untereinander verteilt."""
+    tabellen = []
+    for von in range(0, len(spalten), QUER_SPALTEN):
+        teil = spalten[von:von + QUER_SPALTEN]
+        rest = (breite - erste) / max(len(teil), 1)
+        daten = [[name] + [_zahl_text(v) if isinstance(v, (int, float)) or v is None else v
+                           for v in werte[von:von + QUER_SPALTEN]] for name, werte in zeilen]
+        t = _wertetabelle([""] + teil, daten, [erste] + [rest] * len(teil))
+        for r, (name, _) in enumerate(zeilen, start=1):
+            if name in fett:
+                t.setStyle(TableStyle([("FONT", (0, r), (-1, r), SCHRIFT_FETT, 7.5),
+                                       ("LINEABOVE", (0, r), (-1, r), 0.6, FARBE["achse"])]))
+        tabellen += [t, Spacer(0, 3)] if von + QUER_SPALTEN < len(spalten) else [t]
+    return tabellen
+
+
+def _kategorie_monat_tabelle(kategorien: list[dict], monate_alle: list[dict], vergleich_name: str,
+                             monatsende: dict[str, float | None] | None = None) -> list:
+    """Veränderung je Kategorie und Monat; Fußzeile: Veränderung der
+    Monatsendliquidität (wie „Liquidität zum Monatsende“ im Fact Sheet)."""
     monate = [x for x in monate_alle if any(x["schluessel"] in k["je_monat"] for k in kategorien)]
     geaendert = [k for k in kategorien if abs(k["veraenderung"] or 0) >= 0.005
                  or any(abs(v or 0) >= 0.005 for v in k["je_monat"].values())]
-    if not geaendert:
+    monate_ende = [x for x in monate_alle if monatsende and x["schluessel"] in monatsende]
+    if not monate:
+        monate = monate_ende
+    hat_ende = any(abs(v or 0) >= 0.005 for v in (monatsende or {}).values())
+    if not monate or (not geaendert and not hat_ende):
         return []
-    name_breite = 170
+    name_breite = 190
     rest = (SEITE_BREITE - name_breite) / (len(monate) + 1)
     zeilen = [[Paragraph(_esc(k["name"]), _STIL["zelle"])]
               + [_zahl_text(k["je_monat"].get(x["schluessel"])) for x in monate]
               + [_zahl_text(k["veraenderung"])] for k in geaendert]
+    if monatsende:
+        zeilen.append([Paragraph("<b>Veränderung Monatsendliquidität</b>", _STIL["zelle"])]
+                      + [_zahl_text(monatsende.get(x["schluessel"])) for x in monate] + [""])
     unveraendert = len(kategorien) - len(geaendert)
-    return [KeepTogether([
-        Paragraph("Veränderung je Kategorie und Monat", _STIL["karte"]),
-        Paragraph(f"Liquiditätswirkung aktuell – {_esc(vergleich_name)} in €; positiv = Liquidität besser"
-                  + (f" · {unveraendert} Kategorien unverändert (ausgeblendet)" if unveraendert else ""),
-                  _STIL["unter"]),
-        _wertetabelle(["Kategorie"] + [x["label"] for x in monate] + ["Summe"], zeilen,
-                      [name_breite] + [rest] * (len(monate) + 1), fett_letzte=True),
-    ])]
+    t = _wertetabelle(["Kategorie"] + [x["label"] for x in monate] + ["Summe"], zeilen,
+                      [name_breite] + [rest] * (len(monate) + 1), fett_letzte=True)
+    if monatsende:
+        t.setStyle(TableStyle([("FONT", (0, -1), (-1, -1), SCHRIFT_FETT, 7.5),
+                               ("LINEABOVE", (0, -1), (-1, -1), 0.6, FARBE["achse"])]))
+    return _tabellen_block(
+        "Veränderung je Kategorie und Monat",
+        f"Liquiditätswirkung aktuell – {vergleich_name} in €; positiv = Liquidität besser"
+        + (f" · {unveraendert} Kategorien unverändert (ausgeblendet)" if unveraendert else ""), t)
 
 
 _LEG_DIVERGIEREND = [("Liquidität besser", FARBE["blau"], "flaeche"),
@@ -498,12 +559,13 @@ PLANSTAND_BLOECKE = {
 
 
 def _planstand_abschnitt(kpi: dict, art: str) -> list:
-    """Vergleich zur Vorwoche bzw. zum Antrag (wie auf der KPI-Seite)."""
+    """Vergleich zur Vorwoche bzw. zum Antrag: drei Blöcke (Übersicht,
+    letzte Woche, Anpassungen), jeweils Diagramme mit ihren Wertetabellen."""
     cfg = PLANSTAND_BLOECKE[art]
     vg = kpi.get(art)
     S = _STIL
     if not vg:
-        return [Paragraph(cfg["titel"], S["h2"]), Paragraph(cfg["leer"], S["hinweis"])]
+        return [KeepTogether([Paragraph(cfg["titel"], S["h2"]), Paragraph(cfg["leer"], S["hinweis"])])]
     plan_name = f"{cfg['plan']} (Stichtag {datum_de(vg['planstand']['stichtag'])})"
     w, e, b = vg["woche"], vg["ergebnis"], vg["bruecke"]
     kacheln = [
@@ -525,12 +587,8 @@ def _planstand_abschnitt(kpi: dict, art: str) -> list:
                  "Zeitverschiebungen und Planänderungen bis zum Ergebnistag"])
         if b else _kachel("Veränderung nach der Woche", "–"),
     ]
-    el: list = [KeepTogether([
-        Paragraph(_esc(f"{cfg['titel']}: aktueller Stand gegenüber {planstand_text(vg['planstand'])}"),
-                  S["h2"]),
-        _kachel_raster(kacheln), Spacer(0, 3 * mm)])]
 
-    # Liquidität je Wochenende (beim Antrag mit Vorwochenplan als Gegenüberstellung)
+    # ---- Block 1: Kacheln, Liquiditätsverlauf und Abweichung Woche/Ergebnis ----
     lw = vg["liquiditaet_wochen"]
     prognose_ab = next((i for i, x in enumerate(lw) if x["prognose"]), None)
     reihen = [{"name": plan_name, "farbe": FARBE["grau"], "werte": [x["planstand"] for x in lw]}]
@@ -546,24 +604,42 @@ def _planstand_abschnitt(kpi: dict, art: str) -> list:
     reihen.append({"name": "Ist bis heute, danach Prognose", "farbe": FARBE["blau"],
                    "werte": [x["wert"] for x in lw], "prognose_ab": prognose_ab})
     legende_.append(("Ist bis heute, danach Prognose", FARBE["blau"], "linie"))
-    karte_linie = _karte(
-        f"Gegenüberstellung: {cfg['plan']}, Vorwochenplan und Ist" if vw
-        else f"Liquidität je Wochenende: {cfg['plan']} / Ist",
-        "Bank + Kasse je Wochenende; gestrichelt: Prognose aus dem aktuellen Plan",
-        linien_diagramm([x["label"] for x in lw], reihen), legende_)
-    karte_bruecke = _karte(
-        "Abweichung Woche und Ergebnis",
-        f"Ist – {cfg['plan']} zum Wochenende, Veränderung des Ergebnisses und Differenz",
-        saeulen_diagramm([f"Woche {w['label']}", f"Ergebnis {datum_de(e['datum'])[:6]}", "Differenz"],
-                         [{"name": "Betrag", "farbe": FARBE["blau"],
-                           "werte": [b["woche"], b["ergebnis"], b["differenz"]]}],
-                         divergierend=True, beschriften=0) if b
-        else _leer(PLOT_BREITE, "Keine Wochen- bzw. Ergebnisabweichung ermittelbar."),
-        _LEG_DIVERGIEREND if b else None)
-    el.append(_kartenzeile(karte_linie, karte_bruecke))
+    wochen_zeilen = [("Ist / Prognose", [x["wert"] for x in lw]),
+                     (cfg["plan"], [x["planstand"] for x in lw]),
+                     ("Abweichung", [None if x["planstand"] is None or x["wert"] is None
+                                     else x["wert"] - x["planstand"] for x in lw])]
+    if vw:
+        wochen_zeilen.append(("Vorwochenplan", [x["planstand"] for x in vw["liquiditaet_wochen"]]))
 
-    # letzte Woche je Kategorie und Ein-/Auszahlungen bzw. Monatsübersicht
-    karte_woche = None
+    def block1(hoehe: float) -> list:
+        karte_linie = _karte(
+            f"Gegenüberstellung: {cfg['plan']}, Vorwochenplan und Ist" if vw
+            else f"Liquidität je Wochenende: {cfg['plan']} / Ist",
+            "Bank + Kasse je Wochenende; gestrichelt: Prognose aus dem aktuellen Plan",
+            linien_diagramm([x["label"] for x in lw], reihen, hoehe=hoehe), legende_)
+        karte_bruecke = _karte(
+            "Abweichung Woche und Ergebnis",
+            f"Ist – {cfg['plan']} zum Wochenende, Veränderung des Ergebnisses und Differenz",
+            saeulen_diagramm([f"Woche {w['label']}", f"Ergebnis {datum_de(e['datum'])[:6]}", "Differenz"],
+                             [{"name": "Betrag", "farbe": FARBE["blau"],
+                               "werte": [b["woche"], b["ergebnis"], b["differenz"]]}],
+                             divergierend=True, beschriften=0, hoehe=hoehe) if b
+            else _leer(PLOT_BREITE, "Keine Wochen- bzw. Ergebnisabweichung ermittelbar."),
+            _LEG_DIVERGIEREND if b else None)
+        return [
+            Paragraph(_esc(f"{cfg['titel']}: aktueller Stand gegenüber {planstand_text(vg['planstand'])}"),
+                      S["h2"]),
+            _kachel_raster(kacheln), Spacer(0, 3 * mm),
+            _kartenzeile(karte_linie, karte_bruecke),
+            *_tabellen_block("Liquidität je Wochenende", "Bank + Kasse in €; ab der laufenden Woche Prognose",
+                             _quer_tabelle([x["label"] for x in lw], wochen_zeilen)),
+        ]
+
+    bloecke = [_passender_block(block1)]
+
+    # ---- Block 2: letzte Woche je Kategorie + Forecast bzw. Monatsübersicht ----
+    m = [x for x in vg["monate"] if x["planstand_liquiditaet_ende"] is not None]
+    karte_woche = tab_woche = None
     if w:
         kat = sorted((k for k in w["kategorien"] if abs(k["differenz"] or 0) >= 0.005),
                      key=lambda k: -abs(k["differenz"]))
@@ -573,7 +649,16 @@ def _planstand_abschnitt(kpi: dict, art: str) -> list:
             balken_diagramm([k["name"] for k in kat], [k["differenz"] for k in kat], divergierend=True)
             if kat else _leer(PLOT_BREITE, f"Keine Abweichungen gegenüber dem {cfg['plan']}."),
             _LEG_DIVERGIEREND)
-    m = [x for x in vg["monate"] if x["planstand_liquiditaet_ende"] is not None]
+        zeilen = [[Paragraph(_esc(k["name"]), S["zelle"]), _zahl_text(k["soll"]), _zahl_text(k["ist"]),
+                   _zahl_text(k["differenz"])] for k in w["kategorien"]]
+        zeilen.append([Paragraph("<b>Über-/Unterdeckung</b>", S["zelle"]), _zahl_text(w["netto"]["soll"]),
+                       _zahl_text(w["netto"]["ist"]), _zahl_text(w["netto"]["differenz"])])
+        tab = _wertetabelle(["Kategorie", "Soll", "Ist", "Differenz"], zeilen,
+                            [SPALTE * 0.43] + [SPALTE * 0.19] * 3)
+        tab.setStyle(TableStyle([("FONT", (1, -1), (-1, -1), SCHRIFT_FETT, 7.5),
+                                 ("LINEABOVE", (0, -1), (-1, -1), 0.6, FARBE["achse"])]))
+        tab_woche = _tabellen_block(f"{w['label']}: Soll ({cfg['plan']}), Ist und Differenz",
+                                    "Liquiditätswirkung in € (Einzahlungen positiv, Auszahlungen negativ)", tab)
     if art == "vorwoche":
         fw = vg["forecast_wochen"]
         karte_zwei = _karte(
@@ -584,6 +669,16 @@ def _planstand_abschnitt(kpi: dict, art: str) -> list:
                 {"name": "Auszahlungen", "farbe": FARBE["orange"], "werte": [-x["auszahlungen"] for x in fw]},
             ]) if fw else _leer(PLOT_BREITE),
             [("Einzahlungen", FARBE["blau"], "flaeche"), ("Auszahlungen", FARBE["orange"], "flaeche")])
+        tab_zwei = _tabellen_block(
+            "Ein- und Auszahlungen der kommenden Wochen", "aktueller Plan und Vorwochenplan in €",
+            _wertetabelle(
+                ["Woche", "Einzahlungen", "Vorwoche", "Auszahlungen", "Vorwoche"],
+                [[f"{x['label']} ({datum_de(x['von'])[:6]}–{datum_de(x['bis'])[:6]})",
+                  _zahl_text(x["einzahlungen"]), _zahl_text(x["planstand_einzahlungen"]),
+                  _zahl_text(-x["auszahlungen"]),
+                  _zahl_text(-x["planstand_auszahlungen"]) if x["planstand_auszahlungen"] is not None else "–"]
+                 for x in fw],
+                [SPALTE * 0.28] + [SPALTE * 0.18] * 4))
     else:
         karte_zwei = _karte(
             f"Liquidität zum Monatsende: {cfg['plan']} / aktuell", "Ist bis heute, danach Plan",
@@ -592,9 +687,23 @@ def _planstand_abschnitt(kpi: dict, art: str) -> list:
                 {"name": "Aktuell", "farbe": FARBE["blau"], "werte": [x["liquiditaet_ende"] for x in m]},
             ], unter=[x["status"] for x in m]) if m else _leer(PLOT_BREITE),
             [(plan_name, FARBE["grau"], "flaeche"), ("Aktuell", FARBE["blau"], "flaeche")])
-    el.append(_kartenzeile(karte_woche or karte_zwei, karte_zwei if karte_woche else None))
+        tab_zwei = _tabellen_block(
+            "Liquidität zum Monatsende", f"aktuell und {cfg['plan']} in €",
+            _wertetabelle(["Monat", "Aktuell", cfg["plan"], "Veränderung"],
+                          [[f"{x['label']} ({x['status']})", _zahl_text(x["liquiditaet_ende"]),
+                            _zahl_text(x["planstand_liquiditaet_ende"]),
+                            _zahl_text(x["liquiditaet_ende"] - x["planstand_liquiditaet_ende"])] for x in m],
+                          [SPALTE * 0.31] + [SPALTE * 0.23] * 3))
+    ueberschrift = Paragraph(_esc(
+        f"{cfg['titel']}: {w['label'] if w else 'letzte Woche'} und "
+        + ("kommende Wochen" if art == "vorwoche" else "Monatsübersicht")), S["h2"])
+    if karte_woche:
+        bloecke.append(KeepTogether([ueberschrift, _kartenzeile(karte_woche, karte_zwei),
+                                     _tabellenzeile(tab_woche, tab_zwei)]))
+    else:
+        bloecke.append(KeepTogether([ueberschrift, _kartenzeile(karte_zwei), _tabellenzeile(tab_zwei)]))
 
-    # Anpassungen gegenüber dem Planstand
+    # ---- Block 3: Anpassungen gegenüber dem Planstand ----
     kat = sorted((k for k in vg["kategorien"] if abs(k["veraenderung"] or 0) >= 0.005),
                  key=lambda k: -abs(k["veraenderung"]))
     karte_kat = _karte(
@@ -611,23 +720,13 @@ def _planstand_abschnitt(kpi: dict, art: str) -> list:
             divergierend=True, beschriften=0) if m else _leer(PLOT_BREITE),
         [(f"höher als im {cfg['plan']}", FARBE["blau"], "flaeche"),
          (f"niedriger als im {cfg['plan']}", FARBE["rot"], "flaeche")])
-    el.append(_kartenzeile(karte_kat, karte_mv))
-    el += _kategorie_monat_tabelle(vg["kategorien"], kpi["monate"], cfg["kurz"])
-
-    # Wertetabelle der letzten Woche je Kategorie (Soll/Ist/Differenz)
-    if w:
-        zeilen = [[Paragraph(_esc(k["name"]), S["zelle"]), _zahl_text(k["soll"]), _zahl_text(k["ist"]),
-                   _zahl_text(k["differenz"])] for k in w["kategorien"]]
-        zeilen.append([Paragraph("<b>Über-/Unterdeckung</b>", S["zelle"]), _zahl_text(w["netto"]["soll"]),
-                       _zahl_text(w["netto"]["ist"]), _zahl_text(w["netto"]["differenz"])])
-        el.append(Spacer(0, 3 * mm))
-        el.append(KeepTogether([
-            Paragraph(f"{_esc(w['label'])} je Kategorie: Soll ({cfg['plan']}), Ist und Differenz", S["karte"]),
-            Paragraph("Liquiditätswirkung in € (Einzahlungen positiv, Auszahlungen negativ)", S["unter"]),
-            _wertetabelle(["Kategorie", f"Soll ({cfg['plan']})", "Ist", "Differenz"], zeilen,
-                          [SEITE_BREITE * 0.4] + [SEITE_BREITE * 0.2] * 3),
-        ]))
-    return el
+    monatsende = {x["schluessel"]: x["liquiditaet_ende"] - x["planstand_liquiditaet_ende"] for x in m}
+    bloecke.append(KeepTogether([
+        Paragraph(_esc(f"{cfg['titel']}: Anpassungen gegenüber dem {cfg['plan']}"), S["h2"]),
+        _kartenzeile(karte_kat, karte_mv),
+        *_kategorie_monat_tabelle(vg["kategorien"], kpi["monate"], cfg["kurz"], monatsende),
+    ]))
+    return bloecke
 
 
 def _wertetabelle(kopf: list[str], zeilen: list[list], breiten: list[float],
@@ -659,7 +758,33 @@ def _zahl_text(v: float | None) -> str:
     return "" if v is None or abs(v) < 0.005 else _zahl(v, 2, fest=True)
 
 
+RAHMEN_BREITE = SEITE_BREITE - 12          # Druckbereich abzüglich Rahmenabstand
+RAHMEN_HOEHE = landscape(A4)[1] - 20 * mm - 12
+
+
+def _hoehe(teile: list) -> float:
+    """Benötigte Höhe einer Folge von Flowables im Druckbereich."""
+    gesamt = 0.0
+    for f in teile:
+        if isinstance(f, KeepTogether):
+            gesamt += _hoehe(f._content)
+            continue
+        gesamt += f.wrap(RAHMEN_BREITE, RAHMEN_HOEHE * 10)[1] + f.getSpaceBefore() + f.getSpaceAfter()
+    return gesamt
+
+
+def _passender_block(baue, hoehen=(165, 145, 125, 110)) -> KeepTogether:
+    """Block mit der größten Diagrammhöhe, bei der er auf eine Seite passt."""
+    for hoehe in hoehen:
+        teile = baue(hoehe)
+        if _hoehe(teile) <= RAHMEN_HOEHE:
+            return KeepTogether(teile)
+    return KeepTogether(baue(hoehen[0]))
+
+
 # ------------------------------------------------------------------ Bericht
+# Aufbau in Blöcken (Überschrift, Diagramme, zugehörige Wertetabellen), die
+# jeweils zusammen auf einer Seite stehen; Tabellen werden nicht umbrochen.
 
 def kpi_pdf(kpi: dict, mandant: models.Mandant) -> bytes:
     puffer = BytesIO()
@@ -668,7 +793,6 @@ def kpi_pdf(kpi: dict, mandant: models.Mandant) -> bytes:
         topMargin=10 * mm, bottomMargin=10 * mm, title=f"KPI-Übersicht {mandant.name}",
     )
     S = _STIL
-    el: list = [Paragraph("KPI-Übersicht", S["titel"])]
     meta = (
         f"{_esc(mandant.name)}"
         + (f" · {_esc(mandant.aktenzeichen)}" if mandant.aktenzeichen else "")
@@ -676,15 +800,17 @@ def kpi_pdf(kpi: dict, mandant: models.Mandant) -> bytes:
         + f" · Zeitraum {datum_de(kpi['start'])} – {datum_de(kpi['ende'])}"
         + f" · Ist bis {datum_de(kpi['heute'])}, danach Plan"
     )
-    el.append(Paragraph(meta, S["meta"]))
-    el.append(Paragraph(
-        f"Soll-Referenz: {_esc(planstand_text(kpi['referenz'])) if kpi['referenz'] else 'noch kein eingefrorener Planstand'}"
-        + (f" · Vergleich mit Planstand: {_esc(planstand_text(kpi['vergleich']))}" if kpi["vergleich"] else ""),
-        S["meta"]))
-    el.append(Spacer(0, 3 * mm))
-    el.append(_kacheln(kpi))
+    kopf = [
+        Paragraph("KPI-Übersicht", S["titel"]), Paragraph(meta, S["meta"]),
+        Paragraph(
+            f"Soll-Referenz: {_esc(planstand_text(kpi['referenz'])) if kpi['referenz'] else 'noch kein eingefrorener Planstand'}"
+            + (f" · Vergleich mit Planstand: {_esc(planstand_text(kpi['vergleich']))}" if kpi["vergleich"] else ""),
+            S["meta"]),
+        Spacer(0, 3 * mm), _kacheln(kpi), Spacer(0, 1 * mm),
+    ]
+    el: list = []
 
-    # ---- Liquidität ----
+    # ---- Block: Kennzahlen und Liquidität ----
     w = kpi["liquiditaet_wochen"]
     prognose_ab = next((i for i, x in enumerate(w) if x["prognose"]), None)
     hat_soll = any(x["soll"] is not None for x in w)
@@ -694,12 +820,6 @@ def kpi_pdf(kpi: dict, mandant: models.Mandant) -> bytes:
         reihen.append({"name": soll_name, "farbe": FARBE["grau"], "werte": [x["soll"] for x in w]})
     reihen.append({"name": "Ist bis heute, danach Prognose", "farbe": FARBE["blau"],
                    "werte": [x["wert"] for x in w], "prognose_ab": prognose_ab})
-    karte_wochen = _karte(
-        "Liquidität je Wochenende: Soll / Ist",
-        "Bank + Kasse; gestrichelt: Prognose aus dem aktuellen Plan",
-        linien_diagramm([x["label"] for x in w], reihen),
-        ([(soll_name, FARBE["grau"], "linie")] if hat_soll else [])
-        + [("Ist bis heute, danach Prognose", FARBE["blau"], "linie")])
     m = kpi["monate"]
     mit_vgl = bool(kpi["vergleich"]) and any(x["vergleich_liquiditaet_ende"] is not None for x in m)
     vgl_name = f"Vergleich ({planstand_text(kpi['vergleich'])})"
@@ -708,15 +828,43 @@ def kpi_pdf(kpi: dict, mandant: models.Mandant) -> bytes:
         reihen_m.append({"name": vgl_name, "farbe": FARBE["grau"],
                          "werte": [x["vergleich_liquiditaet_ende"] for x in m]})
     reihen_m.append({"name": "Aktuell", "farbe": FARBE["blau"], "werte": [x["liquiditaet_ende"] for x in m]})
-    karte_monate = _karte(
-        "Liquidität zum Monatsende", "Randmonate bis zum Fensterbeginn bzw. -ende",
-        saeulen_diagramm([x["label"] for x in m], reihen_m, unter=[x["status"] for x in m],
-                         beschriften=len(reihen_m) - 1),
-        [(vgl_name, FARBE["grau"], "flaeche"), ("Aktuell", FARBE["blau"], "flaeche")] if mit_vgl else None)
-    el.append(Spacer(0, 2 * mm))
-    el.append(KeepTogether([Paragraph("Liquidität", S["h2"]), _kartenzeile(karte_wochen, karte_monate)]))
+    wochen_zeilen = [("Ist / Prognose", [x["wert"] for x in w])]
+    if hat_soll:
+        wochen_zeilen += [("Soll", [x["soll"] for x in w]),
+                          ("Abweichung", [None if x["soll"] is None or x["wert"] is None
+                                          else x["wert"] - x["soll"] for x in w])]
 
-    # ---- Ein- und Auszahlungen ----
+    def liquiditaet_block(hoehe: float) -> list:
+        karte_wochen = _karte(
+            "Liquidität je Wochenende: Soll / Ist",
+            "Bank + Kasse; gestrichelt: Prognose aus dem aktuellen Plan",
+            linien_diagramm([x["label"] for x in w], reihen, hoehe=hoehe),
+            ([(soll_name, FARBE["grau"], "linie")] if hat_soll else [])
+            + [("Ist bis heute, danach Prognose", FARBE["blau"], "linie")])
+        karte_monate = _karte(
+            "Liquidität zum Monatsende", "Randmonate bis zum Fensterbeginn bzw. -ende",
+            saeulen_diagramm([x["label"] for x in m], reihen_m, unter=[x["status"] for x in m],
+                             beschriften=len(reihen_m) - 1, hoehe=hoehe),
+            [(vgl_name, FARBE["grau"], "flaeche"), ("Aktuell", FARBE["blau"], "flaeche")] if mit_vgl else None)
+        return [
+            Paragraph("Liquidität", S["h2"]),
+            _kartenzeile(karte_wochen, karte_monate),
+            *_tabellen_block("Liquidität je Wochenende", "Bank + Kasse in €; ab der laufenden Woche Prognose",
+                             _quer_tabelle([x["label"] for x in w], wochen_zeilen)),
+        ]
+
+    # Kennzahlen und Liquidität gemeinsam auf Seite 1 – notfalls mit flacheren
+    # Diagrammen, sonst Liquidität (Diagramme mit Tabelle) auf eigener Seite
+    for hoehe in (150, 130, 112):
+        block = liquiditaet_block(hoehe)
+        if _hoehe(kopf + block) <= RAHMEN_HOEHE:
+            el.append(KeepTogether(kopf + block))
+            break
+    else:
+        el.append(KeepTogether(kopf))
+        el.append(KeepTogether(liquiditaet_block(150)))
+
+    # ---- Block: Ein- und Auszahlungen mit Monatsübersicht ----
     labels, status = [x["label"] for x in m], [x["status"] for x in m]
     karte_netto = _karte(
         "Netto-Cashflow je Monat", "Einzahlungen – Auszahlungen; Ist bis heute, danach Plan",
@@ -731,11 +879,27 @@ def kpi_pdf(kpi: dict, mandant: models.Mandant) -> bytes:
              "werte": [-x["auszahlungen"] if x["auszahlungen"] is not None else None for x in m]},
         ], unter=status),
         [("Einzahlungen", FARBE["blau"], "flaeche"), ("Auszahlungen", FARBE["orange"], "flaeche")])
-    el.append(PageBreak())
-    el.append(KeepTogether([Paragraph("Ein- und Auszahlungen", S["h2"]),
-                            _kartenzeile(karte_netto, karte_einaus)]))
+    monats_zeilen = [
+        ("Einzahlungen", [x["einzahlungen"] for x in m]),
+        ("Auszahlungen", [-x["auszahlungen"] if x["auszahlungen"] is not None else None for x in m]),
+        ("Netto-Cashflow", [x["netto"] for x in m]),
+        ("Liquidität Monatsende", [x["liquiditaet_ende"] for x in m]),
+    ]
+    if mit_vgl:
+        monats_zeilen += [
+            ("Monatsende Vergleich", [x["vergleich_liquiditaet_ende"] for x in m]),
+            ("Veränderung", [None if x["vergleich_liquiditaet_ende"] is None
+                             else x["liquiditaet_ende"] - x["vergleich_liquiditaet_ende"] for x in m]),
+        ]
+    el.append(KeepTogether([
+        Paragraph("Ein- und Auszahlungen", S["h2"]),
+        _kartenzeile(karte_netto, karte_einaus),
+        *_tabellen_block("Monatsübersicht", "in €; Ist bis heute, danach Plan",
+                         _quer_tabelle([f"{x['label']} ({x['status']})" for x in m], monats_zeilen,
+                                       fett=("Netto-Cashflow",))),
+    ]))
 
-    # ---- Planvergleich ----
+    # ---- Block: Planvergleich ----
     if kpi["vergleich"]:
         titel = f"Planvergleich: aktueller Stand gegenüber {planstand_text(kpi['vergleich'])}"
         kat = sorted((k for k in kpi["kategorien"] if abs(k["veraenderung"] or 0) >= 0.005),
@@ -745,30 +909,32 @@ def kpi_pdf(kpi: dict, mandant: models.Mandant) -> bytes:
             "Liquiditätswirkung im gemeinsamen Zeitraum (aktuell – Vergleich)",
             balken_diagramm([k["name"] for k in kat], [k["veraenderung"] for k in kat], divergierend=True)
             if kat else _leer(PLOT_BREITE, "Keine Veränderungen gegenüber dem Vergleichsstand."),
-            [("Liquidität besser", FARBE["blau"], "flaeche"), ("Liquidität schlechter", FARBE["rot"], "flaeche")])
+            _LEG_DIVERGIEREND)
         mv = [x for x in m if x["vergleich_liquiditaet_ende"] is not None]
         karte_mv = _karte(
             "Veränderung der Monatsendliquidität", "aktuell – Vergleich",
             saeulen_diagramm([x["label"] for x in mv], [{
                 "name": "Veränderung", "farbe": FARBE["blau"],
                 "werte": [x["liquiditaet_ende"] - x["vergleich_liquiditaet_ende"] for x in mv]}],
-                divergierend=True, beschriften=0),
+                divergierend=True, beschriften=0) if mv else _leer(PLOT_BREITE),
             [("höher als geplant", FARBE["blau"], "flaeche"), ("niedriger als geplant", FARBE["rot"], "flaeche")])
-        el.append(KeepTogether([Paragraph(_esc(titel), S["h2"]), _kartenzeile(karte_kat, karte_mv)]))
-
-        el += _kategorie_monat_tabelle(kpi["kategorien"], m, "Vergleich")
+        monatsende = {x["schluessel"]: x["liquiditaet_ende"] - x["vergleich_liquiditaet_ende"] for x in mv}
+        el.append(KeepTogether([
+            Paragraph(_esc(titel), S["h2"]),
+            _kartenzeile(karte_kat, karte_mv),
+            *_kategorie_monat_tabelle(kpi["kategorien"], m, "Vergleich", monatsende),
+        ]))
     else:
-        el.append(Paragraph("Planvergleich", S["h2"]))
-        el.append(Paragraph("Noch kein eingefrorener Planstand – über „Plan einfrieren“ auf der "
-                            "Plan-Seite anlegen.", S["hinweis"]))
+        el.append(KeepTogether([
+            Paragraph("Planvergleich", S["h2"]),
+            Paragraph("Noch kein eingefrorener Planstand – über „Plan einfrieren“ auf der "
+                      "Plan-Seite anlegen.", S["hinweis"])]))
 
-    # ---- Vergleich zur Vorwoche und zum Antrag ----
+    # ---- Blöcke: Vergleich zur Vorwoche und zum Antrag ----
     for art in ("vorwoche", "antrag"):
-        el.append(CondPageBreak(120 * mm))
         el += _planstand_abschnitt(kpi, art)
 
-    # ---- Umsatz und Kosten ----
-    el.append(CondPageBreak(110 * mm))
+    # ---- Block: Umsatz und Kosten mit Verteilungstabellen ----
     ein = kpi["einzahlungen_konten"]
     aus = kpi["auszahlungen_gruppen"]
     karte_ein = _karte(
@@ -780,57 +946,28 @@ def kpi_pdf(kpi: dict, mandant: models.Mandant) -> bytes:
         balken_diagramm([x["name"] + (" *" if x["sondereffekt"] else "") for x in aus],
                         [x["summe"] for x in aus], farbe=FARBE["orange"],
                         zusatz=[f" · {prozent(x['anteil'], 0)}" for x in aus]))
-    el.append(KeepTogether([Paragraph("Umsatz und Kosten", S["h2"]), _kartenzeile(karte_ein, karte_aus)]))
-    gruppen = kpi["kennzahlen"]["sondereffekt_gruppen"]
-    el.append(Paragraph(
-        ("Sondereffekte (* – in den Kennzahlen „ohne Sondereffekte“ herausgerechnet): "
-         + _esc(", ".join(gruppen)) + ".") if gruppen else
-        "Für die Kennzahlen „ohne Sondereffekte“ ist noch keine Kontogruppe als Sondereffekt "
-        "gekennzeichnet (Konten, Abschnitt Gruppen, Spalte „Sondereffekt“).", S["hinweis"]))
-
-    # ---- Wertetabellen ----
-    el.append(PageBreak())
-    el.append(Paragraph("Wertetabellen", S["h2"]))
-    halbe = SPALTE
-    tab_w = _wertetabelle(
-        ["Woche", "Ist / Prognose", "Soll", "Abweichung"],
-        [[f"{x['label']} (bis {datum_de(x['bis'])})" + (" – Prognose" if x["prognose"] else ""),
-          _zahl_text(x["wert"]), _zahl_text(x["soll"]),
-          "–" if x["soll"] is None or x["wert"] is None else _zahl_text(x["wert"] - x["soll"])]
-         for x in w],
-        [halbe * 0.40, halbe * 0.2, halbe * 0.2, halbe * 0.2])
-    kopf_m = ["Monat", "Einzahlungen", "Auszahlungen", "Netto", "Liquidität Monatsende"]
-    if mit_vgl:
-        kopf_m += ["Vergleich", "Veränderung"]
-    zeilen_m = []
-    for x in m:
-        z = [f"{x['label']} ({x['status']})", _zahl_text(x["einzahlungen"]),
-             _zahl_text(-x["auszahlungen"] if x["auszahlungen"] is not None else None),
-             _zahl_text(x["netto"]), _zahl_text(x["liquiditaet_ende"])]
-        if mit_vgl:
-            v = x["vergleich_liquiditaet_ende"]
-            z += [_zahl_text(v), "–" if v is None else _zahl_text(x["liquiditaet_ende"] - v)]
-        zeilen_m.append(z)
-    erste = SEITE_BREITE * 0.2
-    el.append(Paragraph("Monatsübersicht", S["karte"]))
-    el.append(Spacer(0, 2))
-    el.append(_wertetabelle(kopf_m, zeilen_m,
-                            [erste] + [(SEITE_BREITE - erste) / (len(kopf_m) - 1)] * (len(kopf_m) - 1)))
-    el.append(Spacer(0, 4 * mm))
     tab_ein = _wertetabelle(
         ["Konto", "Summe", "Anteil"],
         [[Paragraph(_esc(x["name"]), S["zelle"]), _zahl_text(x["summe"]), prozent(x["anteil"])] for x in ein],
-        [halbe * 0.6, halbe * 0.22, halbe * 0.18])
+        [SPALTE * 0.6, SPALTE * 0.22, SPALTE * 0.18])
     tab_aus = _wertetabelle(
         ["Kategorie", "Summe", "Anteil", "ohne Sondereffekte"],
         [[Paragraph(_esc(x["name"] + (" (Sondereffekt)" if x["sondereffekt"] else "")), S["zelle"]),
           _zahl_text(x["summe"]), prozent(x["anteil"]),
           "–" if x["sondereffekt"] else prozent(x["anteil_ohne"])] for x in aus],
-        [halbe * 0.46, halbe * 0.16, halbe * 0.14, halbe * 0.24])
-    el.append(_kartenzeile(
-        [Paragraph("Liquidität je Wochenende", S["karte"]), Spacer(0, 2), tab_w],
-        [Paragraph("Einzahlungen nach Konto", S["karte"]), Spacer(0, 2), tab_ein, Spacer(0, 4 * mm),
-         Paragraph("Auszahlungen nach Kategorie", S["karte"]), Spacer(0, 2), tab_aus]))
+        [SPALTE * 0.46, SPALTE * 0.16, SPALTE * 0.14, SPALTE * 0.24])
+    gruppen = kpi["kennzahlen"]["sondereffekt_gruppen"]
+    el.append(KeepTogether([
+        Paragraph("Umsatz und Kosten", S["h2"]),
+        _kartenzeile(karte_ein, karte_aus),
+        _tabellenzeile(_tabellen_block("Einzahlungen nach Konto", None, tab_ein),
+                       _tabellen_block("Auszahlungen nach Kategorie", None, tab_aus)),
+        Paragraph(
+            ("Sondereffekte (* – in den Kennzahlen „ohne Sondereffekte“ herausgerechnet): "
+             + _esc(", ".join(gruppen)) + ".") if gruppen else
+            "Für die Kennzahlen „ohne Sondereffekte“ ist noch keine Kontogruppe als Sondereffekt "
+            "gekennzeichnet (Konten, Abschnitt Gruppen, Spalte „Sondereffekt“).", S["hinweis"]),
+    ]))
 
     def fusszeile(canvas, doc):
         canvas.saveState()

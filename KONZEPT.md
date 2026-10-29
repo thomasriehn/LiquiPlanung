@@ -403,8 +403,13 @@ damit identisch zum 13-Wochen-Plan (`services/kpi.py`, `GET /mandanten/{id}/kpi`
 - **PDF-Bericht** (`services/kpi_pdf.py`, `GET /mandanten/{id}/export/kpi.pdf`):
   gleiche Daten und Parameter (Start, Wochen, Vergleichsstand) wie die Seite; die
   Diagramme werden serverseitig mit reportlab-Grafiken nach denselben Regeln und
-  Farben gezeichnet (A4 quer, zwei Karten je Zeile), ergänzt um Wertetabellen
-  (Liquidität je Woche, Monatsübersicht, Verteilungen) für den Ausdruck.
+  Farben gezeichnet (A4 quer, zwei Karten je Zeile). Der Bericht besteht aus
+  Blöcken (Überschrift, Diagramme und deren Wertetabellen direkt darunter), die
+  jeweils geschlossen auf einer Seite stehen; Tabellen werden nicht umbrochen.
+  Passt ein Block nicht auf eine Seite (z. B. Kennzahlen + Liquidität bei 26 Wochen),
+  werden seine Diagramme stufenweise flacher gezeichnet; Wochenwerte stehen als
+  Quertabelle (je 13 Wochen eine Tabelle), die Veränderung der Monatsendliquidität
+  als Fußzeile der Tabelle „Veränderung je Kategorie und Monat“.
 
 ## 8. Kontenrahmen
 
