@@ -118,6 +118,58 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Matrix sind erfasste Werte fett, fortgeschriebene kursiv, übersteuerte markiert.
   Die Spaltenwahl (Tage/Wochen/Monate) wird je Benutzer gespeichert und gilt gemeinsam
   für den 13-Wochen-Plan und das Budget – auch auf anderen Geräten.
+- **Bestellungen und Bestellfreigabe** (Menüpunkt „Bestellungen“):
+  - **Erfassung** per Datei-Upload (PDF, Bild, Word, Excel, E-Mail, Text), aus der
+    Belegablage des Mandanten („Aus Ablage wählen“) oder rein manuell: Kreditor,
+    Bestellnummer, Bestell- und Lieferdatum, **Nettobetrag** mit USt-Satz (Vorgabe
+    laut Konto, Brutto wird angezeigt), Konto über die durchsuchbare Kontoauswahl und
+    **erwartetes Zahldatum** (mit KW). Ist ein KI-Zugang hinterlegt, liest ein
+    Sprachmodell die Angaben aus der Datei aus (Text, bei Scans per Texterkennung
+    bzw. optional als Seitenbild). Ausgelesene Felder sind markiert und zu prüfen.
+    Das Konto wird bevorzugt aus der letzten Bestellung desselben Kreditors
+    übernommen. Ohne Zahlungsziel gilt das Liefer- bzw. Bestelldatum plus 30 Tage
+    (nächster Bankarbeitstag).
+  - **Ablage**: Hochgeladene Dateien landen im gewählten Ordner des Mandanten, lokal
+    auf dem Server oder in einer SharePoint-Dokumentbibliothek. Die Datei ist über
+    📄 im Browser anzeigbar; SharePoint-Dateien laufen über einen Proxy der
+    Anwendung, damit kein SharePoint-Zugang im Browser nötig ist.
+  - **Freigabe je KW**: Für die gewählte Kalenderwoche wird die Bestellung (brutto)
+    dem verfügbaren Rahmen gegenübergestellt. Der Rahmen ist der Plan der KW ab
+    heute laut Soll-Referenz, abzüglich der bereits gebundenen Zahlungen der KW
+    (freigegebene Bestellungen, offene Rechnungen, Dauerschuldverhältnisse,
+    Steuer-/SV-Termine) und abzüglich der bisherigen Abweichung Ist gegen Plan bis
+    gestern. In die Abweichung zählen auch die Vorträge nicht gezahlter Raten und
+    überfällige Posten. Ausgewiesen wird das für das Konto, seine BWA-Gruppe und
+    alle Auszahlungen, dazu die Liquidität zum Ende der KW vor und nach Freigabe.
+    Basis wählbar: Soll-Referenz bzw. automatisch, ein bestimmter Planstand oder der
+    aktuelle Plan. Freigabe oder Ablehnung (mit Pflichtbegründung) erfolgt durch
+    Benutzer mit Freigaberecht.
+  - **Journal**: Erfassung, Änderungen, Freigabe, Ablehnung, Rücknahme, Ablösung
+    und Storno werden mit Benutzer, Zeitpunkt, Begründung und den bei der
+    Entscheidung gezeigten Kennzahlen protokolliert. Das Journal ist
+    unveränderlich und bleibt auch nach dem Löschen einer Bestellung erhalten.
+  - **Plan**: Bestellungen fließen brutto zum erwarteten Zahldatum als Auszahlung
+    in die Liquiditätsplanung ein und verbrauchen dabei das Restbudget des Kontos,
+    statt es zu verdoppeln. Überfällige Bestellungen rollen wie offene Posten nach
+    vorn. Noch nicht freigegebene Bestellungen fließen ebenfalls ein (vorsichtige
+    Planung, je Mandant abschaltbar), abgelehnte und stornierte nie.
+  - **Ablösung**: Eine Bestellung wird durch die tatsächliche Ausgangszahlung
+    (Ist-Buchung oder Bankumsatz), durch die Eingangsrechnung (offener Posten
+    übernimmt die Planung) oder manuell abgelöst. Der Zahlbetrag darf abweichen,
+    z. B. bei einer Minderlieferung; die Abweichung wird ausgewiesen. Teilzahlungen
+    lassen den Rest geplant. Der Zahlungsabgleich schlägt passende Zahlungen vor
+    (Kreditor, Bestellnummer, Konto, Betrag, Datum). Wird die zugeordnete Buchung
+    gelöscht, lebt die Bestellung im Plan wieder auf.
+- **Systemeinstellungen** (Administratoren, Menüpunkt „System“): SharePoint-Anbindung
+  über Microsoft Graph (Tenant-ID, Anwendungs-/Client-ID, Client-Secret) und
+  KI-Zugang mit OpenAI-kompatibler Schnittstelle (API-URL, Modell, API-Key,
+  optional Vision), jeweils mit Verbindungstest. Geheimnisse werden verschlüsselt
+  gespeichert (Schlüssel aus `GEHEIMNIS_SCHLUESSEL` bzw. `SECRET_KEY`) und nie
+  angezeigt; alternativ kommen sie aus der Umgebung (`GRAPH_CLIENT_SECRET`,
+  `LLM_API_KEY`). Je Mandant wählt der Administrator die Belegablage in den
+  Einstellungen: einen lokalen Ordner oder einen SharePoint-Ordner über einen
+  Auswahldialog (Website → Dokumentbibliothek → Ordner, auch per Website-URL oder
+  manueller Drive-/Ordner-ID).
 - **Zahlungskalender**: SV-Beiträge (drittletzter Bankarbeitstag, Feiertage je
   Bundesland), USt-VA (Monat/Quartal, Dauerfrist), LSt, GewSt, KSt – Beträge fest,
   aus Historie geschätzt oder (USt-VA) als Zahllast-Vorschau aus dem Budget;

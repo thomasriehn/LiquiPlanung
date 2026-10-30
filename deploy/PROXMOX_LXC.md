@@ -92,6 +92,28 @@ Wiederherstellung:
 gunzip -c /var/backups/liqui-JJJJ-MM-TT.sql.gz | docker compose exec -T db psql -U liqui liqui
 ```
 
+**Belegablage (Bestelldateien).** Liegt die Ablage eines Mandanten lokal, landen
+die Dateien im Docker-Volume `ablage` (bzw. unter `ABLAGE_HOST_PFAD`, falls in der
+`.env` ein Host-Pfad wie eine eingebundene Netzfreigabe gesetzt ist). Weder die
+integrierten Sicherungen noch `pg_dump` enthalten diese Dateien – also zusätzlich
+sichern:
+
+```bash
+cat >>/etc/cron.d/liqui-backup <<'EOF'
+30 2 * * * root docker run --rm -v liquiplanung_ablage:/a -v /var/backups:/b alpine tar czf /b/liqui-ablage-$(date +\%F).tgz -C /a .
+50 2 * * * root find /var/backups -name 'liqui-ablage-*.tgz' -mtime +30 -delete
+EOF
+```
+
+(Der Volume-Name setzt sich aus dem Verzeichnisnamen `liquiplanung` und `_ablage`
+zusammen; `docker volume ls` zeigt ihn.) Dateien in SharePoint sichert SharePoint selbst.
+
+**Geheimnisse.** Client-Secret und KI-API-Key werden in der Datenbank mit einem aus
+`SECRET_KEY` abgeleiteten Schlüssel verschlüsselt (alternativ `GEHEIMNIS_SCHLUESSEL`).
+Wer `SECRET_KEY` ändert oder eine Sicherung auf einer anderen Installation einspielt,
+muss die Geheimnisse unter „System“ neu eingeben – oder vorab `GEHEIMNIS_SCHLUESSEL`
+setzen, dann bleibt `SECRET_KEY` frei änderbar.
+
 ## 6. Updates
 
 ```bash
@@ -104,3 +126,46 @@ Schemaänderungen laufen über Alembic-Migrationen und werden beim Anwendungssta
 automatisch angewendet (`alembic upgrade head`); ältere Installationen aus der Zeit
 vor Alembic werden beim ersten Start übernommen. Vor Updates empfiehlt sich dennoch
 eine Sicherung (Abschnitt 5).
+
+## 7. SharePoint-Anbindung (Microsoft Graph, optional)
+
+Für die Belegablage in SharePoint braucht LiquiPlanung eine App-Registrierung in
+Microsoft Entra ID (app-only, ohne Benutzeranmeldung):
+
+1. Entra Admin Center → **App-Registrierungen** → „Neue Registrierung“, Name z. B.
+   `LiquiPlanung`, Kontotyp „nur dieses Organisationsverzeichnis“, keine Umleitungs-URI.
+2. Auf der Übersichtsseite **Verzeichnis-(Mandanten-)ID** (= Tenant-ID) und
+   **Anwendungs-(Client-)ID** notieren – nicht die Objekt-ID.
+3. **Zertifikate & Geheimnisse** → „Neuer geheimer Clientschlüssel“ → den **Wert**
+   (nicht die Geheimnis-ID) kopieren; er wird nur einmal angezeigt. Ablaufdatum notieren.
+4. **API-Berechtigungen** → Microsoft Graph → *Anwendungsberechtigungen*, dann
+   „Administratorzustimmung erteilen“. Zwei Varianten:
+   - einfach: `Sites.ReadWrite.All` – alle Websites durchsuchbar und beschreibbar;
+   - restriktiv: `Sites.Selected` – Zugriff nur auf ausdrücklich freigegebene
+     Websites, z. B. per PnP-PowerShell:
+     `Grant-PnPAzureADAppSitePermission -AppId <Client-ID> -DisplayName LiquiPlanung -Site https://<tenant>.sharepoint.com/sites/<Website> -Permissions Write`.
+     Die Website-Suche funktioniert damit nicht. Im Auswahldialog stattdessen
+     die Website-URL eingeben oder Drive-ID und Ordner-ID manuell eintragen.
+5. In LiquiPlanung unter **System** Tenant-ID, Client-ID und Secret eintragen und
+   „Verbindung testen“. Danach je Mandant unter **Einstellungen → Belegablage** den
+   Ordner wählen.
+
+Statt in der Oberfläche kann das Secret auch in der `.env` stehen
+(`GRAPH_CLIENT_SECRET=…`); es hat dann Vorrang und wird nicht in der Datenbank gespeichert.
+
+Der Container braucht ausgehend HTTPS zu `login.microsoftonline.com`,
+`graph.microsoft.com` und `*.sharepoint.com` (Downloads werden dorthin umgeleitet).
+
+## 8. KI-Zugang zum Auslesen von Bestellungen (optional)
+
+Unter **System → KI-Zugang** eine OpenAI-kompatible Schnittstelle eintragen:
+API-URL (z. B. `https://api.openai.com/v1`, Azure OpenAI/OpenRouter oder ein lokaler
+Server wie Ollama `http://<host>:11434/v1` bzw. vLLM), Modell und API-Key (bei lokalen
+Servern ggf. leer). „Seitenbilder mitsenden“ nur aktivieren, wenn das Modell Bilder
+verarbeitet (Vision); dann werden Scans und Fotos zusätzlich als Bild übertragen.
+Alternativ `LLM_API_KEY=…` in der `.env`.
+
+**Datenschutz:** Zum Auslesen wird der Inhalt der Bestelldatei an den KI-Dienst
+übertragen. Bei Cloud-Anbietern ist ein Auftragsverarbeitungsvertrag nötig; wer das
+vermeiden will, betreibt ein lokales Modell. Ohne KI-Zugang bleibt die manuelle
+Erfassung vollständig nutzbar.

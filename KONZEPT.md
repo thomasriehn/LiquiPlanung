@@ -169,6 +169,10 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
   die Plan-Matrix, Budget-Editor usw. Kein Node-Build nötig → einfacher Betrieb im LXC.
 - **Auth:** Session-Cookie (signiert), Passwörter mit PBKDF2-HMAC-SHA256.
 - **Deployment:** `docker compose up -d` im LXC (Anleitung: `deploy/PROXMOX_LXC.md`).
+- **Externe Dienste (optional):** Microsoft Graph für die SharePoint-Belegablage und ein
+  Sprachmodell mit OpenAI-kompatibler Schnittstelle zum Auslesen von Bestellungen –
+  beide über `httpx` aus dem App-Container, ohne Browserzugriff auf diese Dienste.
+  Lokale Belege liegen im Volume `ablage`.
 
 ## 4. Datenmodell (Kern)
 
@@ -186,6 +190,10 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
 | `bestaende` | Anfangs-/Stichtagsbestände Bank/Kasse/Waren |
 | `plan_snapshots`, `plan_snapshot_werte` | Eingefrorene Plandaten für den Soll-/Ist-Vergleich |
 | `plan_verschiebungen` | Manuelle Verschiebungen von Planwerten/Vorträgen einer Planzeile (Ursprungstag → Zieltag, Teilbetrag) |
+| `bestellungen` | Bestellungen: Kreditor, Nr., Bestell-/Liefer-/erwartetes Zahldatum, Netto + USt-Satz, Konto, Status, Ablösung, Dateireferenz (lokal/SharePoint), KI-Ergebnis |
+| `bestell_abloesungen` | Ablösung einer Bestellung durch Ist-Buchung, Bankumsatz, Eingangsrechnung (offener Posten) oder manuell; abschließend oder Teilzahlung |
+| `bestell_journal` | Unveränderliches Freigabejournal mit Begründung und eingefrorenen Kennzahlen |
+| `system_einstellungen` | Globale Einstellungen als Schlüssel/Wert (Graph, KI); Geheimnisse Fernet-verschlüsselt |
 | `audit_log` | Protokoll wesentlicher Aktionen |
 
 Alle mandantenbezogenen Tabellen tragen `mandant_id`; jeder Zugriff läuft über eine
@@ -424,6 +432,86 @@ damit identisch zum 13-Wochen-Plan (`services/kpi.py`, `GET /mandanten/{id}/kpi`
   Quertabelle (je 13 Wochen eine Tabelle), die Veränderung der Monatsendliquidität
   als Fußzeile der Tabelle „Veränderung je Kategorie und Monat“.
 
+## 7b. Bestellungen und Bestellfreigabe
+
+**Ablauf.** Bestellungen werden erfasst (Upload, Datei aus der Mandantenablage oder
+manuell), vom Sachwalter je Kalenderwoche gegen den verfügbaren Rahmen geprüft und
+freigegeben oder abgelehnt, fließen in den Plan ein und werden später durch die
+tatsächliche Zahlung abgelöst. Status: `OFFEN` (zur Freigabe) → `FREIGEGEBEN` /
+`ABGELEHNT` → `ABGELOEST`; daneben `STORNIERT`. Ändert sich an einer freigegebenen
+Bestellung Betrag, USt-Satz oder Konto, fällt sie auf `OFFEN` zurück (erneute
+Freigabe). Eine geänderte abgelehnte Bestellung gilt als Wiedervorlage. Freigeben
+dürfen Administratoren und Benutzer mit dem Recht `darf_freigeben` (Leser nie).
+
+**Erfassung und KI.** Uploads werden am Inhalt erkannt (Magic Bytes, nicht am
+Content-Type des Browsers), zunächst in einer Zwischenablage gehalten (Token,
+an Mandant gebunden, Aufräumen nach 24 h) und erst beim Speichern in die Ablage
+geschrieben. Für das Auslesen wird der Text gewonnen: PDF-Textebene, sonst
+Texterkennung (tesseract), Word/Excel/E-Mail/Text direkt. Das Sprachmodell
+(OpenAI-kompatibles `chat/completions`, JSON-Antwort) liefert Kreditor, Nummer,
+Datumsangaben, Netto, USt-Satz, Zahlungsziel und einen Kontovorschlag aus der Liste
+der Auszahlungskonten des Mandanten. Die Antwort wird serverseitig normalisiert
+(Zahlen-/Datumsformate, Netto aus Brutto, Zahldatum = Ziel bzw. Liefer-/Bestelldatum
++ 30 Tage auf den nächsten Bankarbeitstag). Die Konto-Historie des Kreditors hat
+Vorrang vor dem KI-Vorschlag. Fehler der KI blockieren die Erfassung nie.
+
+**Ablage.** Je Mandant `LOKAL` (Unterordner von `ABLAGE_VERZEICHNIS`, Standard =
+Kurzname) oder `SHAREPOINT` (Drive-ID + Ordner-ID einer Dokumentbibliothek). Die
+Bestellung speichert ihre eigene Dateireferenz (relativer Pfad bzw. Drive-/Item-ID),
+alte Links bleiben bei einem späteren Ordnerwechsel gültig. Lokale Pfade werden
+gegen Ausbrüche geprüft (absolute Pfade, `..`, Symlinks); Dateien werden nie
+überschrieben. SharePoint: app-only über Microsoft Graph (Client-Credentials,
+Token-Cache), Upload bis 4 MB direkt, darüber per Upload-Session. Das Durchsuchen
+der Mandantenablage ist auf den gewählten Ordner und seine Unterordner beschränkt.
+Die Anzeige läuft über einen Proxy (`/mandanten/{id}/bestellungen/{bid}/datei`) mit
+`Content-Disposition` (ASCII + `filename*`), `nosniff`, `no-store` und CSP-Sandbox
+für alles außer PDF. Signierte SharePoint-Download-URLs gelangen nie zum Browser.
+
+**Plan.** Schritt 3b in `plan_fluesse` (nach Terminen, vor dem Budget): offene bzw.
+freigegebene Bestellungen gehen mit `Netto × (1 + USt)` abzüglich zugeordneter
+Teilzahlungen zum erwarteten Zahldatum als Auszahlung ein. Überfällige rollen wie
+offene Posten auf den nächsten Bankarbeitstag ab heute. Weil sie vor dem Budget
+eingeplant werden, **verbrauchen sie das Restbudget** ihrer Woche
+(Plan = max(Budget, explizit)). Abgelöste Bestellungen stehen in der Planansicht
+mit dem vollen Bestellbetrag am Tag min(Zahldatum, Ablösetag) – Plan − Ist zeigt
+damit die Minderlieferung –, nicht in der Restplan-Sicht. Abgelöst durch eine
+Eingangsrechnung plant nur noch der Posten. Ob noch nicht freigegebene Bestellungen
+eingeplant werden, ist je Mandant schaltbar (Standard: ja).
+Behoben wurde dabei ein Fehler der Restplan-Sicht: Bezahlte Posten (und abgelöste
+Bestellungen) fielen dort heraus, und das Wochenbudget erschien auf den künftigen
+Tagen wieder in voller Höhe. Der Restbudget-Abzug richtet sich jetzt in beiden Sichten
+nach den expliziten Zahlungen der Planansicht.
+
+**Freigabe-Kennzahlen** für Konto, BWA-Gruppe und alle Auszahlungen
+(Auszahlungen positiv; „heute“ zählt zur Zukunft, Ist reicht bis gestern):
+
+- **A – Plan der KW ab heute:** Soll laut Basis für die Tage `max(KW-Beginn, heute)`
+  bis KW-Ende. Die bereits vergangenen Tage der laufenden KW stecken in C.
+- **B – gebunden:** explizite Zahlungen der KW ohne Budget (freigegebene
+  Bestellungen außer der geprüften, offene Kreditoren-Posten, Dauerschuld-Raten,
+  Steuer-/SV-Termine) aus der Restplan-Sicht; Überfälliges zählt in C.
+- **C – bisherige Abweichung inkl. Vorträge:** Σ (Ist − Soll) seit Basisbeginn bis
+  gestern als Mehrausgabe, zuzüglich offener Dauerschuld-Vorträge und überfälliger
+  Posten bzw. freigegebener Bestellungen. Eine nicht gezahlte geplante Rate erscheint
+  so nicht als Ersparnis (−X im Ist-Vergleich, +X als Vortrag).
+- **verfügbar = A − B − C**, **nach Freigabe = verfügbar − Bestellung brutto**.
+  Maßgeblich ist das Konto, ohne Plan auf dem Konto die Gruppe. Dazu die Liquidität
+  zum KW-Ende laut Plan vor und nach Freigabe.
+
+Basis: Soll-Referenz, wenn sie die KW abdeckt, sonst der jüngste abdeckende
+Planstand, sonst der aktuelle Plan (ohne nicht freigegebene Bestellungen, mit
+Hinweis; Abweichung dann nur für die laufende Woche). Weil das Soll je Woche
+max(Budget, explizit) ist und B alle expliziten Zahlungen enthält, bleibt die
+Rechnung für eingefrorene und aktuelle Pläne konsistent. Bei der Entscheidung
+rechnet der Server die Kennzahlen neu und friert sie im Journal ein.
+
+**Ablösung und Abgleich.** Ablösungen verweisen auf eine Ist-Buchung, einen Bankumsatz
+(nicht zugleich im OP-Ausgleich) oder einen Kreditoren-Posten. Vorschläge bewerten
+Kreditor-Token und Bestellnummer im Buchungstext, gleiches Konto, Betragsnähe und
+Datumsnähe. Vor dem Löschen von Buchungen, Bankumsätzen oder Posten (Importe,
+PDF-Zuordnungen, Einzelbuchungen) werden betroffene Ablösungen aufgehoben, und die
+Bestellung lebt im Plan wieder auf.
+
 ## 8. Kontenrahmen
 
 SKR03 und SKR04 werden als Vorlage mit den planungsrelevanten Konten (inkl. USt-Satz und
@@ -459,6 +547,16 @@ Konten bleiben dann ohne Gruppe erhalten.
   unter `/api/profil` mit 403. Der letzte aktive Administrator kann weder
   herabgestuft noch gesperrt werden, das eigene Konto nicht gesperrt; Änderungen
   stehen mit Details (z. B. „Rolle Bearbeiter → Leser“, nie das Passwort) im Audit-Log.
+- Systemeinstellungen (SharePoint/Graph, KI) nur für Administratoren. Client-Secret
+  und API-Key werden Fernet-verschlüsselt gespeichert (HKDF aus `GEHEIMNIS_SCHLUESSEL`
+  bzw. `SECRET_KEY`), nie ausgeliefert und nicht ins Audit-Log geschrieben (nur die
+  geänderten Schlüsselnamen). Gesetzte Umgebungsvariablen (`GRAPH_CLIENT_SECRET`,
+  `LLM_API_KEY`) haben Vorrang. Ist ein Geheimnis mit dem aktuellen Schlüssel nicht
+  entschlüsselbar (z. B. Sicherung einer anderen Installation), gilt der Zugang als
+  nicht eingerichtet.
+- Die Belegablage eines Mandanten wählt nur der Administrator, weil der app-only-Zugang
+  alle für die App freigegebenen SharePoint-Websites sieht. Bearbeiter durchsuchen nur
+  den Mandantenordner.
 - Betrieb hinter Reverse Proxy mit TLS empfohlen (siehe Deployment-Doku).
 
 ## 10. Ausblick (mögliche weitere Ausbaustufen)
