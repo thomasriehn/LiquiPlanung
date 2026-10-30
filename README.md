@@ -162,9 +162,8 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   optional mit Pflicht zum eigenen Passwort beim nächsten Login – bis dahin ist nur das
   Profil erreichbar; bestehende Anmeldungen des Benutzers werden beendet). Der letzte
   aktive Administrator kann weder herabgestuft noch gesperrt werden, das eigene Konto
-  nicht gesperrt;
-  Profil mit Passwortwechsel und optionaler Zwei-Faktor-Anmeldung (TOTP mit
-  QR-Einrichtung; Admin-Reset bei Geräteverlust).
+  nicht gesperrt. Jeder Benutzer hat ein Profil mit Passwortwechsel und optionaler
+  Zwei-Faktor-Anmeldung (TOTP mit QR-Einrichtung; Admin-Reset bei Geräteverlust).
 
 ## Schnellstart (Docker)
 
