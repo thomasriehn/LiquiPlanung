@@ -1,20 +1,37 @@
 {% extends "base.html" %}
 {% block titel %}Budget – {{ mandant.name }}{% endblock %}
 {% block inhalt %}
-<div class="seite">
-  <h1>Budgetplanung (Netto-Beträge je Konto und Monat)</h1>
+<div class="seite-breit">
+  <h1>Budgetplanung (Netto-Beträge je Konto)</h1>
   <p class="hinweis">
-    Beträge netto und positiv erfassen – das Vorzeichen ergibt sich aus der BWA-Gruppe
-    (Einzahlung/Auszahlung). Die Zahlungswirkung wird über den USt-Satz des Kontos auf brutto
-    umgerechnet und wochenweise um bereits explizit geplante Posten gekürzt (Restbudget).
+    Beträge netto und positiv erfassen – das Vorzeichen ergibt sich aus der BWA-Gruppe.
+    Monatswerte werden nach dem Verteilungsprofil des Kontos auf die Bankarbeitstage
+    verteilt; in der Wochen- bzw. Tagesansicht erfasste Werte übersteuern für diese
+    Woche bzw. diesen Tag (Vorrang Tag vor Woche vor Monat). <strong>Grau</strong> = abgeleiteter
+    Wert, <strong>schwarz</strong> = auf dieser Ebene erfasst; leeres Feld entfernt die Übersteuerung,
+    0 heißt „kein Budget“. Ein orangefarbener Rand zeigt erfasste Werte, die durch
+    Wochen- bzw. Tageswerte übersteuert werden (wirksamer Betrag im Tooltip). Im Plan wird das Budget über den USt-Satz auf brutto umgerechnet
+    und wochenweise um explizit geplante Posten gekürzt (Restbudget).
   </p>
   <div class="werkzeuge">
-    <label>Jahr <input type="number" id="jahr" style="width:90px"></label>
+    <label>Spalten
+      <select id="ansicht">
+        <option value="tage">Tage</option>
+        <option value="wochen">Wochen</option>
+        <option value="monate">Monate</option>
+      </select>
+    </label>
+    <label class="nur-monate">Jahr <input type="number" id="jahr" style="width:90px"></label>
+    <label class="nur-fenster">Start <input type="date" id="start"></label>
+    <label class="nur-fenster">Wochen <input type="number" id="wochen" value="13" min="1" max="26" style="width:60px"></label>
+    <label class="cb" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="nur-budget">
+      nur Konten mit Budget</label>
     <button id="laden" class="sekundaer">Anzeigen</button>
     {% if not leser %}<button id="speichern">Speichern</button>{% endif %}
+    <span class="hinweis" id="info"></span>
   </div>
-  <div class="matrix-huelle" style="max-height:calc(100vh - 250px)">
-    <table class="liste" id="tabelle"></table>
+  <div class="matrix-huelle" style="max-height:calc(100vh - 290px)">
+    <table class="liste budget-raster" id="tabelle"></table>
   </div>
 </div>
 {% endblock %}
@@ -22,62 +39,159 @@
 <script>
 const MANDANT_ID = {{ mandant.id }};
 const LESER = {{ 'true' if leser else 'false' }};
-const MONATE = ["Jan","Feb","Mrz","Apr","Mai","Jun","Jul","Aug","Sep","Okt","Nov","Dez"];
-let konten = [], geaendert = new Map();
+const ANSICHT = "{{ ansicht }}";
+const VERTEILUNG_TEXT = {
+  GLEICH: "gleichmäßig auf die Bankarbeitstage", MONATSANFANG: "Monatsanfang", MONATSMITTE: "Monatsmitte",
+  MONATSENDE: "Monatsende", WTAG_MO: "montags", WTAG_DI: "dienstags", WTAG_MI: "mittwochs",
+  WTAG_DO: "donnerstags", WTAG_FR: "freitags",
+};
+const EBENE = { monate: "Monatsbudget", wochen: "Wochenwert", tage: "Tageswert" };
+let raster = null;
+let geaendert = new Map();
+const NUR_BUDGET_SCHLUESSEL = `liqui.budget.nurBudget.${MANDANT_ID}`;
 
+const ansichtFeld = document.getElementById("ansicht");
+ansichtFeld.value = ANSICHT;
 document.getElementById("jahr").value = new Date().getFullYear();
+const gemerkterStart = startGemerkt(MANDANT_ID);
+if (gemerkterStart) document.getElementById("start").value = gemerkterStart;
+try { document.getElementById("nur-budget").checked = localStorage.getItem(NUR_BUDGET_SCHLUESSEL) === "1"; }
+catch (e) { /* ohne Speicher: Standard */ }
+
+function felderZeigen() {
+  const monate = ansichtFeld.value === "monate";
+  document.querySelectorAll(".nur-monate").forEach(el => { el.style.display = monate ? "" : "none"; });
+  document.querySelectorAll(".nur-fenster").forEach(el => { el.style.display = monate ? "none" : ""; });
+}
+
+function verwerfenOk() {
+  return !geaendert.size || confirm(`${geaendert.size} ungespeicherte Änderung(en) verwerfen?`);
+}
 
 async function lade() {
-  const jahr = parseInt(document.getElementById("jahr").value);
-  const kd = await api("GET", `/api/mandanten/${MANDANT_ID}/konten`);
-  const gruppenName = Object.fromEntries(kd.gruppen.map(g => [g.id, g.name]));
-  konten = kd.konten.filter(k => k.aktiv && !["BANK", "KASSE", "INFO"].includes(k.typ));
-  const budgets = await api("GET", `/api/mandanten/${MANDANT_ID}/budgets?jahr=${jahr}`);
-  const werte = {};
-  for (const b of budgets) werte[`${b.konto_id}:${b.monat}`] = b.betrag_netto;
+  const ansicht = ansichtFeld.value;
+  let url = `/api/mandanten/${MANDANT_ID}/budget-raster?ansicht=${ansicht}`;
+  if (ansicht === "monate") {
+    url += `&jahr=${parseInt(document.getElementById("jahr").value) || new Date().getFullYear()}`;
+  } else {
+    const start = document.getElementById("start").value;
+    startMerken(MANDANT_ID, start);
+    url += `&wochen=${parseInt(document.getElementById("wochen").value) || 13}` + (start ? `&start=${start}` : "");
+  }
+  try { raster = await api("GET", url); } catch (e) { toast(e.message); return; }
+  if (ansicht !== "monate" && !document.getElementById("start").value) {
+    document.getElementById("start").value = raster.von;
+  }
   geaendert = new Map();
+  zeichne();
+}
 
+function zahlFeld(wert) {
+  return wert === null || wert === undefined ? "" : String(Math.round(wert * 100) / 100);
+}
+
+function zeichne() {
+  const ansicht = raster.ansicht;
+  const nurBudget = document.getElementById("nur-budget").checked;
+  const konten = raster.konten.filter(k => !nurBudget
+    || Object.keys(k.werte).length || Object.keys(k.erfasst).length);
+  const breite = { monate: 100, wochen: 96, tage: 84 }[ansicht];
   const tabelle = document.getElementById("tabelle");
   let html = `<thead><tr><th class="fix-spalte">Konto</th><th>Gruppe</th>` +
-    MONATE.map(m => `<th class="zahl">${m}</th>`).join("") + `</tr></thead><tbody>`;
+    raster.perioden.map(p => `<th class="zahl${p.banktag === false ? " we" : ""}">${esc(p.label)}` +
+      `<br><span class="klein">${esc(p.unter)}</span></th>`).join("") + `</tr></thead><tbody>`;
   for (const k of konten) {
-    html += `<tr><td class="fix-spalte"><span class="konto-nr">${esc(k.nummer)}</span> ${esc(k.bezeichnung)}` +
-      (k.ust_satz ? ` <span class="klein">(${k.ust_satz}%)</span>` : "") + `</td>` +
-      `<td class="klein">${esc(gruppenName[k.gruppe_id]) || "–"}</td>`;
-    for (let m = 1; m <= 12; m++) {
-      const wert = werte[`${k.id}:${m}`];
-      html += `<td class="zahl"><input type="number" step="0.01" min="0" style="width:90px"
-        data-konto="${k.id}" data-monat="${m}" value="${wert ?? ""}" ${LESER ? "disabled" : ""}></td>`;
+    const titel = `Verteilung: ${VERTEILUNG_TEXT[k.verteilung] || k.verteilung}` +
+      (k.ust_satz ? ` · USt ${k.ust_satz} %` : "");
+    html += `<tr><td class="fix-spalte" title="${esc(titel)}"><span class="konto-nr">${esc(k.nummer)}</span> ` +
+      `${esc(k.bezeichnung)}${k.ust_satz ? ` <span class="klein">(${k.ust_satz}%)</span>` : ""}</td>` +
+      `<td class="klein">${esc(k.gruppe) || "–"}</td>`;
+    for (const p of raster.perioden) {
+      const erfasst = k.erfasst[p.id];
+      const wirksam = k.werte[p.id];
+      const gesperrt = LESER || p.banktag === false;
+      let tip = wirksam !== undefined ? `wirksam ${eur(wirksam)} €` : "kein Budget";
+      // erfasster Wert, der durch tiefere Ebenen (Woche/Tag) übersteuert wird
+      const abweichend = erfasst !== undefined && Math.abs((wirksam || 0) - erfasst) > 0.005;
+      if (erfasst !== undefined) tip += ` · ${EBENE[ansicht]} erfasst`;
+      else if (wirksam !== undefined) tip += ansicht === "monate" ? "" : " · abgeleitet";
+      if (abweichend) tip += ` · durch ${ansicht === "monate" ? "Wochen-/Tageswerte" : "Tageswerte"} abweichend`;
+      if (p.banktag === false) tip = "kein Bankarbeitstag";
+      html += `<td class="zahl${p.banktag === false ? " we" : ""}">` +
+        `<input type="number" step="0.01" min="0" style="width:${breite}px"` +
+        ` class="${erfasst !== undefined ? "erfasst" : "abgeleitet"}${abweichend ? " abweichend" : ""}"` +
+        ` data-konto="${k.id}" data-periode="${p.id}" value="${zahlFeld(erfasst)}"` +
+        ` placeholder="${wirksam !== undefined && erfasst === undefined ? eur(wirksam) : ""}"` +
+        ` title="${esc(tip)}"${gesperrt ? " disabled" : ""}></td>`;
     }
     html += `</tr>`;
   }
-  tabelle.innerHTML = html + "</tbody>";
+  if (!konten.length) {
+    html += `<tr><td colspan="${raster.perioden.length + 2}" class="hinweis">Keine Konten mit Budget in diesem Zeitraum.</td></tr>`;
+  }
+  html += `</tbody><tfoot>`;
+  for (const [richtung, name] of [["EIN", "Summe Einzahlungen"], ["AUS", "Summe Auszahlungen"]]) {
+    html += `<tr class="summe-${richtung.toLowerCase()}"><td class="fix-spalte"><strong>${name}</strong> <span class="klein">(netto)</span></td><td></td>` +
+      raster.perioden.map(p => `<td class="zahl${p.banktag === false ? " we" : ""}">` +
+        `${raster.summen[richtung][p.id] ? eur(raster.summen[richtung][p.id]) : ""}</td>`).join("") + `</tr>`;
+  }
+  tabelle.innerHTML = html + `</tfoot>`;
+  // noch nicht gespeicherte Eingaben nach dem Neuzeichnen wiederherstellen
+  for (const [schluessel, wert] of geaendert.entries()) {
+    const [kontoId, periode] = schluessel.split("|");
+    const el = tabelle.querySelector(`input[data-konto="${kontoId}"][data-periode="${periode}"]`);
+    if (!el) continue;
+    el.value = wert;
+    el.classList.toggle("erfasst", wert !== "");
+    el.classList.toggle("abgeleitet", wert === "");
+    el.classList.add("geaendert");
+  }
+  const anzahl = raster.konten.length - konten.length;
+  document.getElementById("info").textContent =
+    `${ansicht === "monate" ? "Jahr " + raster.von.slice(0, 4) : "Zeitraum " + datumVollDe(raster.von) + " – " + datumVollDe(raster.bis)}` +
+    (anzahl ? ` · ${anzahl} Konten ohne Budget ausgeblendet` : "");
 }
 
 document.getElementById("tabelle").addEventListener("change", (e) => {
-  if (!e.target.dataset.konto) return;
-  geaendert.set(`${e.target.dataset.konto}:${e.target.dataset.monat}`, e.target.value);
+  const el = e.target;
+  if (!el.dataset.konto) return;
+  geaendert.set(`${el.dataset.konto}|${el.dataset.periode}`, el.value);
+  el.classList.toggle("erfasst", el.value !== "");
+  el.classList.toggle("abgeleitet", el.value === "");
+  el.classList.add("geaendert");
 });
 
 const speichernKnopf = document.getElementById("speichern");
 if (speichernKnopf) speichernKnopf.addEventListener("click", async () => {
-  const jahr = parseInt(document.getElementById("jahr").value);
   const zellen = [];
   for (const [schluessel, wert] of geaendert.entries()) {
-    const [kontoId, monat] = schluessel.split(":");
-    zellen.push({
-      konto_id: parseInt(kontoId), jahr, monat: parseInt(monat),
-      betrag_netto: wert === "" ? null : parseFloat(wert),
-    });
+    const [kontoId, periode] = schluessel.split("|");
+    zellen.push({ konto_id: parseInt(kontoId), periode,
+                  betrag_netto: wert === "" ? null : parseFloat(wert) });
   }
   if (!zellen.length) { toast("Keine Änderungen.", false); return; }
   try {
-    await api("PUT", `/api/mandanten/${MANDANT_ID}/budgets`, zellen);
+    await api("PUT", `/api/mandanten/${MANDANT_ID}/budget-raster`, { ansicht: raster.ansicht, zellen });
     toast(`${zellen.length} Zellen gespeichert.`, false);
-    geaendert = new Map();
+    await lade();
   } catch (e) { toast(e.message); }
 });
-document.getElementById("laden").addEventListener("click", lade);
+
+let letzteAnsicht = ansichtFeld.value;
+ansichtFeld.addEventListener("change", () => {
+  if (!verwerfenOk()) { ansichtFeld.value = letzteAnsicht; return; }
+  letzteAnsicht = ansichtFeld.value;
+  ansichtMerken(ansichtFeld.value);          // gilt auch für den 13-Wochen-Plan
+  felderZeigen();
+  lade();
+});
+document.getElementById("nur-budget").addEventListener("change", (e) => {
+  try { localStorage.setItem(NUR_BUDGET_SCHLUESSEL, e.target.checked ? "1" : "0"); } catch (err) { /* egal */ }
+  if (raster) zeichne();
+});
+document.getElementById("laden").addEventListener("click", () => { if (verwerfenOk()) lade(); });
+window.addEventListener("beforeunload", (e) => { if (geaendert.size) { e.preventDefault(); e.returnValue = ""; } });
+felderZeigen();
 lade();
 </script>
 {% endblock %}

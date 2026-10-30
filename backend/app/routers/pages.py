@@ -73,6 +73,8 @@ def _mandanten_seite(
         "ist_admin": ist_admin(benutzer),
         "leser": benutzer.rolle == models.Rolle.LESER.value,
         "mandant": mandant,
+        # gemeinsame Spaltenansicht von Plan und Budget (je Benutzer gespeichert)
+        "ansicht": (benutzer.einstellungen or {}).get("ansicht", "tage"),
     }
     if extra:
         kontext.update(extra)

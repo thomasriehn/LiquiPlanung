@@ -105,6 +105,14 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Budget je Konto/Monat (Restbudget-Logik, Netto→Brutto über USt-Satz) mit
   Verteilungsprofil je Konto (gleichmäßig, Monatsanfang/-mitte/-ende,
   wöchentlicher Zahllauf z. B. freitags).
+- **Budgetplanung in Tages-, Wochen- und Monatsansicht**: Monatswerte (Jahr),
+  Wochen- und Tageswerte (Fenster wie im 13-Wochen-Plan) sind direkt editierbar;
+  Wochen- bzw. Tageswerte übersteuern den verteilten Monatswert (Vorrang Tag vor
+  Woche vor Monat, 0 = kein Budget, leer = Übersteuerung entfernen). Abgeleitete
+  Werte erscheinen grau, auf der Ebene erfasste schwarz, übersteuerte Werte mit
+  orangefarbenem Rand; Summenzeilen für Ein- und Auszahlungen. Die Spaltenwahl
+  (Tage/Wochen/Monate) wird je Benutzer gespeichert und gilt gemeinsam für den
+  13-Wochen-Plan und das Budget – auch auf anderen Geräten.
 - **Zahlungskalender**: SV-Beiträge (drittletzter Bankarbeitstag, Feiertage je
   Bundesland), USt-VA (Monat/Quartal, Dauerfrist), LSt, GewSt, KSt – Beträge fest,
   aus Historie geschätzt oder (USt-VA) als Zahllast-Vorschau aus dem Budget;

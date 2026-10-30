@@ -60,6 +60,7 @@
 </div>
 {% endblock %}
 {% block skripte %}
-<script>const MANDANT_ID = {{ mandant.id }}; const LESER = {{ 'true' if leser else 'false' }};</script>
+<script>const MANDANT_ID = {{ mandant.id }}; const LESER = {{ 'true' if leser else 'false' }};
+const ANSICHT = "{{ ansicht }}";</script>
 <script src="/static/plan.js?v={{ static_version }}"></script>
 {% endblock %}

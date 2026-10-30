@@ -181,7 +181,7 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
 | `import_batches`, `buchungen` | Importierte Ist-Buchungssätze (DATEV/CSV) |
 | `offene_posten` | Eingangs-/Ausgangsrechnungen: Fälligkeit, geplantes Zahldatum, Status |
 | `dauerbuchungen` | Dauerverbindlichkeiten/-aufträge mit Intervall und Stichtag |
-| `budgets`, `budget_wochen` | Budget je Konto/Monat (netto) + Wochen-Override |
+| `budgets`, `budget_wochen`, `budget_tage` | Budget je Konto/Monat (netto) + Wochen- und Tages-Override |
 | `termin_regeln`, `zahlungstermine` | Kalenderregeln (SV, USt-VA, LSt, GewSt, KSt) und generierte, editierbare Termine |
 | `bestaende` | Anfangs-/Stichtagsbestände Bank/Kasse/Waren |
 | `plan_snapshots`, `plan_snapshot_werte` | Eingefrorene Plandaten für den Soll-/Ist-Vergleich |
@@ -211,9 +211,15 @@ dadurch entstehen die BWA-Zeilen. Bank-an-Bank = Umbuchung (nur Bestandsverschie
 4. Budget: tagesgenaue Verteilung gemäß **Verteilungsprofil je Konto** – gleichmäßig
    je Bankarbeitstag, Monatsanfang/-mitte/-ende (z. B. Lohnlauf) oder wöchentlicher
    Zahllauf an einem Wochentag (z. B. freitags); Wochen-Overrides folgen dem
-   Wochenprofil. Wochenweise **gekürzt** um explizite Posten desselben Kontos
+   Wochenprofil, Tages-Overrides ersetzen den Wert ihres Tages (Vorrang Tag >
+   Woche > Monat; 0 = kein Budget). Die Verteilung je Woche liefert eine gemeinsame
+   Funktion (`budget_basis_woche`), die auch die Budgetseite nutzt
+   (`services/budget.py`: wirksames Netto-Budget je Tag, summiert auf Tage, Wochen
+   oder Monate). Wochenweise **gekürzt** um explizite Posten desselben Kontos
    (Restbudget ≥ 0). Netto-Budgets werden über den USt-Satz des Kontos auf
    Brutto-Zahlungswirkung umgerechnet.
+   Persönliche Anzeige-Einstellungen (z. B. Spalten Tage/Wochen/Monate für Plan und
+   Budget) stehen in `benutzer.einstellungen` (JSON, `PUT /api/profil/einstellungen`).
 
 **Bestände & Liquidität:** Je Finanzkonto Ankerbestand (Stichtag) + Ist-Bewegungen bis
 heute; ab morgen Fortschreibung über den **Restplan** (nur offene Posten, künftige nicht

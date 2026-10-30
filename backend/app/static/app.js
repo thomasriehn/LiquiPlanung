@@ -97,3 +97,10 @@ async function referenzSetzen(mandantId, snapshotId) {
   await api("PUT", `/api/mandanten/${mandantId}/plan/referenz`,
     { snapshot_id: snapshotId ? parseInt(snapshotId) : null });
 }
+
+// Spaltenansicht (Tage/Wochen/Monate) je Benutzer serverseitig speichern –
+// gemeinsam für 13-Wochen-Plan und Budget, geräteübergreifend
+async function ansichtMerken(wert) {
+  try { await api("PUT", "/api/profil/einstellungen", { ansicht: wert }); }
+  catch (e) { /* Anzeige funktioniert auch ohne gespeicherte Einstellung */ }
+}

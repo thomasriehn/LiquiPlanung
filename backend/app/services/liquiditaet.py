@@ -662,6 +662,49 @@ def _monatstage(jahr: int, monat: int) -> int:
     return (date(jahr, monat + 1, 1) - timedelta(days=1)).day
 
 
+def budget_basis_woche(
+    konto_id: int, profil: str, w_von: date, w_bis: date, bl: str,
+    monat_budget: dict[tuple[int, int, int], Decimal],
+    wochen_budget: dict[tuple[int, int, int], Decimal],
+    tag_budget: dict[tuple[int, date], Decimal],
+) -> dict[date, tuple[Decimal, Decimal, int]]:
+    """Budgetbasis eines Kontos in der Woche ab `w_von` (bis `w_bis`): je Tag
+    (Netto-Quellbetrag, Anteil, Teiler) – der Tageswert ist Quelle × Anteil ÷ Teiler.
+    Vorrang: Tageswert > Wochenwert > Monatsbudget nach Verteilungsprofil."""
+    iso = w_von.isocalendar()
+    tage = [w_von + timedelta(days=i) for i in range(7) if w_von + timedelta(days=i) <= w_bis]
+    banktage = [d for d in tage if ist_bankarbeitstag(d, bl)] or [w_von]
+    basis: dict[date, tuple[Decimal, Decimal, int]] = {}
+    if (konto_id, iso.year, iso.week) in wochen_budget:
+        netto = abs(wochen_budget[(konto_id, iso.year, iso.week)])
+        if netto:
+            # Wochenwert: wöchentliche Profile auf den Zahltag der Woche,
+            # Monatsanker-Profile gleichmäßig auf die Banktage
+            if profil in _WOCHENTAG:
+                ziel = naechster_bankarbeitstag(w_von + timedelta(days=_WOCHENTAG[profil]), bl)
+                zieltage = [ziel if ziel <= w_bis else banktage[-1]]
+            else:
+                zieltage = banktage
+            for d in zieltage:
+                basis[d] = (netto, Decimal("1"), len(zieltage))
+    else:
+        for d in tage:
+            mb = monat_budget.get((konto_id, d.year, d.month))
+            if mb is None:
+                continue
+            anteil = _monats_verteilung(d.year, d.month, profil, bl).get(d)
+            if anteil:
+                basis[d] = (abs(mb), anteil, 1)
+    for d in tage:
+        if (konto_id, d) in tag_budget:
+            netto = abs(tag_budget[(konto_id, d)])
+            if netto:
+                basis[d] = (netto, Decimal("1"), 1)
+            else:
+                basis.pop(d, None)
+    return basis
+
+
 def _budget_einarbeiten(
     db: Session,
     mandant: models.Mandant,
@@ -685,7 +728,16 @@ def _budget_einarbeiten(
     monat_budget: dict[tuple[int, int, int], Decimal] = {}
     for b in budgets:
         monat_budget[(b.konto_id, b.jahr, b.monat)] = b.betrag_netto
-    konto_ids = {b.konto_id for b in budgets} | {k for (k, _, _) in overrides}
+    tag_budget = {
+        (bt.konto_id, bt.datum): bt.betrag_netto
+        for bt in db.scalars(select(models.BudgetTag).where(
+            models.BudgetTag.mandant_id == mandant.id,
+            models.BudgetTag.datum >= wochen_start(start),
+            models.BudgetTag.datum <= ende,
+        ))
+    }
+    konto_ids = ({b.konto_id for b in budgets} | {k for (k, _, _) in overrides}
+                 | {k for (k, _) in tag_budget})
 
     # Wochen des Fensters
     w = wochen_start(start)
@@ -714,43 +766,14 @@ def _budget_einarbeiten(
             else None
         )
         for w_von, w_bis in wochen:
-            iso = w_von.isocalendar()
-            banktage = [
-                w_von + timedelta(days=i)
-                for i in range(7)
-                if w_von + timedelta(days=i) <= w_bis
-                and ist_bankarbeitstag(w_von + timedelta(days=i), bl)
-            ]
-            if not banktage:
-                banktage = [w_von]
-            # Tagesgenaue Basisverteilung (brutto) gemäß Verteilungsprofil
-            basis: dict[date, Decimal] = {}
-            if (konto_id, iso.year, iso.week) in overrides:
-                netto = abs(overrides[(konto_id, iso.year, iso.week)])
-                if netto:
-                    # Wochen-Override: wöchentliche Profile auf den Zahltag der
-                    # Woche, Monatsanker-Profile gleichmäßig auf die Banktage
-                    if profil in _WOCHENTAG:
-                        ziel = w_von + timedelta(days=_WOCHENTAG[profil])
-                        ziel = naechster_bankarbeitstag(ziel, bl)
-                        if ziel > w_bis:
-                            ziel = banktage[-1]
-                        zieltage = [ziel]
-                    else:
-                        zieltage = banktage
-                    anteil = _brutto(netto, konto.ust_satz) * faktor / len(zieltage)
-                    for d in zieltage:
-                        basis[d] = basis.get(d, Decimal("0")) + anteil
-            else:
-                for d in (w_von + timedelta(days=i) for i in range(7)):
-                    if d > w_bis:
-                        continue
-                    mb = monat_budget.get((konto_id, d.year, d.month))
-                    if mb is None:
-                        continue
-                    anteil = _monats_verteilung(d.year, d.month, profil, bl).get(d)
-                    if anteil:
-                        basis[d] = _brutto(abs(mb), konto.ust_satz) * faktor * anteil
+            # Tagesgenaue Basisverteilung (brutto) gemäß Verteilungsprofil bzw.
+            # Wochen-/Tageswerten
+            basis: dict[date, Decimal] = {
+                d: _brutto(quelle, konto.ust_satz) * faktor * anteil / teiler
+                for d, (quelle, anteil, teiler) in budget_basis_woche(
+                    konto_id, profil, w_von, w_bis, bl, monat_budget, overrides, tag_budget
+                ).items()
+            }
             if igeld_konto:
                 for d in list(basis):
                     if igeld_konto[0] <= d <= igeld_konto[1]:

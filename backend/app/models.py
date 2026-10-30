@@ -3,6 +3,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import (
+    JSON,
     LargeBinary,
     Boolean,
     Date,
@@ -132,6 +133,8 @@ class Benutzer(Base):
     totp_letzter_schritt: Mapped[int] = mapped_column(Integer, default=0)
     # vom Administrator gesetztes Passwort: beim nächsten Login eigenes festlegen
     passwort_aendern: Mapped[bool] = mapped_column(Boolean, default=False)
+    # persönliche Anzeige-Einstellungen, z. B. {"ansicht": "wochen"} (Spalten in Plan/Budget)
+    einstellungen: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     mandanten: Mapped[list["Mandant"]] = relationship(
@@ -457,6 +460,20 @@ class BudgetWoche(Base):
     konto_id: Mapped[int] = mapped_column(ForeignKey("konten.id", ondelete="CASCADE"), index=True)
     jahr: Mapped[int] = mapped_column(Integer)  # ISO-Jahr
     kw: Mapped[int] = mapped_column(Integer)    # ISO-Kalenderwoche
+    betrag_netto: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+
+
+class BudgetTag(Base):
+    """Tages-Override: ersetzt für diesen Tag den aus Monats- bzw. Wochenbudget
+    verteilten Betrag (0 = an diesem Tag kein Budget)."""
+
+    __tablename__ = "budget_tage"
+    __table_args__ = (UniqueConstraint("mandant_id", "konto_id", "datum"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mandant_id: Mapped[int] = mapped_column(ForeignKey("mandanten.id", ondelete="CASCADE"), index=True)
+    konto_id: Mapped[int] = mapped_column(ForeignKey("konten.id", ondelete="CASCADE"), index=True)
+    datum: Mapped[date] = mapped_column(Date)
     betrag_netto: Mapped[Decimal] = mapped_column(Numeric(14, 2))
 
 

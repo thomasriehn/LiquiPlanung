@@ -207,6 +207,7 @@ def mandant_loeschen(
         models.OffenerPosten,
         models.Dauerbuchung,
         models.BudgetWoche,
+        models.BudgetTag,
         models.Budget,
         models.Zahlungstermin,
         models.TerminRegel,
@@ -2452,6 +2453,91 @@ def budget_speichern(
     return {"ok": True}
 
 
+@router.get("/mandanten/{mandant_id}/budget-raster")
+def budget_raster_abrufen(
+    mandant_id: int,
+    ansicht: str = "monate",
+    jahr: int | None = None,
+    start: str | None = None,
+    wochen: int = 13,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Budget in Tages-, Wochen- oder Monatsspalten: wirksame Netto-Werte und
+    die auf dieser Ebene erfassten Werte (Monate: Jahr; Tage/Wochen: Fenster)."""
+    from ..services.budget import ANSICHTEN, budget_raster
+
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    if ansicht not in ANSICHTEN:
+        raise HTTPException(422, "Ansicht: tage, wochen oder monate")
+    if not (1 <= wochen <= 26):
+        raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
+    return budget_raster(db, mandant, ansicht, jahr or date.today().year,
+                         _datum(start, "start") if start else date.today(), wochen)
+
+
+class BudgetRasterZelle(BaseModel):
+    konto_id: int
+    periode: str                    # JJJJ-MM | JJJJ-Www | JJJJ-MM-TT
+    betrag_netto: float | None = None
+
+
+class BudgetRasterSpeichern(BaseModel):
+    ansicht: str
+    zellen: list[BudgetRasterZelle]
+
+
+@router.put("/mandanten/{mandant_id}/budget-raster")
+def budget_raster_speichern(
+    mandant_id: int,
+    daten: BudgetRasterSpeichern,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Werte einer Ansicht speichern. Monate: leer oder 0 löscht das Budget;
+    Wochen/Tage: leer entfernt die Übersteuerung, 0 bedeutet „kein Budget“."""
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    if daten.ansicht not in ("tage", "wochen", "monate"):
+        raise HTTPException(422, "Ansicht: tage, wochen oder monate")
+    eindeutig = {(z.konto_id, z.periode): z for z in daten.zellen}
+    for z in eindeutig.values():
+        _konto_pruefen(db, mandant.id, z.konto_id)
+        if z.betrag_netto is not None and z.betrag_netto < 0:
+            raise HTTPException(422, "Budgetbeträge bitte positiv (netto) erfassen")
+        betrag = None if z.betrag_netto is None else _dec(z.betrag_netto)
+        try:
+            if daten.ansicht == "monate":
+                jahr, monat = (int(x) for x in z.periode.split("-"))
+                if not 1 <= monat <= 12:
+                    raise ValueError
+                modell, schluessel = models.Budget, {"jahr": jahr, "monat": monat}
+                if betrag == 0:
+                    betrag = None
+            elif daten.ansicht == "wochen":
+                jahr_text, kw_text = z.periode.split("-W")
+                jahr, kw = int(jahr_text), int(kw_text)
+                date.fromisocalendar(jahr, kw, 1)
+                modell, schluessel = models.BudgetWoche, {"jahr": jahr, "kw": kw}
+            else:
+                modell, schluessel = models.BudgetTag, {"datum": date.fromisoformat(z.periode)}
+        except ValueError:
+            raise HTTPException(422, f"Ungültige Periode: {z.periode}")
+        vorhanden = db.scalar(select(modell).filter_by(
+            mandant_id=mandant.id, konto_id=z.konto_id, **schluessel))
+        if betrag is None:
+            if vorhanden:
+                db.delete(vorhanden)
+        elif vorhanden:
+            vorhanden.betrag_netto = betrag
+        else:
+            db.add(modell(mandant_id=mandant.id, konto_id=z.konto_id, betrag_netto=betrag, **schluessel))
+    audit(db, benutzer, mandant.id, "BUDGET_GESPEICHERT",
+          f"{len(eindeutig)} Zellen ({daten.ansicht})")
+    db.commit()
+    return {"ok": True, "anzahl": len(eindeutig)}
+
+
 # ---------------------------------------------------------------- Zahlungskalender
 
 @router.get("/mandanten/{mandant_id}/termine")
@@ -3454,7 +3540,29 @@ def profil_abrufen(benutzer=Depends(aktueller_benutzer)):
         "rolle": benutzer.rolle,
         "totp_aktiv": benutzer.totp_aktiv,
         "passwort_aendern": benutzer.passwort_aendern,
+        "einstellungen": benutzer.einstellungen or {},
     }
+
+
+class EinstellungenWahl(BaseModel):
+    ansicht: str | None = None      # Spalten in Plan und Budget: tage | wochen | monate
+
+
+@router.put("/profil/einstellungen")
+def eigene_einstellungen_speichern(
+    daten: EinstellungenWahl,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Persönliche Anzeige-Einstellungen (geräteübergreifend) speichern."""
+    einstellungen = dict(benutzer.einstellungen or {})
+    if daten.ansicht is not None:
+        if daten.ansicht not in EXPORT_ANSICHTEN:
+            raise HTTPException(422, "Spalten: tage, wochen oder monate")
+        einstellungen["ansicht"] = daten.ansicht
+    benutzer.einstellungen = einstellungen      # neues Objekt, damit die Änderung gespeichert wird
+    db.commit()
+    return einstellungen
 
 
 @router.post("/profil/2fa/einrichten")

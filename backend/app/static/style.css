@@ -223,6 +223,29 @@ table.liste td.fix-spalte, table.liste th.fix-spalte {
 }
 table.liste thead th.fix-spalte { background: var(--blau-hell); z-index: 5; }
 
+/* Budgetraster: erfasste Werte schwarz/fett, abgeleitete als graue Vorgabe */
+.budget-raster td, .budget-raster th { padding: 3px 5px; }
+.budget-raster input { text-align: right; font-variant-numeric: tabular-nums; padding: 3px 4px; }
+.budget-raster input.erfasst { font-weight: 600; color: var(--text); }
+.budget-raster input.abgeleitet::placeholder { color: #8a939f; opacity: 1; }
+.budget-raster input.geaendert { background: #fdf3d7; }
+.budget-raster input:disabled { background: transparent; border-color: transparent; }
+.budget-raster .we { background: #f7f8fa; }
+.budget-raster input.abweichend { box-shadow: inset 3px 0 0 #eb6834; }
+.budget-raster thead th { position: sticky; top: 0; z-index: 2; background: var(--blau-hell); }
+.budget-raster thead th.fix-spalte { z-index: 5; }
+.budget-raster { border-collapse: separate; border-spacing: 0; }
+.budget-raster td.fix-spalte, .budget-raster th.fix-spalte {
+  min-width: 230px; box-shadow: -6px 0 0 #fff, 2px 0 0 var(--rand);   /* links nichts durchscheinen lassen */
+}
+.budget-raster tfoot td.fix-spalte { box-shadow: -6px 0 0 #e8eef6, 2px 0 0 var(--rand); }
+.budget-raster thead th.fix-spalte { box-shadow: -6px 0 0 var(--blau-hell), 2px 0 0 var(--rand); }
+.budget-raster tfoot td { background: #e8eef6; font-weight: 600; white-space: nowrap;
+  height: 30px; position: sticky; z-index: 1; }
+.budget-raster tfoot tr.summe-ein td { bottom: 30px; border-top: 2px solid var(--rand); }
+.budget-raster tfoot tr.summe-aus td { bottom: 0; }
+.budget-raster tfoot td.fix-spalte { z-index: 3; }
+
 /* Durchsuchbare Kontoauswahl mit Kategorie-Überschriften (PDF-Abstimmung) */
 .kombo { position: relative; display: inline-block; min-width: 250px; }
 .kombo input { width: 100%; }

@@ -677,9 +677,11 @@ async function verschiebungsListe(zeile) {
 }
 
 document.getElementById("laden").addEventListener("click", lade);
+if (typeof ANSICHT !== "undefined") document.getElementById("ansicht").value = ANSICHT;
 for (const id of ["ansicht", "metrik"]) {
   document.getElementById(id).addEventListener("change", () => { zeichne(); exportLinks(); });
 }
+document.getElementById("ansicht").addEventListener("change", (e) => ansichtMerken(e.target.value));
 document.getElementById("referenz").addEventListener("change", async (e) => {
   try {
     await referenzSetzen(MANDANT_ID, e.target.value);
