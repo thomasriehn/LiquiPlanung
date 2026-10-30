@@ -17,6 +17,7 @@ from ..database import get_db
 from ..security import (
     aktueller_benutzer,
     audit,
+    darf_bestellfreigabe,
     hash_passwort,
     mandant_oder_403,
     nur_admin,
@@ -25,6 +26,7 @@ from ..security import (
 )
 from ..config import get_settings
 from ..services import ausgleich, backup, bank, datev, export, insolvenzgeld
+from ..services import bestellungen as bestell_dienst
 from ..services.feiertage import BUNDESLAENDER
 from ..services.kontenrahmen import (
     eingebaute_definition,
@@ -144,6 +146,7 @@ def mandant_anlegen(
 MANDANT_FELDER = {
     "name", "bundesland", "ust_zeitraum", "dauerfrist", "verfahrensstatus",
     "aktenzeichen", "aktiv", "insolvenzgeld_aktiv",
+    "bestellungen_offen_einplanen",   # auch nicht freigegebene Bestellungen einplanen
 }
 
 
@@ -166,6 +169,8 @@ def mandant_aendern(
                 _enum_pruefen(wert, ["MONAT", "QUARTAL"], feld)
             if feld == "verfahrensstatus":
                 _enum_pruefen(wert, VERFAHRENSSTATUS, feld)
+            if feld == "bestellungen_offen_einplanen" and not isinstance(wert, bool):
+                raise HTTPException(422, f"Ungültiger Wert für '{feld}' (ja/nein erwartet)")
             setattr(mandant, feld, wert)
     audit(db, benutzer, mandant.id, "MANDANT_GEAENDERT", str(sorted(daten.keys())))
     db.commit()
@@ -200,6 +205,9 @@ def mandant_loeschen(
     # Kinder in Fremdschlüssel-Reihenfolge löschen – bewusst ohne DB-Kaskaden,
     # damit es auf PostgreSQL und SQLite gleichermaßen funktioniert.
     fuer_mandant = [
+        models.BestellJournal,
+        models.BestellAbloesung,
+        models.Bestellung,
         models.AusgleichZuordnung,
         models.BankTransaktion,
         models.Buchung,
@@ -831,6 +839,12 @@ def import_loeschen(
         )
     ):
         _zahlungs_anteil_zuruecknehmen(db, b)
+    # Ablösungen von Bestellungen durch diese Zahlungen aufheben (vor dem Löschen)
+    bestell_dienst.buchungen_entfernt(db, list(db.scalars(
+        select(models.Buchung.id).where(models.Buchung.batch_id == batch.id))), benutzer)
+    bestell_dienst.transaktionen_entfernt(db, list(db.scalars(
+        select(models.BankTransaktion.id).where(models.BankTransaktion.batch_id == batch.id))),
+        benutzer)
     db.execute(delete(models.Buchung).where(models.Buchung.batch_id == batch.id))
     db.execute(
         delete(models.BankTransaktion).where(models.BankTransaktion.batch_id == batch.id)
@@ -1170,6 +1184,7 @@ def buchung_loeschen(
         raise HTTPException(404, "Buchung nicht gefunden")
     mandant_oder_403(db, benutzer, buchung.mandant_id)
     _zahlungs_anteil_zuruecknehmen(db, buchung)
+    bestell_dienst.buchungen_entfernt(db, [buchung.id], benutzer)
     if buchung.batch_id:
         batch = db.get(models.ImportBatch, buchung.batch_id)
         if batch is not None and batch.anzahl > 0:
@@ -1672,6 +1687,7 @@ def pdf_umsatz_aufheben(
             posten.bezahlt_am = None
     if batch is not None and batch.anzahl > 0:
         batch.anzahl -= 1
+    bestell_dienst.buchungen_entfernt(db, [buchung.id], benutzer)
     audit(db, benutzer, mandant.id, "PDF_UMSATZ_AUFGEHOBEN",
           f"Buchung {buchung.id}: {buchung.datum} {buchung.betrag:.2f} €")
     db.delete(buchung)
@@ -2173,6 +2189,7 @@ def posten_loeschen(
     if posten is None:
         raise HTTPException(404, "Posten nicht gefunden")
     mandant_oder_403(db, benutzer, posten.mandant_id)
+    bestell_dienst.posten_entfernt(db, [posten.id], benutzer)
     db.delete(posten)
     db.commit()
     return {"ok": True}
@@ -3596,6 +3613,8 @@ def profil_abrufen(benutzer=Depends(aktueller_benutzer)):
         "totp_aktiv": benutzer.totp_aktiv,
         "passwort_aendern": benutzer.passwort_aendern,
         "einstellungen": benutzer.einstellungen or {},
+        "darf_freigeben": bool(benutzer.darf_freigeben),          # Kennzeichen
+        "darf_bestellfreigabe": darf_bestellfreigabe(benutzer),   # wirksam (Admin immer, Leser nie)
     }
 
 
@@ -3780,6 +3799,7 @@ class BenutzerNeu(BaseModel):
     rolle: str = "BEARBEITER"
     mandanten_ids: list[int] = []
     passwort_aendern: bool = False      # beim ersten Login eigenes Passwort festlegen
+    darf_freigeben: bool = False        # darf Bestellungen freigeben (Sachwalter)
 
 
 @router.get("/benutzer")
@@ -3794,6 +3814,7 @@ def benutzer_liste(admin=Depends(nur_admin), db: Session = Depends(get_db)):
             "aktiv": b.aktiv,
             "totp_aktiv": b.totp_aktiv,
             "passwort_aendern": b.passwort_aendern,
+            "darf_freigeben": bool(b.darf_freigeben),
             "mandanten_ids": [m.id for m in b.mandanten],
         }
         for b in benutzer
@@ -3817,13 +3838,15 @@ def benutzer_anlegen(
         passwort_hash=hash_passwort(daten.passwort),
         rolle=daten.rolle,
         passwort_aendern=daten.passwort_aendern,
+        darf_freigeben=daten.darf_freigeben,
     )
     for mid in daten.mandanten_ids:
         m = db.get(models.Mandant, mid)
         if m:
             b.mandanten.append(m)
     db.add(b)
-    audit(db, admin, None, "BENUTZER_ANGELEGT", daten.email)
+    audit(db, admin, None, "BENUTZER_ANGELEGT",
+          daten.email + (" (darf Bestellungen freigeben)" if daten.darf_freigeben else ""))
     db.commit()
     return {"id": b.id}
 
@@ -3838,7 +3861,7 @@ def benutzer_aendern(
     admin=Depends(nur_admin),
     db: Session = Depends(get_db),
 ):
-    """Benutzer bearbeiten: Name, Rolle, Mandanten, aktiv, Passwort zurücksetzen
+    """Benutzer bearbeiten: Name, Rolle, Mandanten, aktiv, Bestellfreigabe, Passwort zurücksetzen
     (optional mit Pflicht zum Passwortwechsel beim nächsten Login; bestehende
     Anmeldungen enden) und 2FA zurücksetzen. Der letzte aktive Administrator
     kann weder herabgestuft noch gesperrt werden."""
@@ -3882,6 +3905,10 @@ def benutzer_aendern(
             if bool(wert) != b.aktiv:
                 aenderungen.append("entsperrt" if wert else "gesperrt")
             b.aktiv = bool(wert)
+        elif feld == "darf_freigeben":
+            if bool(wert) != bool(b.darf_freigeben):
+                aenderungen.append("Bestellfreigabe " + ("erteilt" if wert else "entzogen"))
+            b.darf_freigeben = bool(wert)
         elif feld == "name":
             name = str(wert).strip()
             if not name:

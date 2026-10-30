@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% block titel %}Bestellungen – {{ mandant.name }}{% endblock %}
+{% block inhalt %}
+<div class="seite-breit">
+  <h1>Bestellungen &amp; Bestellfreigabe</h1>
+  <div class="tab-leiste">
+    <button id="tab-liste" class="aktiv">Bestellungen</button>
+    <button id="tab-freigabe">Freigabe (KW)</button>
+    <button id="tab-abgleich">Zahlungsabgleich</button>
+    <button id="tab-journal">Journal</button>
+  </div>
+
+  <!-- ======================================================= Bestellungen -->
+  <div id="bereich-liste">
+    <p class="hinweis">
+      Bestellungen fließen <strong>brutto</strong> zum erwarteten Zahldatum als Auszahlung in den
+      13-Wochen-Plan und verbrauchen dort das Restbudget des Kontos, bis sie durch die Ausgangszahlung,
+      eine Eingangsrechnung oder manuell <strong>abgelöst</strong> werden.
+      {% if mandant.bestellungen_offen_einplanen %}Auch Bestellungen „zur Freigabe“ stehen bereits im Plan.{% else %}Im Plan stehen nur freigegebene Bestellungen.{% endif %}
+      {% if not leser %}Dateien lassen sich auch per Drag &amp; Drop auf diese Liste hochladen.{% endif %}
+    </p>
+    <div class="werkzeuge">
+      <label>Status
+        <select id="filter-status">
+          <option value="">alle</option>
+          <option value="OFFEN" selected>zur Freigabe</option>
+          <option value="FREIGEGEBEN">freigegeben</option>
+          <option value="ABGELEHNT">abgelehnt</option>
+          <option value="ABGELOEST">abgelöst</option>
+          <option value="STORNIERT">storniert</option>
+        </select>
+      </label>
+      <label>Suche <input type="text" id="filter-suche" placeholder="Kreditor, Bestell-Nr., Beschreibung" style="width:240px"></label>
+      {% if not leser %}
+      <button type="button" id="neu-upload" title="PDF, Bild, Word, Excel, E-Mail oder Text – die Angaben werden ausgelesen und zur Prüfung vorbelegt">Bestellung hochladen …</button>
+      <input type="file" id="upload-datei" class="bs-datei-eingabe" tabindex="-1" aria-hidden="true"
+             accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp,.docx,.xlsx,.eml,.txt,application/pdf,image/png,image/jpeg,image/tiff,image/webp,message/rfc822,text/plain">
+      <button type="button" id="neu-ablage" class="sekundaer" title="Bereits in der Belegablage des Mandanten liegende Datei auslesen">Aus Ablage wählen …</button>
+      <button type="button" id="neu-manuell" class="sekundaer">+ Manuell erfassen</button>
+      {% endif %}
+      <span class="hinweis" id="liste-info"></span>
+    </div>
+    <div class="hinweis bs-ablage-ziel" id="liste-ablage" style="margin:-4px 0 8px"></div>
+    <table class="liste">
+      <thead><tr>
+        <th>Status</th><th>Bestellt</th><th>Kreditor</th><th>Konto</th>
+        <th class="zahl">Netto</th><th class="zahl">Brutto</th><th>Zahlung erwartet</th>
+        <th title="Bestelldatei">Datei</th><th></th>
+      </tr></thead>
+      <tbody id="bestell-tabelle"><tr><td colspan="9" class="hinweis">Wird geladen …</td></tr></tbody>
+      <tfoot id="bestell-summe"></tfoot>
+    </table>
+  </div>
+
+  <!-- ======================================================= Freigabe je KW -->
+  <div id="bereich-freigabe" style="display:none">
+    <p class="hinweis">
+      Rahmen der gewählten Kalenderwoche über <strong>alle Auszahlungen</strong>: geplante Auszahlungen der KW
+      (ab heute) abzüglich bereits gebundener Zahlungen (freigegebene Bestellungen, Rechnungen, Daueraufträge,
+      Termine) und der bisherigen Abweichung Ist/Plan bis gestern einschließlich Vorträgen. Die Prüfung je
+      Bestellung (Konto, BWA-Gruppe, gesamt) öffnet „prüfen …“.
+    </p>
+    <div class="werkzeuge">
+      <button type="button" class="sekundaer klein-knopf" id="fg-zurueck" title="Vorherige KW">◀</button>
+      <select id="fg-kw" title="Kalenderwoche"></select>
+      <button type="button" class="sekundaer klein-knopf" id="fg-vor" title="Nächste KW">▶</button>
+      <label title="Gegen welchen Plan geprüft wird: eingefrorener Planstand (Soll) oder aktueller Plan">Basis
+        <select id="fg-basis"><option value="">Soll-Referenz / automatisch</option></select></label>
+      <button type="button" class="sekundaer" id="fg-laden">Aktualisieren</button>
+      <span class="hinweis" id="fg-info"></span>
+    </div>
+    <div id="fg-rahmen"></div>
+    <h2>Zur Freigabe in dieser KW</h2>
+    <table class="liste">
+      <thead><tr><th>Kreditor</th><th>Konto</th><th>Zahlung erwartet</th><th class="zahl">Brutto</th>
+        <th class="zahl" title="Verfügbarer Rahmen (gesamt) nach dieser und allen darüber stehenden Bestellungen">Rest gesamt danach</th><th></th></tr></thead>
+      <tbody id="fg-offen"></tbody>
+    </table>
+    <h2>Bereits freigegeben in dieser KW</h2>
+    <table class="liste">
+      <thead><tr><th>Kreditor</th><th>Konto</th><th>Zahlung erwartet</th><th class="zahl">Brutto</th><th>Freigegeben</th><th></th></tr></thead>
+      <tbody id="fg-freigegeben"></tbody>
+    </table>
+  </div>
+
+  <!-- ======================================================= Zahlungsabgleich -->
+  <div id="bereich-abgleich" style="display:none">
+    <p class="hinweis">
+      Vorschläge, welche Ausgangszahlung (Ist-Buchung oder Bankumsatz) bzw. welche Eingangsrechnung
+      (offener Posten) eine offene oder freigegebene Bestellung ablöst – nach Kreditor, Bestellnummer im
+      Verwendungszweck, Konto, Betrag und Datumsnähe. Mit der Ablösung verschwindet die Bestellung aus der
+      Zukunft des Plans; die Zahlung bzw. Rechnung trägt den Betrag. Abweichende Beträge (z. B. Minderlieferung,
+      Teilzahlung) über „Ablösen …“ erfassen.
+    </p>
+    <div class="werkzeuge">
+      <button type="button" id="ab-laden" class="sekundaer">Vorschläge aktualisieren</button>
+      <span class="hinweis" id="ab-info"></span>
+    </div>
+    <table class="liste">
+      <thead><tr><th>Bestellung</th><th class="zahl">Brutto</th><th>Zahlung / Rechnung</th><th class="zahl">Betrag</th>
+        <th class="zahl">Abweichung</th><th>Konfidenz</th><th>Begründung</th><th></th></tr></thead>
+      <tbody id="ab-vorschlaege"></tbody>
+    </table>
+  </div>
+
+  <!-- ======================================================= Journal -->
+  <div id="bereich-journal" style="display:none">
+    <p class="hinweis">Unveränderliches Protokoll aller Erfassungen, Änderungen, Freigaben und Ablehnungen
+      (mit Begründung und den bei der Entscheidung gezeigten Kennzahlen) sowie der Ablösungen.</p>
+    <div class="werkzeuge">
+      <label>Aktion <select id="jn-aktion"><option value="">alle</option></select></label>
+      <label>Suche <input type="text" id="jn-suche" placeholder="Bestellung, Benutzer, Begründung" style="width:220px"></label>
+      <button type="button" id="jn-laden" class="sekundaer">Aktualisieren</button>
+      <span class="hinweis" id="jn-info"></span>
+    </div>
+    <table class="liste">
+      <thead><tr><th>Zeit</th><th>Benutzer</th><th>Bestellung</th><th>Aktion</th><th>Status</th>
+        <th>Begründung</th><th>Kennzahlen (Momentaufnahme)</th></tr></thead>
+      <tbody id="jn-tabelle"></tbody>
+    </table>
+  </div>
+
+  <!-- ======================================================= Erfassungsdialog -->
+  <dialog id="erfassung-dialog" class="zellen-dialog" style="width:min(1080px, calc(100vw - 32px))">
+    <div class="zd-kopf">
+      <div><h3 id="ef-titel">Bestellung erfassen</h3><div class="hinweis" id="ef-untertitel"></div></div>
+      <button type="button" class="sekundaer klein-knopf" id="ef-schliessen" title="Schließen">✕</button>
+    </div>
+    <div id="ef-meldungen"></div>
+    <div class="bs-erfassung">
+      <div class="bs-vorschau" id="ef-vorschau"></div>
+      <form id="ef-form" class="bs-formular" autocomplete="off">
+        <div id="ef-ki-status"></div>
+        <label>Kreditor<input name="kreditor" list="ef-kreditoren" required maxlength="255"></label>
+        <datalist id="ef-kreditoren"></datalist>
+        <div class="bs-reihe">
+          <label>Bestellnummer<input name="bestellnummer" maxlength="64"></label>
+          <label>Bestelldatum<input type="date" name="bestelldatum" required></label>
+          <label>Lieferdatum<input type="date" name="lieferdatum"></label>
+        </div>
+        <label>Konto<div class="konto-feld" id="ef-konto"></div>
+          <span class="hinweis" id="ef-konto-hinweis"></span></label>
+        <div class="bs-reihe">
+          <label>Netto (€)<input type="number" name="betrag_netto" step="0.01" min="0.01" required inputmode="decimal"></label>
+          <label>USt-Satz
+            <select name="ust_satz">
+              <option value="">laut Konto</option>
+              <option value="19">19 %</option>
+              <option value="7">7 %</option>
+              <option value="0">0 % (ohne USt)</option>
+            </select>
+          </label>
+          <label>Brutto (€)<div class="bs-wert" id="ef-brutto">–</div></label>
+        </div>
+        <label>Erwartetes Zahldatum<input type="date" name="zahldatum" required>
+          <span class="hinweis" id="ef-kw"></span></label>
+        <div class="warnung" id="ef-zahldatum-warnung" style="display:none"></div>
+        <label>Beschreibung<textarea name="beschreibung" rows="3" placeholder="Gegenstand der Bestellung, Liefer-/Zahlungsbedingungen"></textarea></label>
+        <div class="hinweis bs-ablage-ziel" id="ef-ablage-ziel"></div>
+        <div id="ef-datei-bereich"></div>
+      </form>
+    </div>
+    <div class="werkzeuge bs-fuss">
+      <span class="hinweis bs-fuss-links" id="ef-fuss-hinweis"></span>
+      <button type="button" class="sekundaer" id="ef-abbrechen">Abbrechen</button>
+      <button type="button" id="ef-speichern">Speichern</button>
+      <button type="button" id="ef-speichern-pruefen" style="display:none">Speichern &amp; Freigabe prüfen</button>
+    </div>
+  </dialog>
+
+  <!-- ======================================================= Freigabe-/Detaildialog -->
+  <dialog id="freigabe-dialog" class="zellen-dialog" style="width:min(940px, calc(100vw - 32px))">
+    <div class="zd-kopf">
+      <div><h3 id="fd-titel">Bestellfreigabe</h3><div class="hinweis" id="fd-untertitel"></div></div>
+      <button type="button" class="sekundaer klein-knopf" id="fd-schliessen" title="Schließen">✕</button>
+    </div>
+    <div id="fd-inhalt"></div>
+  </dialog>
+
+  <!-- ======================================================= Ablösedialog -->
+  <dialog id="abloese-dialog" class="zellen-dialog" style="width:min(940px, calc(100vw - 32px))">
+    <div class="zd-kopf">
+      <div><h3 id="ad-titel">Bestellung ablösen</h3><div class="hinweis" id="ad-untertitel"></div></div>
+      <button type="button" class="sekundaer klein-knopf" id="ad-schliessen" title="Schließen">✕</button>
+    </div>
+    <div id="ad-inhalt"></div>
+  </dialog>
+</div>
+{% endblock %}
+{% block skripte %}
+<script>
+const MANDANT_ID = {{ mandant.id }};
+const LESER = {{ 'true' if leser else 'false' }};
+const DARF_FREIGEBEN = {{ 'true' if darf_freigeben else 'false' }};
+const KI_AKTIV = {{ 'true' if ki_aktiv else 'false' }};
+const IST_ADMIN = {{ 'true' if ist_admin else 'false' }};
+</script>
+<script src="/static/ablage.js?v={{ static_version }}"></script>
+<script src="/static/bestellungen.js?v={{ static_version }}"></script>
+{% endblock %}

@@ -708,6 +708,15 @@ def test_mandant_loeschen(client):
     szenarien = client.get(f"/api/mandanten/{mandant_id}/szenarien").json()
     client.put(f"/api/szenarien/{szenarien[0]['id']}/regeln",
                json=[{"konto_id": k8400["id"], "faktor": 80}])
+    # Bestellung mit Teilzahlung (Ablösung) und Journal
+    k3400 = next(k for k in konten if k["nummer"] == "3400")
+    bestellung = client.post(f"/api/mandanten/{mandant_id}/bestellungen", json={
+        "kreditor": "Lieferant KG", "bestelldatum": "2026-08-01", "zahldatum": "2026-08-20",
+        "betrag_netto": 1000, "konto_id": k3400["id"]})
+    assert bestellung.status_code == 201, bestellung.text
+    teil = client.post(f"/api/bestellungen/{bestellung.json()['id']}/abloesung", json={
+        "art": "MANUELL", "betrag": 100, "datum": "2026-08-10", "abschliessend": False})
+    assert teil.status_code == 200, teil.text
 
     # Bestätigung erforderlich; Bearbeiter dürfen gar nicht löschen
     assert client.delete(f"/api/mandanten/{mandant_id}").status_code == 422
@@ -717,6 +726,17 @@ def test_mandant_loeschen(client):
     antwort = client.delete(f"/api/mandanten/{mandant_id}?bestaetigung=wegfall")
     assert antwort.status_code == 200, antwort.text
     assert client.get("/api/mandanten").json() == []
+    # keine verwaisten Zeilen (SQLite prüft Fremdschlüssel nicht)
+    import app.database as db_modul
+    from sqlalchemy import func, select
+
+    from app import models
+    with db_modul.SessionLocal() as s:
+        for modell in (models.Bestellung, models.BestellAbloesung, models.BestellJournal,
+                       models.OffenerPosten, models.BankTransaktion, models.Konto):
+            anzahl = s.scalar(select(func.count()).select_from(modell)
+                              .where(modell.mandant_id == mandant_id))
+            assert anzahl == 0, modell.__name__
     assert client.get(f"/api/mandanten/{mandant_id}/plan").status_code == 404
     # Kurzname ist wieder frei
     neu = client.post("/api/mandanten", json={"name": "Neu", "kurzname": "wegfall"})

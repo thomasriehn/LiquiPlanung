@@ -11,7 +11,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from . import models
 from .config import get_settings
 from .database import Base, SessionLocal, engine
-from .routers import api, auth, pages
+from .routers import api, auth, bestellungen, pages
 from .security import PasswortWechselErforderlich, hash_passwort
 
 
@@ -176,6 +176,8 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(pages.router)
     app.include_router(api.router)
+    app.include_router(bestellungen.router)
+    app.include_router(bestellungen.seiten)   # Datei-Proxy (außerhalb /api)
     app.mount(
         "/static",
         StaticFiles(directory=str(Path(__file__).resolve().parent / "static")),

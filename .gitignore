@@ -9,3 +9,4 @@ venv/
 # lokale Belegablage (Bestelldateien)
 ablage/
 backend/ablage/
+backend/backups/

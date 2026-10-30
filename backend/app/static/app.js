@@ -22,7 +22,11 @@ async function apiDatei(url, formData) {
   if (antwort.status === 401) { location.href = "/login"; throw new Error("Nicht angemeldet"); }
   const json = await antwort.json().catch(() => null);
   if (!antwort.ok) {
-    throw new Error(json && json.detail ? JSON.stringify(json.detail) : antwort.statusText);
+    // Fehlertexte wie bei api(): Zeichenkette unverändert, sonst als JSON
+    const detail = json && json.detail
+      ? (typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail))
+      : (antwort.status === 413 ? "Datei zu groß" : antwort.statusText);
+    throw new Error(detail);
   }
   return json;
 }
@@ -96,6 +100,36 @@ async function referenzAuswahlFuellen(mandantId, select) {
 async function referenzSetzen(mandantId, snapshotId) {
   await api("PUT", `/api/mandanten/${mandantId}/plan/referenz`,
     { snapshot_id: snapshotId ? parseInt(snapshotId) : null });
+}
+
+// ---- Datumshelfer (lokale Zeit statt UTC; ISO-Kalenderwochen) ----
+function isoTag(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function tagPlus(iso, n) {
+  const d = new Date(iso + "T12:00:00");
+  d.setDate(d.getDate() + n);
+  return isoTag(d);
+}
+function montagVon(iso) {
+  const d = new Date(iso + "T12:00:00");
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return isoTag(d);
+}
+function kalenderwoche(iso) {
+  const d = new Date(iso + "T12:00:00");
+  d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7));           // Donnerstag der Woche
+  const jan4 = new Date(d.getFullYear(), 0, 4, 12);
+  return 1 + Math.round(((d - jan4) / 86400000 - 3 + ((jan4.getDay() + 6) % 7)) / 7);
+}
+// ISO-Jahr und -KW eines Tages: {jahr, kw} (Jahr des Donnerstags der Woche)
+function isoWoche(iso) {
+  return { jahr: parseInt(tagPlus(montagVon(iso), 3).slice(0, 4)), kw: kalenderwoche(iso) };
+}
+// Montag einer ISO-KW als ISO-Datum
+function kwMontag(jahr, kw) {
+  const jan4 = new Date(jahr, 0, 4, 12);
+  return tagPlus(montagVon(isoTag(jan4)), (kw - 1) * 7);
 }
 
 // Spaltenansicht (Tage/Wochen/Monate) je Benutzer serverseitig speichern –

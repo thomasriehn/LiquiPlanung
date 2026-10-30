@@ -32,6 +32,58 @@
     {% if not leser %}<button type="submit">Speichern</button>{% endif %}
   </form>
 
+  <h2>Belegablage und Bestellungen</h2>
+  <p class="hinweis">Bestelldateien (PDF, Scans, Fotos, E-Mails …) werden beim Erfassen einer Bestellung in
+    diesem Ordner abgelegt. Bereits erfasste Bestellungen behalten ihren Ablageort, auch wenn der Ordner
+    später geändert wird.</p>
+  <div class="formular-zeilen">
+    <div style="grid-column:1/-1">
+      <span class="bd-label">Aktuelle Ablage</span>
+      <div id="ablage-aktuell" class="bs-ablage-ziel">wird geladen …</div>
+    </div>
+  </div>
+  {% if ist_admin %}
+  <form id="ablage-form" class="formular-zeilen" style="margin-top:10px" autocomplete="off">
+    <label>Ablageort
+      <select name="typ" id="ablage-typ">
+        <option value="LOKAL">Lokaler Ordner auf dem Server</option>
+        <option value="SHAREPOINT">SharePoint (Microsoft Graph)</option>
+      </select>
+    </label>
+    <label data-ablage="LOKAL" style="grid-column:span 2">Ordner (relativ zum Ablage-Verzeichnis des Servers)
+      <span style="display:flex;gap:6px;margin-top:2px">
+        <input name="lokal_pfad" id="ablage-lokal-pfad" spellcheck="false" style="flex:1;margin:0">
+        <button type="button" class="sekundaer" id="ablage-lokal-waehlen">Ordner wählen …</button>
+      </span>
+    </label>
+    <div data-ablage="SHAREPOINT" style="grid-column:1/-1">
+      <div id="ablage-sp-graph-warnung"></div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button type="button" class="sekundaer" id="ablage-sp-waehlen">Ablage über Microsoft Graph auswählen …</button>
+        <span id="ablage-sp-text" class="hinweis">Kein Ordner gewählt.</span>
+      </div>
+    </div>
+    <label data-ablage="SHAREPOINT">Drive-ID (Dokumentbibliothek)
+      <input name="drive_id" id="ablage-drive-id" spellcheck="false" placeholder="b!…"></label>
+    <label data-ablage="SHAREPOINT">Ordner-ID (optional, leer = Bibliothekswurzel)
+      <input name="ordner_id" id="ablage-ordner-id" spellcheck="false"></label>
+    <p class="hinweis" data-ablage="SHAREPOINT" style="grid-column:1/-1;margin:0">Die IDs füllt die Auswahl über
+      Microsoft Graph aus. Manuell nur eintragen, wenn die Websitesuche nicht möglich ist (z. B. nur
+      Sites.Selected ohne bekannte Website-URL); der Ordner wird beim Speichern über Graph geprüft.</p>
+    <div style="grid-column:1/-1"><button type="submit">Ablage speichern</button></div>
+  </form>
+  {% else %}
+  <p class="hinweis">Den Ablageort legt ein Administrator fest.</p>
+  {% endif %}
+  <div class="formular-zeilen" style="margin-top:10px">
+    <label class="cb" style="grid-column:1/-1;margin:0"><input type="checkbox" id="bestellungen-offen-einplanen"
+      {% if mandant.bestellungen_offen_einplanen %}checked{% endif %} {% if leser %}disabled{% endif %}>
+      Noch nicht freigegebene Bestellungen im Plan berücksichtigen</label>
+    <p class="hinweis" style="grid-column:1/-1;margin:0">An: Bestellungen „zur Freigabe“ stehen bereits als
+      Auszahlung im 13-Wochen-Plan (vorsichtige Planung). Aus: nur freigegebene Bestellungen. Abgelehnte und
+      stornierte Bestellungen sind nie im Plan; die Freigabeprüfung rechnet stets nur mit freigegebenen.</p>
+  </div>
+
   <h2>Insolvenzgeld-Assistent</h2>
   <p class="hinweis">
     Im Insolvenzgeldzeitraum (i. d. R. die letzten 3 Monate vor dem Insolvenzereignis,
@@ -125,6 +177,7 @@
 </div>
 {% endblock %}
 {% block skripte %}
+{% if ist_admin %}<script src="/static/ablage.js?v={{ static_version }}"></script>{% endif %}
 <script>
 const MANDANT_ID = {{ mandant.id }};
 const LESER = {{ 'true' if leser else 'false' }};
@@ -145,6 +198,132 @@ function kontoName(id) {
   const k = konten.find(k => k.id === id);
   return k ? esc(`${k.nummer} ${k.bezeichnung}`) : "–";
 }
+
+// ---- Belegablage (lokal/SharePoint) und Bestellungen im Plan ----
+let belegAblage = null;          // Antwort von GET …/ablage
+let belegSpAuswahl = null;       // SharePoint-Ziel {site_id, site_name, drive_id, drive_name, ordner_id, pfad, web_url}
+
+function belegAblageText(a) {
+  if (!a) return "";
+  let html = `<strong>${esc(a.beschreibung || a.pfad || "–")}</strong>`;
+  if (!a.konfiguriert) html += ` <span class="klein">(Standard – noch nicht festgelegt)</span>`;
+  if (a.web_url) html += ` · <a href="${esc(a.web_url)}" target="_blank" rel="noopener">in SharePoint öffnen ↗</a>`;
+  return html;
+}
+
+// SharePoint-Anzeigepfad „Site › Bibliothek › /A/B“ in seine Teile zerlegen
+function belegSpAusAblage(a) {
+  const teile = String(a.pfad || a.beschreibung || "").replace(/^SharePoint:\s*/, "").split(" › ");
+  const letzter = teile[teile.length - 1] || "";
+  return {
+    site_id: a.site_id || null, drive_id: a.drive_id || null, ordner_id: a.ordner_id || null,
+    site_name: teile.length >= 3 ? teile[0] : null,
+    drive_name: teile.length >= 2 ? teile[teile.length - 2] : null,
+    pfad: letzter.startsWith("/") ? letzter : null,
+    web_url: a.web_url || null,
+  };
+}
+
+function belegSpTextZeigen() {
+  const el = document.getElementById("ablage-sp-text");
+  if (!el) return;
+  const s = belegSpAuswahl;
+  if (!s || !s.drive_id) { el.textContent = "Kein Ordner gewählt."; return; }
+  const teile = [s.site_name, s.drive_name, s.pfad || (s.ordner_id ? "(Ordner-ID)" : "/")].filter(Boolean);
+  el.innerHTML = `Ziel: <strong>${esc(teile.join(" › "))}</strong>`;
+}
+
+function belegAblageTypZeigen() {
+  const typ = document.getElementById("ablage-typ").value;
+  document.querySelectorAll("#ablage-form [data-ablage]").forEach(el => {
+    el.style.display = el.dataset.ablage === typ ? "" : "none";
+  });
+}
+
+function belegAblageZeigen(a) {
+  belegAblage = a;
+  document.getElementById("ablage-aktuell").innerHTML = belegAblageText(a);
+  document.getElementById("bestellungen-offen-einplanen").checked = !!a.bestellungen_offen_einplanen;
+  const f = document.getElementById("ablage-form");
+  if (!f) return;
+  document.getElementById("ablage-typ").value = a.typ === "SHAREPOINT" ? "SHAREPOINT" : "LOKAL";
+  document.getElementById("ablage-lokal-pfad").value = a.lokal_pfad || "";
+  belegSpAuswahl = a.typ === "SHAREPOINT" ? belegSpAusAblage(a) : null;
+  document.getElementById("ablage-drive-id").value = belegSpAuswahl ? (belegSpAuswahl.drive_id || "") : "";
+  document.getElementById("ablage-ordner-id").value = belegSpAuswahl ? (belegSpAuswahl.ordner_id || "") : "";
+  belegSpTextZeigen();
+  document.getElementById("ablage-sp-graph-warnung").innerHTML = a.graph_konfiguriert ? "" :
+    `<div class="warnung">Microsoft Graph ist noch nicht eingerichtet – bitte zuerst unter
+      <a href="/system">System</a> Tenant-ID, Client-ID und Client-Secret hinterlegen.</div>`;
+  document.getElementById("ablage-sp-waehlen").disabled = !a.graph_konfiguriert;
+  belegAblageTypZeigen();
+}
+
+async function belegAblageLaden() {
+  try { belegAblageZeigen(await api("GET", `/api/mandanten/${MANDANT_ID}/ablage`)); }
+  catch (e) { document.getElementById("ablage-aktuell").innerHTML = `<span class="fehler">${esc(e.message)}</span>`; }
+}
+
+const ablageForm = document.getElementById("ablage-form");
+if (ablageForm) {
+  document.getElementById("ablage-typ").addEventListener("change", belegAblageTypZeigen);
+  document.getElementById("ablage-lokal-waehlen").addEventListener("click", async () => {
+    const erg = await lokalOrdnerWaehlen({ vorauswahl: { pfad: document.getElementById("ablage-lokal-pfad").value.trim() } });
+    if (erg) document.getElementById("ablage-lokal-pfad").value = erg.pfad;
+  });
+  document.getElementById("ablage-sp-waehlen").addEventListener("click", async () => {
+    const v = belegSpAuswahl || {};
+    const erg = await sharepointOrdnerWaehlen({ vorauswahl: v.drive_id ? {
+      site_id: v.site_id, site_name: v.site_name, drive_id: v.drive_id, drive_name: v.drive_name,
+      item_id: v.ordner_id, pfad: v.pfad, web_url: v.web_url } : null });
+    if (!erg) return;
+    belegSpAuswahl = { site_id: erg.site_id, site_name: erg.site_name, drive_id: erg.drive_id,
+      drive_name: erg.drive_name, ordner_id: erg.item_id, pfad: erg.pfad, web_url: erg.web_url };
+    document.getElementById("ablage-drive-id").value = erg.drive_id || "";
+    document.getElementById("ablage-ordner-id").value = erg.item_id || "";
+    belegSpTextZeigen();
+  });
+  // manuell geänderte IDs: Website/Anzeigepfad sind dann unbekannt (bildet der Server)
+  for (const id of ["ablage-drive-id", "ablage-ordner-id"]) {
+    document.getElementById(id).addEventListener("input", () => {
+      belegSpAuswahl = { site_id: null, site_name: null, drive_name: null, pfad: null, web_url: null,
+        drive_id: document.getElementById("ablage-drive-id").value.trim() || null,
+        ordner_id: document.getElementById("ablage-ordner-id").value.trim() || null };
+      belegSpTextZeigen();
+    });
+  }
+  ablageForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const typ = document.getElementById("ablage-typ").value;
+    let daten;
+    if (typ === "LOKAL") {
+      daten = { typ, lokal_pfad: document.getElementById("ablage-lokal-pfad").value.trim() || null };
+    } else {
+      const driveId = document.getElementById("ablage-drive-id").value.trim();
+      if (!driveId) { toast("Bitte die Ablage über Microsoft Graph auswählen oder eine Drive-ID eintragen."); return; }
+      const s = belegSpAuswahl || {};
+      daten = { typ, drive_id: driveId,
+        ordner_id: document.getElementById("ablage-ordner-id").value.trim() || null,
+        site_id: s.site_id || null, pfad: s.pfad || null, web_url: s.web_url || null };
+    }
+    const knopf = ablageForm.querySelector('button[type="submit"]');
+    knopf.disabled = true;
+    try {
+      belegAblageZeigen(await api("PUT", `/api/mandanten/${MANDANT_ID}/ablage`, daten));
+      toast("Ablage gespeichert.", false);
+    } catch (err) { toast(err.message); }
+    finally { knopf.disabled = false; }
+  });
+}
+
+document.getElementById("bestellungen-offen-einplanen").addEventListener("change", async (e) => {
+  try {
+    await api("PATCH", `/api/mandanten/${MANDANT_ID}`, { bestellungen_offen_einplanen: e.target.checked });
+    toast(e.target.checked ? "Bestellungen zur Freigabe werden im Plan berücksichtigt."
+      : "Im Plan stehen nur noch freigegebene Bestellungen.", false);
+  } catch (err) { toast(err.message); e.target.checked = !e.target.checked; }
+});
+belegAblageLaden();
 
 // ---- Insolvenzgeld-Assistent ----
 const igeldForm = document.getElementById("igeld-form");

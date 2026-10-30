@@ -24,6 +24,7 @@
     <a href="/mandanten/{{ mandant.id }}/kpi">KPI</a>
     <a href="/mandanten/{{ mandant.id }}/szenarien">Szenarien</a>
     <a href="/mandanten/{{ mandant.id }}/posten">Posten</a>
+    <a href="/mandanten/{{ mandant.id }}/bestellungen">Bestellungen</a>
     <a href="/mandanten/{{ mandant.id }}/budget">Budget</a>
     <a href="/mandanten/{{ mandant.id }}/kalender">Kalender</a>
     <a href="/mandanten/{{ mandant.id }}/konten">Konten</a>
@@ -33,7 +34,7 @@
   {% endif %}
   <div class="kopf-rechts">
     {% if benutzer is defined and benutzer %}
-      {% if ist_admin %}<a href="/kontenrahmen">Kontenrahmen</a><a href="/benutzer">Benutzer</a>{% endif %}
+      {% if ist_admin %}<a href="/system" title="Microsoft Graph (SharePoint), KI-Zugang, Belegablage">System</a><a href="/kontenrahmen">Kontenrahmen</a><a href="/benutzer">Benutzer</a>{% endif %}
       <a href="/profil" class="benutzer-name" title="Profil und Zwei-Faktor-Anmeldung">{{ benutzer.name }}</a>
       <a href="/logout">Abmelden</a>
     {% endif %}

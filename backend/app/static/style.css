@@ -325,3 +325,144 @@ button.gefahr-text { color: var(--rot); border-color: #e6b3ad; }
 .liste td.negativ { color: var(--rot); }
 .liste td.positiv { color: var(--gruen); }
 @media (max-width: 1000px) { .kpi-raster { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---- Bestellungen & Bestellfreigabe ---- */
+.status-badge {
+  display: inline-block; border: 1px solid; border-radius: 4px; padding: 0 6px;
+  font-size: 11px; line-height: 1.6; white-space: nowrap; vertical-align: 1px;
+}
+.status-badge.offen { background: #fff6e0; color: #8a5a00; border-color: #e8c56b; }
+.status-badge.freigegeben { background: #e8f5ec; color: #1e5c38; border-color: #9fd3ae; }
+.status-badge.abgelehnt { background: #fbe9e7; color: var(--rot); border-color: #e6b3ad; }
+.status-badge.abgeloest { background: #eaf1fa; color: #1d4e89; border-color: #9db4d0; }
+.status-badge.storniert { background: #f0f2f5; color: var(--grau); border-color: var(--rand); }
+.status-badge.neutral { background: #f5f7fa; color: #46525f; border-color: var(--rand); }
+/* von der KI vorbelegte Felder (Klasse verschwindet beim Bearbeiten) */
+.ki-vorschlag { background: #fdf3d7 !important; border-color: #e8c56b !important; }
+.ki-legende { display: inline-block; width: 12px; height: 10px; margin-right: 4px; vertical-align: -1px;
+  background: #fdf3d7; border: 1px solid #e8c56b; border-radius: 2px; }
+
+/* Auswahldialoge: SharePoint-Ordner, lokaler Ordner, Datei aus der Ablage */
+.sp-dialog { width: min(780px, calc(100vw - 32px)); }
+.sp-abschnitt h4 { display: flex; align-items: center; gap: 8px; }
+.sp-nr {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  width: 20px; height: 20px; border-radius: 50%; background: var(--blau); color: #fff; font-size: 12px;
+}
+.sp-abschnitt.inaktiv { opacity: .55; }
+.sp-abschnitt.inaktiv .sp-nr { background: var(--grau); }
+.sp-zeile { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+.sp-zeile input { flex: 1 1 260px; width: auto; }
+.sp-liste {
+  list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto;
+  border: 1px solid var(--rand); border-radius: 6px; background: #fff;
+}
+.sp-liste li {
+  display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+  border-bottom: 1px solid #edf0f4; cursor: pointer; font-size: 13px;
+}
+.sp-liste li:last-child { border-bottom: none; }
+.sp-liste li:hover { background: #f5f8fc; }
+.sp-liste li.gewaehlt { background: var(--blau-hell); box-shadow: inset 3px 0 0 var(--blau); }
+.sp-liste li.gewaehlt .sp-name { font-weight: 600; }
+.sp-liste li.sp-leer { cursor: default; color: var(--grau); font-size: 12.5px; }
+.sp-liste li.sp-leer:hover { background: none; }
+.sp-liste li.sp-aktuell { background: #f7f9fc; }
+.sp-liste li.sp-aktuell.gewaehlt { background: var(--blau-hell); }
+.sp-liste .sp-symbol { flex: 0 0 auto; width: 18px; text-align: center; }
+.sp-liste .sp-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-liste .sp-name .klein { display: block; overflow: hidden; text-overflow: ellipsis; }
+.sp-liste .sp-info { flex: 0 0 auto; font-size: 12px; color: var(--grau); white-space: nowrap; }
+.sp-liste li button { flex: 0 0 auto; }
+.sp-pfad { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-size: 12.5px; margin-bottom: 6px; }
+.sp-pfad button {
+  background: none; border: none; color: var(--blau); padding: 1px 3px; border-radius: 3px; font-size: 12.5px;
+}
+.sp-pfad button:hover { background: var(--blau-hell); filter: none; }
+.sp-pfad .sp-trenner { color: var(--grau); padding: 0 2px; }
+.sp-pfad .sp-hier { font-weight: 600; padding: 1px 3px; }
+.sp-fuss {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border-top: 1px solid var(--rand); margin-top: 12px; padding-top: 10px;
+}
+.sp-gewaehlt { margin-right: auto; font-size: 12.5px; min-width: 0; overflow-wrap: anywhere; }
+.sp-id { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--grau); overflow-wrap: anywhere; }
+
+/* Bestellungen: Liste und Erfassungsdialog */
+.bs-ablage-ziel { overflow-wrap: anywhere; }
+/* Dateiauswahl unsichtbar, aber nicht display:none (Safari: programmatischer Klick) */
+.bs-datei-eingabe { position: absolute; width: 1px !important; height: 1px; padding: 0; opacity: 0; overflow: hidden; pointer-events: none; }
+#bereich-liste.ziehen-ueber { outline: 2px dashed var(--blau); outline-offset: 4px; border-radius: 8px; }
+.bs-erfassung {
+  display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(300px, 1fr);
+  gap: 16px; margin-top: 12px; align-items: start;
+}
+@media (max-width: 900px) { .bs-erfassung { grid-template-columns: minmax(0, 1fr); } }
+.bs-vorschau {
+  border: 1px solid var(--rand); border-radius: 6px; background: #f7f8fa;
+  display: flex; flex-direction: column; min-height: 300px;
+}
+.bs-vorschau-kopf {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 6px 10px;
+  border-bottom: 1px solid var(--rand); font-size: 12.5px; background: #fff; border-radius: 6px 6px 0 0;
+}
+.bs-vorschau-kopf .sp-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.bs-vorschau iframe { display: block; width: 100%; height: clamp(320px, calc(100vh - 330px), 760px); border: 0; background: #fff; }
+.bs-vorschau-leer { padding: 28px 16px; color: var(--grau); text-align: center; font-size: 13px; }
+.bs-textauszug {
+  margin: 0; padding: 8px 10px; max-height: 260px; overflow: auto; white-space: pre-wrap;
+  font-size: 11.5px; background: #fff; border-top: 1px solid var(--rand);
+}
+.bs-formular label { display: block; margin-bottom: 8px; }
+.bs-formular textarea { resize: vertical; }
+.bs-reihe { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0 10px; }
+.bs-wert {
+  margin-top: 2px; padding: 6px 8px; min-height: 33px; border: 1px dashed var(--rand); border-radius: 4px;
+  background: #f7f8fa; font-variant-numeric: tabular-nums; font-weight: 600;
+}
+.bs-formular .hinweis { display: block; margin-top: 2px; }
+.bs-fuss { margin: 12px 0 0; justify-content: flex-end; }
+/* Erfassungsdialog: Knöpfe bleiben beim Blättern sichtbar */
+#erfassung-dialog > .bs-fuss { position: sticky; bottom: 0; z-index: 5; box-shadow: 0 -6px 12px -8px rgba(20, 35, 55, .25); }
+.bs-fuss .bs-fuss-links { margin-right: auto; }
+.bs-ki-box { font-size: 12.5px; }
+.bs-ki-box ul { margin: 4px 0 0 18px; padding: 0; }
+.bs-aktionen { white-space: nowrap; }
+.bs-aktionen button { margin: 1px 0; }
+table.liste tr.bs-zu td { color: #7d8794; }
+
+/* Bestellfreigabe: Rechenweg, Ampel */
+.bf-kopf { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin-top: 10px; }
+.bf-kopf .bf-label { display: block; font-size: 11.5px; color: var(--grau); }
+.bf-kopf .bf-wert { font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.bf-steuer { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 8px; }
+.bf-steuer label { display: flex; align-items: center; gap: 6px; }
+.bf-steuer select { width: auto; max-width: 100%; }
+table.bf-tabelle td, table.bf-tabelle th { padding: 4px 8px; }
+table.bf-tabelle th.zahl, table.bf-tabelle td.zahl { width: 150px; white-space: nowrap; }
+table.bf-tabelle tr.bf-davon td { color: var(--grau); font-style: italic; font-size: 12px; }
+table.bf-tabelle tr.bf-zwischen td { font-weight: 600; background: #f7f9fc; }
+table.bf-tabelle tr.bf-summe td { font-weight: 700; background: #eef3f9; border-top: 2px solid #b9c7d8; }
+table.bf-tabelle tr.bf-ergebnis td { font-weight: 700; background: #eef3f9; border-top: 2px solid #b9c7d8; }
+table.bf-tabelle td.bf-massgeblich { background: #fff8e1; }
+table.bf-tabelle tr.bf-summe td.bf-massgeblich, table.bf-tabelle tr.bf-ergebnis td.bf-massgeblich { background: #fdf0c4; }
+table.bf-tabelle th.bf-massgeblich { background: #f5d98a; }
+table.bf-tabelle td.negativ { color: var(--rot); font-weight: 700; }
+table.bf-tabelle .bf-erl { display: block; font-size: 11px; color: var(--grau); font-weight: 400; font-style: normal; }
+.bf-ampel {
+  display: flex; gap: 12px; align-items: center; margin: 10px 0; padding: 10px 12px;
+  border: 1px solid; border-radius: 6px; font-size: 14px;
+}
+.bf-licht { flex: 0 0 auto; width: 16px; height: 16px; border-radius: 50%; }
+.bf-ampel.gruen { background: #e8f5ec; border-color: #9fd3ae; color: #1e5c38; }
+.bf-ampel.gruen .bf-licht { background: #2e9d5b; box-shadow: 0 0 0 3px #c9ebd5; }
+.bf-ampel.rot { background: #fbe9e7; border-color: #e6b3ad; color: #8f2a22; }
+.bf-ampel.rot .bf-licht { background: #c8372c; box-shadow: 0 0 0 3px #f3cfcb; }
+.bf-ampel.grau { background: #f5f7fa; border-color: var(--rand); color: #46525f; }
+.bf-ampel.grau .bf-licht { background: #a5afbb; }
+.bf-liquiditaet { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12.5px; }
+.bf-liquiditaet strong { font-variant-numeric: tabular-nums; }
+.bf-hinweise { margin: 6px 0 0 18px; padding: 0; font-size: 12px; color: #52514e; }
+.bf-entscheidung textarea { margin-top: 2px; }
+.bf-rahmen { max-width: 760px; }
+.warnung.rot { color: #8f2a22; background: #fbe9e7; border-color: #e6b3ad; }

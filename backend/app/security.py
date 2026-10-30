@@ -104,6 +104,21 @@ def nur_schreibend(benutzer: models.Benutzer) -> None:
         raise HTTPException(status_code=403, detail="Nur-Lese-Berechtigung")
 
 
+def darf_bestellfreigabe(benutzer: models.Benutzer) -> bool:
+    """Bestellungen freigeben/ablehnen: Administratoren immer, sonst nur mit
+    Kennzeichen „darf freigeben“ (Sachwalter) – Leser nie."""
+    if ist_admin(benutzer):
+        return True
+    if benutzer.rolle == models.Rolle.LESER.value:
+        return False
+    return bool(getattr(benutzer, "darf_freigeben", False))
+
+
+def nur_freigabe(benutzer: models.Benutzer) -> None:
+    if not darf_bestellfreigabe(benutzer):
+        raise HTTPException(status_code=403, detail="Keine Berechtigung zur Bestellfreigabe")
+
+
 def audit(
     db: Session,
     benutzer: models.Benutzer | None,

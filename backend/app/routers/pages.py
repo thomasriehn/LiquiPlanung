@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
@@ -9,6 +10,7 @@ from .. import models
 from ..database import get_db
 from ..security import (
     aktueller_benutzer,
+    darf_bestellfreigabe,
     ist_admin,
     mandant_oder_403,
     sichere_mandanten_liste,
@@ -62,8 +64,11 @@ def startseite(request: Request, db: Session = Depends(get_db)):
 
 
 def _mandanten_seite(
-    request: Request, db: Session, mandant_id: int, vorlage: str, extra: dict | None = None
+    request: Request, db: Session, mandant_id: int, vorlage: str,
+    extra: dict | Callable[[models.Benutzer], dict] | None = None,
 ):
+    """Mandantenseite; `extra` ergänzt den Kontext (auch als Funktion des
+    angemeldeten Benutzers, z. B. für benutzerbezogene Rechte)."""
     benutzer = _benutzer_oder_login(request, db)
     if benutzer is None:
         return RedirectResponse("/login", status_code=303)
@@ -76,6 +81,8 @@ def _mandanten_seite(
         # gemeinsame Spaltenansicht von Plan und Budget (je Benutzer gespeichert)
         "ansicht": (benutzer.einstellungen or {}).get("ansicht", "tage"),
     }
+    if callable(extra):
+        extra = extra(benutzer)
     if extra:
         kontext.update(extra)
     return templates.TemplateResponse(request, vorlage, kontext)
@@ -99,6 +106,19 @@ def import_seite(request: Request, mandant_id: int, db: Session = Depends(get_db
 @router.get("/mandanten/{mandant_id}/posten")
 def posten_seite(request: Request, mandant_id: int, db: Session = Depends(get_db)):
     return _mandanten_seite(request, db, mandant_id, "posten.html")
+
+
+@router.get("/mandanten/{mandant_id}/bestellungen")
+def bestellungen_seite(request: Request, mandant_id: int, db: Session = Depends(get_db)):
+    from ..services import systemeinstellungen
+
+    return _mandanten_seite(
+        request, db, mandant_id, "bestellungen.html",
+        lambda benutzer: {
+            "darf_freigeben": darf_bestellfreigabe(benutzer),
+            "ki_aktiv": systemeinstellungen.ki_zugang(db) is not None,
+        },
+    )
 
 
 @router.get("/mandanten/{mandant_id}/budget")
@@ -155,6 +175,19 @@ def mandanten_wizard_seite(request: Request, db: Session = Depends(get_db)):
         return RedirectResponse("/", status_code=303)
     return templates.TemplateResponse(
         request, "wizard.html", {"benutzer": benutzer, "ist_admin": True}
+    )
+
+
+@router.get("/system")
+def system_seite(request: Request, db: Session = Depends(get_db)):
+    """Systemeinstellungen (Microsoft Graph, KI-Zugang, lokale Ablage) – nur Admin."""
+    benutzer = _benutzer_oder_login(request, db)
+    if benutzer is None:
+        return RedirectResponse("/login", status_code=303)
+    if not ist_admin(benutzer):
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(
+        request, "system.html", {"benutzer": benutzer, "ist_admin": True}
     )
 
 

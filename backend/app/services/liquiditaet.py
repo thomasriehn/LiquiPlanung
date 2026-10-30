@@ -17,7 +17,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import models
 from ..models import PostenArt, PostenStatus, Richtung
@@ -250,6 +250,34 @@ class MonatsBudgets:
         return (b.betrag_netto, b.aufteilung) if b is not None else None
 
 
+BESTELL_KEY = "TERMIN:BESTELLUNG"   # Planzeile für Bestellungen ohne Konto
+
+
+def bestell_plan_status(mandant: models.Mandant, bestellungen: str | None) -> set[str] | None:
+    """Bestellstatus, deren offener Rest geplant wird (ABGELOEST wird gesondert
+    behandelt). None = gar keine Bestellungen ("KEINE")."""
+    if bestellungen == "KEINE":
+        return None
+    if bestellungen == "FREIGEGEBEN":
+        return {models.BestellStatus.FREIGEGEBEN.value}
+    if bestellungen is None:
+        status = {models.BestellStatus.FREIGEGEBEN.value}
+        # Mandantenschalter (Standard an): auch noch nicht freigegebene einplanen
+        if getattr(mandant, "bestellungen_offen_einplanen", True) is not False:
+            status.add(models.BestellStatus.OFFEN.value)
+        return status
+    raise ValueError(f"Unbekannter Bestellfilter: {bestellungen}")
+
+
+def bestellung_rest(b: models.Bestellung) -> Decimal:
+    """Noch offener Bruttobetrag einer Bestellung: Brutto abzüglich der
+    Teilzahlungen (nicht abschließende Ablösungen)."""
+    teil = sum(
+        (a.betrag for a in b.abloesungen if not a.abschliessend), Decimal("0")
+    )
+    return _brutto(b.betrag_netto, b.ust_satz) - teil
+
+
 def plan_fluesse(
     db: Session,
     mandant: models.Mandant,
@@ -259,6 +287,9 @@ def plan_fluesse(
     nur_offen: bool = False,
     szenario: models.Szenario | None = None,
     gerollt: dict[Key, Decimal] | None = None,
+    mit_budget: bool = True,
+    bestellungen: str | None = None,
+    ohne_bestellung_id: int | None = None,
 ) -> dict[Key, dict[date, Decimal]]:
     """Planzahlungen je Konto/Tag für das Fenster [start, ende].
 
@@ -271,17 +302,86 @@ def plan_fluesse(
     szenario:  Was-wäre-wenn-Faktoren (Einzahlungen, budgetbasierte Auszahlungen,
                Debitorenverzögerung); None = Basisplan.
     gerollt:   nimmt je Planschlüssel die auf den Rolltag verschobenen
-               überfälligen Postenbeträge auf (für manuelle Verschiebungen).
+               überfälligen Posten-/Bestellbeträge auf (für manuelle Verschiebungen).
+    mit_budget: False = nur explizite Flüsse (ohne Budget/Restbudget).
+    bestellungen: None = Mandantenstandard (freigegebene, bei
+               `bestellungen_offen_einplanen` auch offene), "FREIGEGEBEN" = nur
+               freigegebene, "KEINE" = gar keine; abgelöste stets wie bezahlte Posten.
+    ohne_bestellung_id: diese Bestellung auslassen (Freigabeprüfung).
     """
     heute = heute or start
-    bl = mandant.bundesland
-    plan: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
     konten = _lade_konten(db, mandant.id)
     konto_by_id = {k.id: k for k in konten}
 
-    from .insolvenzgeld import igeld_fenster, termin_entlastung
+    from .insolvenzgeld import igeld_fenster
 
     igeld = igeld_fenster(mandant)
+    bestell_status = bestell_plan_status(mandant, bestellungen)
+    # Projektion: was nur_offen auslässt (bezahlte Posten, vergangene Dauerraten/
+    # Termine, abgelöste Bestellungen), an seiner Stelle in der vollen Sicht
+    ausgelassen: dict[Key, dict[date, Decimal]] | None = (
+        defaultdict(lambda: defaultdict(Decimal)) if nur_offen and mit_budget else None
+    )
+    plan = _explizite_fluesse(
+        db, mandant, konto_by_id, start, ende, heute, nur_offen, szenario, gerollt,
+        igeld, bestell_status, ohne_bestellung_id, ausgelassen,
+    )
+
+    # 4) Budget mit Restbudget-Logik
+    if mit_budget:
+        verbrauch = None
+        if ausgelassen is not None:
+            # Restbudget wie in der vollen Sicht: Erledigtes der Woche verbraucht das
+            # Budget weiter – sonst bläht es sich in der Projektion wieder auf und
+            # zählt neben dem Ist doppelt. Offene Posten verbrauchen es dort, wo die
+            # Projektion sie führt (gerollt: nächster Bankarbeitstag nach heute).
+            verbrauch = defaultdict(lambda: defaultdict(Decimal))
+            for quelle in (plan, ausgelassen):
+                for key, tageswerte in quelle.items():
+                    for d, v in tageswerte.items():
+                        verbrauch[key][d] += v
+        _budget_einarbeiten(db, mandant, konto_by_id, plan, start, ende, szenario, igeld,
+                            verbrauch=verbrauch)
+
+    if nur_offen:
+        # Projektionssicht: Finanz-, Info- und nicht liquiditätswirksame Konten raus
+        for key in list(plan.keys()):
+            if isinstance(key, int):
+                k = konto_by_id.get(key)
+                if k is None:
+                    continue
+                if not k.liquiditaetswirksam or k.typ in (
+                    models.KontoTyp.BANK.value,
+                    models.KontoTyp.KASSE.value,
+                ):
+                    del plan[key]
+    return plan
+
+
+def _explizite_fluesse(
+    db: Session,
+    mandant: models.Mandant,
+    konto_by_id: dict[int, models.Konto],
+    start: date,
+    ende: date,
+    heute: date,
+    nur_offen: bool,
+    szenario: models.Szenario | None,
+    gerollt: dict[Key, Decimal] | None,
+    igeld: tuple[date, date] | None,
+    bestell_status: set[str] | None,
+    ohne_bestellung_id: int | None,
+    ausgelassen: dict[Key, dict[date, Decimal]] | None = None,
+) -> dict[Key, dict[date, Decimal]]:
+    """Explizite Planflüsse (Schritte 1–3b von plan_fluesse, ohne Budget).
+
+    ausgelassen: nimmt bei nur_offen die als erledigt ausgelassenen Flüsse an ihrem
+                 Tag der vollen Sicht auf (Restbudget der Projektion)."""
+    bl = mandant.bundesland
+    plan: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+
+    from .insolvenzgeld import termin_entlastung
+
     szenario_faktor = _szenario_aufloeser(szenario)
     verzoegerung = szenario.debitoren_verzoegerung_tage if szenario else 0
 
@@ -308,7 +408,7 @@ def plan_fluesse(
         if p.art == PostenArt.DEBITOR.value and verzoegerung:
             zahltag = zahltag + timedelta(days=verzoegerung)
         if p.status == PostenStatus.BEZAHLT.value:
-            if nur_offen:
+            if nur_offen and ausgelassen is None:
                 continue
             if p.bezahlt_am is None or p.bezahlt_am < start:
                 continue
@@ -328,6 +428,9 @@ def plan_fluesse(
         else:
             betrag = -grundbetrag
         key: Key = p.konto_id if p.konto_id is not None else f"TERMIN:OP_{p.art}"
+        if nur_offen and p.status == PostenStatus.BEZAHLT.value:
+            ausgelassen[key][d] += betrag   # bezahlt: nur fürs Restbudget
+            continue
         plan[key][d] += betrag
         if gerollt is not None and p.status != PostenStatus.BEZAHLT.value and d == roll_ziel \
                 and zahltag < d:
@@ -347,7 +450,7 @@ def plan_fluesse(
             d = naechster_bankarbeitstag(roh, bl)
             if d < start or d > ende:
                 continue
-            if nur_offen and d <= heute:
+            if nur_offen and d <= heute and ausgelassen is None:
                 continue
             # Insolvenzgeld: Personal-/SV-Dauerbuchungen im Zeitraum entfallen
             # (Nettolöhne über Igeld/Vorfinanzierung, SV-Beiträge nach § 175 SGB III)
@@ -365,6 +468,9 @@ def plan_fluesse(
             else:
                 betrag = -db_.betrag_brutto
             key = db_.konto_id if db_.konto_id is not None else f"TERMIN:DAUER_{db_.art}"
+            if nur_offen and d <= heute:
+                ausgelassen[key][d] += betrag   # vergangen: nur fürs Restbudget
+                continue
             plan[key][d] += betrag
 
     # 3) Zahlungstermine (SV/Steuern); betrag > 0 = Auszahlung
@@ -376,9 +482,10 @@ def plan_fluesse(
         )
     )
     for t in termine:
-        if nur_offen and (
+        erledigt = nur_offen and (
             t.datum <= heute or t.status == models.TerminStatus.ERLEDIGT.value
-        ):
+        )
+        if erledigt and ausgelassen is None:
             continue
         betrag = t.betrag
         if igeld:
@@ -386,23 +493,51 @@ def plan_fluesse(
             if betrag <= 0:
                 continue
         key = _termin_key(t.typ, t.konto_id)
+        if erledigt:
+            ausgelassen[key][t.datum] += -betrag   # nur fürs Restbudget
+            continue
         plan[key][t.datum] += -betrag
 
-    # 4) Budget mit Restbudget-Logik
-    _budget_einarbeiten(db, mandant, konto_by_id, plan, start, ende, szenario, igeld)
-
-    if nur_offen:
-        # Projektionssicht: Finanz-, Info- und nicht liquiditätswirksame Konten raus
-        for key in list(plan.keys()):
-            if isinstance(key, int):
-                k = konto_by_id.get(key)
-                if k is None:
+    # 3b) Bestellungen: brutto zum erwarteten Zahldatum, vor dem Budget (verbrauchen
+    #     das Restbudget ihres Kontos); kein Szenariofaktor (wie Kreditor-Posten)
+    if bestell_status is not None:
+        abgeloest = models.BestellStatus.ABGELOEST.value
+        bestellungen = db.scalars(
+            select(models.Bestellung)
+            .options(selectinload(models.Bestellung.abloesungen))
+            .where(
+                models.Bestellung.mandant_id == mandant.id,
+                models.Bestellung.status.in_(sorted(bestell_status | {abgeloest})),
+            )
+        )
+        for b in bestellungen:
+            if b.id == ohne_bestellung_id:
+                continue
+            key = b.konto_id if b.konto_id is not None else BESTELL_KEY
+            if b.status == abgeloest:
+                # wie ein bezahlter Posten: voller Betrag (Plan − Ist zeigt die
+                # Minderlieferung), nie in der Projektion; durch eine Rechnung
+                # abgelöst trägt der offene Posten die Zahlung
+                if (b.abgeloest_durch == models.AbloeseArt.RECHNUNG.value
+                        or b.abgeloest_am is None or b.abgeloest_am < start
+                        or (nur_offen and ausgelassen is None)):
                     continue
-                if not k.liquiditaetswirksam or k.typ in (
-                    models.KontoTyp.BANK.value,
-                    models.KontoTyp.KASSE.value,
-                ):
-                    del plan[key]
+                tag = min(b.zahldatum, b.abgeloest_am)
+                d = tag if tag >= start else naechster_bankarbeitstag(start, bl)
+                if d > ende:
+                    continue
+                (ausgelassen if nur_offen else plan)[key][d] -= _brutto(b.betrag_netto, b.ust_satz)
+                continue
+            rest = bestellung_rest(b)
+            if rest <= 0:
+                continue
+            grenze = max(start, heute + timedelta(days=1)) if nur_offen else max(start, heute)
+            d = b.zahldatum if b.zahldatum >= grenze else roll_ziel
+            if d > ende:
+                continue
+            plan[key][d] -= rest
+            if gerollt is not None and d == roll_ziel and b.zahldatum < d:
+                gerollt[key] = gerollt.get(key, Decimal("0")) - rest
     return plan
 
 
@@ -789,8 +924,14 @@ def _budget_einarbeiten(
     ende: date,
     szenario: models.Szenario | None = None,
     igeld: tuple[date, date] | None = None,
+    verbrauch: dict[Key, dict[date, Decimal]] | None = None,
 ) -> None:
+    """Budget je Konto und Woche als Restbudget in `plan` einarbeiten.
+
+    verbrauch: explizite Flüsse, die das Wochenbudget verbrauchen (Standard: `plan`
+               selbst); die Projektion übergibt die volle Sicht."""
     bl = mandant.bundesland
+    explizit_quelle = plan if verbrauch is None else verbrauch
     monat_budget = MonatsBudgets(
         db.scalars(select(models.Budget).where(models.Budget.mandant_id == mandant.id))
     )
@@ -853,7 +994,7 @@ def _budget_einarbeiten(
             if gesamt <= 0:
                 continue
             # Restbudget: bereits explizit geplante Beträge dieses Kontos in der Woche
-            tageswerte = plan.get(konto_id, {})
+            tageswerte = explizit_quelle.get(konto_id, {})
             explizit = sum(
                 (abs(tageswerte.get(w_von + timedelta(days=i), Decimal("0"))) for i in range(7)),
                 Decimal("0"),
@@ -919,6 +1060,8 @@ def gruppen_aufloeser(konto_by_id: dict[int, models.Konto], gruppen: list[models
         if key.startswith("TERMIN:OP_DEBITOR") or key.startswith("TERMIN:DAUER_DEBITOR"):
             return gruppe_by_code.get("E_SONST")
         if key.startswith("TERMIN:OP_") or key.startswith("TERMIN:DAUER_"):
+            return gruppe_by_code.get("A_SONST")
+        if key == BESTELL_KEY:
             return gruppe_by_code.get("A_SONST")
         if key.startswith("TERMIN:"):
             return gruppe_by_code.get("A_STEUER")
@@ -1153,6 +1296,7 @@ def berechne_plan(
                 "TERMIN:OP_DEBITOR": "Forderungen (ohne Konto)",
                 "TERMIN:DAUER_KREDITOR": "Dauerbuchungen (ohne Konto)",
                 "TERMIN:DAUER_DEBITOR": "Dauererlöse (ohne Konto)",
+                BESTELL_KEY: "Bestellungen (ohne Konto)",
             }
             nummer, name, ust = "", benennung.get(key, str(key)), None
         return {

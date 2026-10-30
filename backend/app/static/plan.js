@@ -357,25 +357,7 @@ function zeileZumKey(key) {
   return null;
 }
 
-function isoTag(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-function tagPlus(iso, n) {
-  const d = new Date(iso + "T12:00:00");
-  d.setDate(d.getDate() + n);
-  return isoTag(d);
-}
-function montagVon(iso) {
-  const d = new Date(iso + "T12:00:00");
-  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-  return isoTag(d);
-}
-function kalenderwoche(iso) {
-  const d = new Date(iso + "T12:00:00");
-  d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7));           // Donnerstag der Woche
-  const jan4 = new Date(d.getFullYear(), 0, 4, 12);
-  return 1 + Math.round(((d - jan4) / 86400000 - 3 + ((jan4.getDay() + 6) % 7)) / 7);
-}
+// isoTag, tagPlus, montagVon, kalenderwoche: gemeinsam in app.js
 
 function zeitraumText(sp) {
   const ansicht = document.getElementById("ansicht").value;
@@ -425,6 +407,38 @@ async function zdZeichnen() {
   if (/^\d+$/.test(key) || key.startsWith("TERMIN:")) {
     inhalt.appendChild(await verschiebungsListe(zeile));
   }
+  if (/^\d+$/.test(key)) inhalt.appendChild(await bestellAbschnitt(zeile, sp));
+}
+
+// ---- Bestellungen, die im Zeitraum auf diesem Konto im Plan stehen ----
+async function bestellAbschnitt(zeile, sp) {
+  const box = document.createElement("div");
+  box.className = "zd-abschnitt";
+  let liste = [];
+  try {
+    liste = await api("GET", `/api/mandanten/${MANDANT_ID}/plan/bestellungen?konto_id=${encodeURIComponent(zeile.key)}` +
+      `&von=${sp.tage[0]}&bis=${sp.tage[sp.tage.length - 1]}`);
+  } catch (e) { return box; }                 // Abschnitt ist optional
+  if (!liste || !liste.length) return box;
+  const STATUS = { OFFEN: ["offen", "zur Freigabe"], FREIGEGEBEN: ["freigegeben", "freigegeben"],
+                   ABGELOEST: ["abgeloest", "abgelöst"] };
+  const summe = liste.reduce((s, b) => s + Math.abs(b.betrag ?? b.rest_geplant ?? b.betrag_brutto ?? 0), 0);
+  box.innerHTML = `<h4>Bestellungen <span class="hinweis">(brutto, ${eur(summe)} €)</span></h4><ul class="zd-liste"></ul>`;
+  const ul = box.querySelector("ul");
+  for (const b of liste) {
+    const [klasse, text] = STATUS[b.status] || ["neutral", b.status_text || b.status || ""];
+    const tag = b.plan_tag || b.tag || b.zahldatum;
+    const betrag = Math.abs(b.betrag ?? b.rest_geplant ?? b.betrag_brutto ?? 0);
+    const li = document.createElement("li");
+    li.innerHTML = `<span>${tag ? datumVoll(tag) : ""}</span>
+      <span><strong>${esc(b.kreditor || "")}</strong>${b.bestellnummer ? ` <span class="klein">Nr. ${esc(b.bestellnummer)}</span>` : ""}</span>
+      <span class="zahl">${eur(betrag)} €</span>
+      <span class="status-badge ${klasse}">${esc(b.status_text || text)}</span>
+      ${tag && b.zahldatum && tag !== b.zahldatum ? `<span class="hinweis">fällig ${datumVoll(b.zahldatum)} (überfällig, vorgetragen)</span>` : ""}
+      <a href="/mandanten/${MANDANT_ID}/bestellungen?bestellung=${encodeURIComponent(b.id)}" style="margin-left:auto">öffnen</a>`;
+    ul.appendChild(li);
+  }
+  return box;
 }
 
 // ---- Ist-Buchungen ----

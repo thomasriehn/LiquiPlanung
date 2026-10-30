@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block titel %}System – LiquiPlanung{% endblock %}
+{% block inhalt %}
+<div class="seite">
+  <h1>Systemeinstellungen</h1>
+  <p class="hinweis">Gilt für alle Mandanten. Geheimnisse (Client-Secret, API-Key) werden verschlüsselt
+    gespeichert und nie wieder angezeigt; Umgebungsvariablen haben Vorrang.</p>
+  <div id="sys-schluessel-warnung"></div>
+
+  <h2>Microsoft Graph (SharePoint)</h2>
+  <p class="hinweis">App-Registrierung in Microsoft Entra ID (Client-Credentials-Flow, ohne Benutzeranmeldung).
+    Benötigte <strong>Anwendungsberechtigungen</strong> mit Administratorzustimmung: <em>Sites.Selected</em>
+    (nur freigegebene Websites, empfohlen) oder <em>Sites.ReadWrite.All</em>; zum Durchsuchen aller
+    Websites zusätzlich <em>Sites.Read.All</em>.</p>
+  <form id="sys-graph-form" class="formular-zeilen" autocomplete="off">
+    <label>Verzeichnis-(Tenant-)ID
+      <input name="graph_tenant_id" spellcheck="false" placeholder="z. B. 2f7c…-…-…">
+    </label>
+    <label>Anwendungs-(Client-)ID
+      <input name="graph_client_id" spellcheck="false" placeholder="z. B. 8a1d…-…-…">
+      <span class="hinweis">in Entra ID: Anwendungs-ID (Client-ID), nicht die Objekt-ID</span>
+    </label>
+    <label>Client-Secret (Wert)
+      <input name="graph_client_secret" type="password" autocomplete="new-password" spellcheck="false">
+      <span class="hinweis" id="sys-graph-secret-status"></span>
+    </label>
+    <div class="werkzeuge" style="grid-column:1/-1;margin:0;border:none;padding:0">
+      <button type="submit">Speichern</button>
+      <button type="button" class="sekundaer" id="sys-graph-test">Verbindung testen</button>
+      <button type="button" class="sekundaer gefahr-text" id="sys-graph-secret-entfernen">Secret entfernen</button>
+      <span class="hinweis" id="sys-graph-status"></span>
+    </div>
+  </form>
+  <div id="sys-graph-ergebnis"></div>
+
+  <h2>KI-Zugang (OpenAI-kompatibel)</h2>
+  <p class="hinweis">Zum Auslesen von Bestellungen (Kreditor, Beträge, Daten, Konto). Jede Schnittstelle im
+    Format <code>/v1/chat/completions</code> funktioniert, z. B. OpenAI, Azure OpenAI, Mistral oder ein
+    selbst betriebener Server (Ollama, vLLM).</p>
+  <div class="warnung"><strong>Datenschutz:</strong> Bestelldokumente (Text bzw. Seitenbilder) werden zum
+    Auslesen an den hier eingetragenen KI-Dienst übertragen. Nur Dienste mit Auftragsverarbeitungsvertrag
+    (AVV) bzw. selbst betriebene Modelle verwenden.</div>
+  <form id="sys-ki-form" class="formular-zeilen" autocomplete="off">
+    <label>API-URL<input name="llm_url" spellcheck="false" placeholder="https://api.openai.com/v1"></label>
+    <label>Modell<input name="llm_modell" spellcheck="false" placeholder="gpt-4o-mini"></label>
+    <label>API-Key
+      <input name="llm_api_key" type="password" autocomplete="new-password" spellcheck="false">
+      <span class="hinweis" id="sys-ki-key-status"></span>
+    </label>
+    <label class="cb" title="Gescannte PDFs und Fotos zusätzlich als Seitenbilder senden – nur für Modelle mit Bildeingabe">
+      <input type="checkbox" name="llm_vision"> Seitenbilder mitsenden (Vision-Modell)</label>
+    <div class="werkzeuge" style="grid-column:1/-1;margin:0;border:none;padding:0">
+      <button type="submit">Speichern</button>
+      <button type="button" class="sekundaer" id="sys-ki-test">Verbindung testen</button>
+      <button type="button" class="sekundaer gefahr-text" id="sys-ki-key-entfernen">API-Key entfernen</button>
+      <span class="hinweis" id="sys-ki-status"></span>
+    </div>
+  </form>
+  <div id="sys-ki-ergebnis"></div>
+
+  <h2>Lokale Ablage</h2>
+  <p class="hinweis">Bestelldateien von Mandanten mit lokaler Ablage liegen unterhalb dieses Verzeichnisses
+    (je Mandant ein Unterordner, Auswahl unter Mandant › Einstellungen). Einstellbar über die
+    Umgebungsvariablen <code>ABLAGE_VERZEICHNIS</code> und <code>ABLAGE_MAX_MB</code>; das Verzeichnis
+    gehört in die Datensicherung.</p>
+  <div class="formular-zeilen">
+    <label>Verzeichnis<div class="bs-wert sp-id" id="sys-ablage-verzeichnis" style="font-size:12.5px">–</div></label>
+    <label>Max. Dateigröße<div class="bs-wert" id="sys-ablage-max">–</div></label>
+  </div>
+</div>
+{% endblock %}
+{% block skripte %}
+<script src="/static/system.js?v={{ static_version }}"></script>
+{% endblock %}
