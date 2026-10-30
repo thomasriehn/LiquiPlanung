@@ -12,7 +12,7 @@ from . import models
 from .config import get_settings
 from .database import Base, SessionLocal, engine
 from .routers import api, auth, pages
-from .security import hash_passwort
+from .security import PasswortWechselErforderlich, hash_passwort
 
 
 def ensure_schema() -> None:
@@ -162,6 +162,10 @@ def create_app() -> FastAPI:
         max_age=settings.session_max_age,
         same_site="lax",
     )
+
+    @app.exception_handler(PasswortWechselErforderlich)
+    async def passwort_wechsel(request: Request, exc):
+        return RedirectResponse("/profil", status_code=303)
 
     @app.exception_handler(401)
     async def nicht_angemeldet(request: Request, exc):

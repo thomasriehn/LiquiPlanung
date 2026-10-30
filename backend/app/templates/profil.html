@@ -3,8 +3,12 @@
 {% block inhalt %}
 <div class="seite">
   <h1>Profil – {{ benutzer.name }}</h1>
-  <p class="hinweis">{{ benutzer.email }} · Rolle: {{ benutzer.rolle }}</p>
+  <p class="hinweis">{{ benutzer.email }} · Rolle: {{ {"ADMIN": "Admin", "BEARBEITER": "Bearbeiter", "LESER": "Leser"}.get(benutzer.rolle, benutzer.rolle) }}</p>
 
+  {% if benutzer.passwort_aendern %}
+  <div class="warnung">Ihr Passwort wurde von einem Administrator gesetzt. Bitte legen Sie
+    jetzt ein eigenes Passwort fest – erst danach sind die übrigen Seiten erreichbar.</div>
+  {% endif %}
   <h2>Passwort ändern</h2>
   <form id="pw-form" class="formular-zeilen">
     <label>Aktuelles Passwort<input type="password" name="aktuelles_passwort" required></label>
@@ -80,6 +84,7 @@ document.getElementById("pw-form").addEventListener("submit", async (e) => {
     });
     toast("Passwort geändert.", false);
     e.target.reset();
+    {% if benutzer.passwort_aendern %}setTimeout(() => { location.href = "/"; }, 900);{% endif %}
   } catch (err) { toast(err.message); }
 });
 

@@ -130,6 +130,8 @@ class Benutzer(Base):
     totp_geheimnis: Mapped[str | None] = mapped_column(String(64), nullable=True)
     totp_aktiv: Mapped[bool] = mapped_column(Boolean, default=False)
     totp_letzter_schritt: Mapped[int] = mapped_column(Integer, default=0)
+    # vom Administrator gesetztes Passwort: beim nächsten Login eigenes festlegen
+    passwort_aendern: Mapped[bool] = mapped_column(Boolean, default=False)
     erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     mandanten: Mapped[list["Mandant"]] = relationship(

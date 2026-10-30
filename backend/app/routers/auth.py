@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..database import get_db
-from ..security import audit, pruefe_passwort
+from ..security import audit, pruefe_passwort, sitzung_starten
 from .pages import templates
 
 router = APIRouter()
@@ -41,10 +41,10 @@ def login(
         # Passwort korrekt, aber noch keine Sitzung: zweiter Faktor erforderlich
         request.session["zwei_faktor_benutzer_id"] = benutzer.id
         return RedirectResponse("/login/2fa", status_code=303)
-    request.session["benutzer_id"] = benutzer.id
+    sitzung_starten(request, benutzer)
     audit(db, benutzer, None, "LOGIN")
     db.commit()
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse("/profil" if benutzer.passwort_aendern else "/", status_code=303)
 
 
 @router.get("/login/2fa")
@@ -79,11 +79,10 @@ def zwei_faktor_pruefen(
             status_code=401,
         )
     benutzer.totp_letzter_schritt = schritt
-    request.session.clear()
-    request.session["benutzer_id"] = benutzer.id
+    sitzung_starten(request, benutzer)
     audit(db, benutzer, None, "LOGIN")
     db.commit()
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse("/profil" if benutzer.passwort_aendern else "/", status_code=303)
 
 
 @router.get("/logout")

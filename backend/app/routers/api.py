@@ -5,11 +5,11 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from .. import database, models
@@ -3424,16 +3424,23 @@ class PasswortWechsel(BaseModel):
 @router.post("/profil/passwort")
 def eigenes_passwort_aendern(
     daten: PasswortWechsel,
+    request: Request,
     benutzer=Depends(aktueller_benutzer),
     db: Session = Depends(get_db),
 ):
-    from ..security import pruefe_passwort
+    """Eigenes Passwort ändern; beendet Anmeldungen auf anderen Geräten und
+    hebt einen vom Administrator verlangten Passwortwechsel auf."""
+    from ..security import passwort_marke, pruefe_passwort
 
     if not pruefe_passwort(daten.aktuelles_passwort, benutzer.passwort_hash):
         raise HTTPException(403, "Aktuelles Passwort falsch")
     if len(daten.neues_passwort) < 8:
         raise HTTPException(422, "Passwort muss mindestens 8 Zeichen haben")
+    if daten.neues_passwort == daten.aktuelles_passwort:
+        raise HTTPException(422, "Das neue Passwort muss sich vom bisherigen unterscheiden")
     benutzer.passwort_hash = hash_passwort(daten.neues_passwort)
+    benutzer.passwort_aendern = False
+    request.session["pw"] = passwort_marke(benutzer)     # diese Sitzung bleibt gültig
     audit(db, benutzer, None, "PASSWORT_GEAENDERT")
     db.commit()
     return {"ok": True}
@@ -3446,6 +3453,7 @@ def profil_abrufen(benutzer=Depends(aktueller_benutzer)):
         "name": benutzer.name,
         "rolle": benutzer.rolle,
         "totp_aktiv": benutzer.totp_aktiv,
+        "passwort_aendern": benutzer.passwort_aendern,
     }
 
 
@@ -3608,6 +3616,7 @@ class BenutzerNeu(BaseModel):
     passwort: str
     rolle: str = "BEARBEITER"
     mandanten_ids: list[int] = []
+    passwort_aendern: bool = False      # beim ersten Login eigenes Passwort festlegen
 
 
 @router.get("/benutzer")
@@ -3621,6 +3630,7 @@ def benutzer_liste(admin=Depends(nur_admin), db: Session = Depends(get_db)):
             "rolle": b.rolle,
             "aktiv": b.aktiv,
             "totp_aktiv": b.totp_aktiv,
+            "passwort_aendern": b.passwort_aendern,
             "mandanten_ids": [m.id for m in b.mandanten],
         }
         for b in benutzer
@@ -3643,6 +3653,7 @@ def benutzer_anlegen(
         name=daten.name.strip(),
         passwort_hash=hash_passwort(daten.passwort),
         rolle=daten.rolle,
+        passwort_aendern=daten.passwort_aendern,
     )
     for mid in daten.mandanten_ids:
         m = db.get(models.Mandant, mid)
@@ -3654,6 +3665,9 @@ def benutzer_anlegen(
     return {"id": b.id}
 
 
+ROLLEN_TEXT = {"ADMIN": "Admin", "BEARBEITER": "Bearbeiter", "LESER": "Leser"}
+
+
 @router.patch("/benutzer/{benutzer_id}")
 def benutzer_aendern(
     benutzer_id: int,
@@ -3661,29 +3675,65 @@ def benutzer_aendern(
     admin=Depends(nur_admin),
     db: Session = Depends(get_db),
 ):
+    """Benutzer bearbeiten: Name, Rolle, Mandanten, aktiv, Passwort zurücksetzen
+    (optional mit Pflicht zum Passwortwechsel beim nächsten Login; bestehende
+    Anmeldungen enden) und 2FA zurücksetzen. Der letzte aktive Administrator
+    kann weder herabgestuft noch gesperrt werden."""
     b = db.get(models.Benutzer, benutzer_id)
     if b is None:
         raise HTTPException(404, "Benutzer nicht gefunden")
+    war_aktiver_admin = b.aktiv and b.rolle == models.Rolle.ADMIN.value
+    aenderungen = []
     for feld, wert in daten.items():
         if feld == "passwort":
             if len(str(wert)) < 8:
                 raise HTTPException(422, "Passwort muss mindestens 8 Zeichen haben")
             b.passwort_hash = hash_passwort(str(wert))
+            aenderungen.append("Passwort zurückgesetzt")
+        elif feld == "passwort_aendern":
+            if bool(wert) != b.passwort_aendern:
+                aenderungen.append("Passwortwechsel beim nächsten Login " + ("verlangt" if wert else "aufgehoben"))
+            b.passwort_aendern = bool(wert)
         elif feld == "rolle":
             if wert not in [r.value for r in models.Rolle]:
                 raise HTTPException(422, "Unbekannte Rolle")
+            if wert != b.rolle:
+                aenderungen.append(f"Rolle {ROLLEN_TEXT[b.rolle]} → {ROLLEN_TEXT[wert]}")
             b.rolle = wert
         elif feld == "mandanten_ids":
+            vorher = {m.id for m in b.mandanten}
             b.mandanten = [
                 m for mid in wert if (m := db.get(models.Mandant, mid)) is not None
             ]
+            if {m.id for m in b.mandanten} != vorher:
+                aenderungen.append("Mandanten")
         elif feld == "totp_zuruecksetzen" and wert:
             # Geräteverlust: Admin setzt 2FA zurück, Benutzer richtet neu ein
             b.totp_aktiv = False
             b.totp_geheimnis = None
             b.totp_letzter_schritt = 0
-        elif feld in {"name", "aktiv"}:
-            setattr(b, feld, wert)
-    audit(db, admin, None, "BENUTZER_GEAENDERT", b.email)
+            aenderungen.append("2FA zurückgesetzt")
+        elif feld == "aktiv":
+            if not wert and b.id == admin.id:
+                raise HTTPException(409, "Das eigene Konto kann nicht gesperrt werden")
+            if bool(wert) != b.aktiv:
+                aenderungen.append("entsperrt" if wert else "gesperrt")
+            b.aktiv = bool(wert)
+        elif feld == "name":
+            name = str(wert).strip()
+            if not name:
+                raise HTTPException(422, "Name darf nicht leer sein")
+            if name != b.name:
+                aenderungen.append("Name")
+            b.name = name
+    if war_aktiver_admin and not (b.aktiv and b.rolle == models.Rolle.ADMIN.value):
+        weitere = db.scalar(select(func.count()).select_from(models.Benutzer).where(
+            models.Benutzer.id != b.id, models.Benutzer.aktiv.is_(True),
+            models.Benutzer.rolle == models.Rolle.ADMIN.value))
+        if not weitere:
+            db.rollback()
+            raise HTTPException(409, "Mindestens ein aktiver Administrator muss erhalten bleiben")
+    audit(db, admin, None, "BENUTZER_GEAENDERT",
+          f"{b.email}: {', '.join(aenderungen)}" if aenderungen else b.email)
     db.commit()
     return {"ok": True}

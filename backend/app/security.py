@@ -31,14 +31,44 @@ def pruefe_passwort(passwort: str, gespeichert: str) -> bool:
         return False
 
 
+def passwort_marke(benutzer: models.Benutzer) -> str:
+    """Fingerabdruck des Passwort-Hashes in der Sitzung: wird das Passwort
+    geändert oder zurückgesetzt, sind bestehende Anmeldungen ungültig."""
+    return hashlib.sha256(benutzer.passwort_hash.encode()).hexdigest()[:16]
+
+
+def sitzung_starten(request: Request, benutzer: models.Benutzer) -> None:
+    request.session.clear()
+    request.session["benutzer_id"] = benutzer.id
+    request.session["pw"] = passwort_marke(benutzer)
+
+
+def sitzung_gueltig(request: Request, benutzer: models.Benutzer) -> bool:
+    marke = request.session.get("pw")
+    if marke is None:            # Sitzung aus einer älteren Version: übernehmen
+        request.session["pw"] = passwort_marke(benutzer)
+        return True
+    return hmac.compare_digest(marke, passwort_marke(benutzer))
+
+
+class PasswortWechselErforderlich(Exception):
+    """Seitenaufruf, solange ein vom Administrator gesetztes Passwort gilt."""
+
+
+# Solange `passwort_aendern` gesetzt ist, sind nur Profil-Aufrufe erlaubt
+PASSWORTWECHSEL_ERLAUBT = ("/api/profil",)
+
+
 def aktueller_benutzer(request: Request, db: Session = Depends(get_db)) -> models.Benutzer:
     benutzer_id = request.session.get("benutzer_id")
     if benutzer_id is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Nicht angemeldet")
     benutzer = db.get(models.Benutzer, benutzer_id)
-    if benutzer is None or not benutzer.aktiv:
+    if benutzer is None or not benutzer.aktiv or not sitzung_gueltig(request, benutzer):
         request.session.clear()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Nicht angemeldet")
+    if benutzer.passwort_aendern and not request.url.path.startswith(PASSWORTWECHSEL_ERLAUBT):
+        raise HTTPException(403, "Bitte zuerst unter „Profil“ ein eigenes Passwort festlegen")
     return benutzer
 
 

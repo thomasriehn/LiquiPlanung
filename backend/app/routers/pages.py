@@ -30,14 +30,18 @@ templates.env.globals["static_version"] = str(
 router = APIRouter()
 
 
-def _benutzer_oder_login(request: Request, db: Session) -> models.Benutzer | None:
+def _benutzer_oder_login(request: Request, db: Session, profil: bool = False) -> models.Benutzer | None:
+    from ..security import PasswortWechselErforderlich, sitzung_gueltig
+
     benutzer_id = request.session.get("benutzer_id")
     if benutzer_id is None:
         return None
     benutzer = db.get(models.Benutzer, benutzer_id)
-    if benutzer is None or not benutzer.aktiv:
+    if benutzer is None or not benutzer.aktiv or not sitzung_gueltig(request, benutzer):
         request.session.clear()
         return None
+    if benutzer.passwort_aendern and not profil:
+        raise PasswortWechselErforderlich()
     return benutzer
 
 
@@ -131,7 +135,7 @@ def einstellungen_seite(request: Request, mandant_id: int, db: Session = Depends
 
 @router.get("/profil")
 def profil_seite(request: Request, db: Session = Depends(get_db)):
-    benutzer = _benutzer_oder_login(request, db)
+    benutzer = _benutzer_oder_login(request, db, profil=True)
     if benutzer is None:
         return RedirectResponse("/login", status_code=303)
     return templates.TemplateResponse(

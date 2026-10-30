@@ -156,7 +156,13 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   (OP-Liste, Dauerschuldverhältnisse, optional Bankdaten, Buchungsstapel, BWA).
   Admins löschen Mandanten samt aller Daten endgültig
   (Bestätigung über den Kurznamen; Audit-Log bleibt erhalten).
-- **Mehrbenutzerbetrieb**: Rollen Admin/Bearbeiter/Leser, Mandantenzuordnung, Audit-Log,
+- **Mehrbenutzerbetrieb**: Rollen Admin/Bearbeiter/Leser, Mandantenzuordnung, Audit-Log.
+  In der Benutzerverwaltung öffnet „bearbeiten“ einen Dialog für Name, **Rolle** und
+  Mandanten sowie zum **Zurücksetzen des Passworts** (Generator für ein Zufallspasswort,
+  optional mit Pflicht zum eigenen Passwort beim nächsten Login – bis dahin ist nur das
+  Profil erreichbar; bestehende Anmeldungen des Benutzers werden beendet). Der letzte
+  aktive Administrator kann weder herabgestuft noch gesperrt werden, das eigene Konto
+  nicht gesperrt;
   Profil mit Passwortwechsel und optionaler Zwei-Faktor-Anmeldung (TOTP mit
   QR-Einrichtung; Admin-Reset bei Geräteverlust).
 

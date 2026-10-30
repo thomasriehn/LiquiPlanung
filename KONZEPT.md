@@ -435,6 +435,17 @@ Konten bleiben dann ohne Gruppe erhalten.
 - Rollen: `ADMIN` (alles, Benutzerverwaltung), `BEARBEITER` (zugeordnete Mandanten
   schreibend), `LESER` (lesend).
 - Session-Cookies signiert (`SECRET_KEY` zwingend setzen), Passwort-Hashing PBKDF2.
+  Die Sitzung trägt einen Fingerabdruck des Passwort-Hashes: Nach einer
+  Passwortänderung (eigene oder Zurücksetzen durch den Admin) sind alle übrigen
+  Anmeldungen des Benutzers ungültig; die Sitzung, in der man das eigene Passwort
+  ändert, bleibt bestehen.
+- Benutzerverwaltung (Admin): Name, Rolle, Mandanten, Sperren, 2FA- und
+  Passwort-Reset. Mit `benutzer.passwort_aendern` (beim Anlegen bzw. Zurücksetzen
+  wählbar) muss der Benutzer beim nächsten Login ein eigenes, abweichendes Passwort
+  festlegen; bis dahin leiten Seiten auf das Profil um und die API antwortet außer
+  unter `/api/profil` mit 403. Der letzte aktive Administrator kann weder
+  herabgestuft noch gesperrt werden, das eigene Konto nicht gesperrt; Änderungen
+  stehen mit Details (z. B. „Rolle Bearbeiter → Leser“, nie das Passwort) im Audit-Log.
 - Betrieb hinter Reverse Proxy mit TLS empfohlen (siehe Deployment-Doku).
 
 ## 10. Ausblick (mögliche weitere Ausbaustufen)

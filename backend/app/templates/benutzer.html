@@ -19,6 +19,8 @@
         {% for m in mandanten %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
       </select>
     </label>
+    <label class="cb" style="display:flex;gap:8px;align-items:baseline"><input type="checkbox" name="passwort_aendern" checked>
+      <span>Passwort beim ersten Login ändern</span></label>
     <button type="submit">Anlegen</button>
   </form>
   <div style="height:10px"></div>
@@ -26,6 +28,49 @@
     <thead><tr><th>E-Mail</th><th>Name</th><th>Rolle</th><th>Mandanten</th><th>aktiv</th><th>2FA</th><th></th></tr></thead>
     <tbody id="tabelle"></tbody>
   </table>
+
+  <dialog id="bearbeiten-dialog" style="border:1px solid #c9d4e0;border-radius:8px;padding:18px 22px;width:min(620px, calc(100vw - 32px))">
+    <h3 style="margin-top:0" id="bd-titel">Benutzer bearbeiten</h3>
+    <form id="bd-stamm" class="formular-zeilen">
+      <label>Name<input name="name" required></label>
+      <label>Rolle
+        <select name="rolle">
+          <option value="BEARBEITER">Bearbeiter</option>
+          <option value="LESER">Leser</option>
+          <option value="ADMIN">Admin</option>
+        </select>
+      </label>
+      <label>Mandanten (Mehrfachauswahl)
+        <select name="mandanten_ids" multiple size="5">
+          {% for m in mandanten %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <p class="hinweis" id="bd-rollen-hinweis" style="margin:0"></p>
+      <button type="submit">Änderungen speichern</button>
+    </form>
+
+    <h4 style="margin:18px 0 6px">Passwort zurücksetzen</h4>
+    <div id="bd-passwort-eigen" class="hinweis" style="display:none">
+      Das eigene Passwort bitte unter <a href="/profil">Profil</a> ändern.
+    </div>
+    <form id="bd-passwort" class="formular-zeilen">
+      <label>Neues Passwort
+        <span style="display:flex;gap:6px">
+          <input name="passwort" type="text" minlength="8" required autocomplete="new-password"
+                 spellcheck="false" style="flex:1;font-family:ui-monospace,monospace">
+          <button type="button" class="sekundaer" id="bd-generieren" title="Zufälliges Passwort erzeugen">Generieren</button>
+        </span>
+      </label>
+      <label class="cb" style="display:flex;gap:8px;align-items:baseline"><input type="checkbox" name="passwort_aendern" checked>
+        <span>Benutzer muss das Passwort beim nächsten Login ändern</span></label>
+      <p class="hinweis" style="margin:0">Bestehende Anmeldungen des Benutzers werden beendet. Das
+        Passwort bitte auf sicherem Weg mitteilen.</p>
+      <button type="submit" class="gefahr">Passwort zurücksetzen</button>
+    </form>
+    <div class="werkzeuge" style="margin-top:14px;justify-content:flex-end">
+      <button type="button" class="sekundaer" id="bd-schliessen">Schließen</button>
+    </div>
+  </dialog>
 
   <h2>Sicherungen</h2>
   <p class="hinweis" id="backup-info"></p>
@@ -54,23 +99,33 @@
 {% block skripte %}
 <script>
 const MANDANTEN = { {% for m in mandanten %}"{{ m.id }}": "{{ m.name }}",{% endfor %} };
+const ICH = {{ benutzer.id }};
+const ROLLEN = { ADMIN: "Admin", BEARBEITER: "Bearbeiter", LESER: "Leser" };
+let benutzerListe = [];
+let bearbeitet = null;
 
 async function lade() {
-  const benutzer = await api("GET", "/api/benutzer");
+  benutzerListe = await api("GET", "/api/benutzer");
   const tb = document.getElementById("tabelle");
   tb.innerHTML = "";
-  for (const b of benutzer) {
+  for (const b of benutzerListe) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${esc(b.email)}</td><td>${esc(b.name)}</td><td>${esc(b.rolle)}</td>
+    tr.innerHTML = `<td>${esc(b.email)}${b.id === ICH ? ` <span class="klein">(Sie)</span>` : ""}</td>
+      <td>${esc(b.name)}</td><td>${esc(ROLLEN[b.rolle] || b.rolle)}</td>
       <td class="klein">${b.rolle === "ADMIN" ? "alle" : esc(b.mandanten_ids.map(id => MANDANTEN[id] || id).join(", ")) || "–"}</td>
-      <td>${b.aktiv ? "✓" : "–"}</td>
+      <td>${b.aktiv ? "✓" : "–"}${b.passwort_aendern ? ` <span class="sammel-vermerk" title="Muss beim nächsten Login ein eigenes Passwort festlegen">Passwortwechsel offen</span>` : ""}</td>
       <td>${b.totp_aktiv ? "✓" : "–"}</td>
-      <td><button class="sekundaer" data-aktion="sperren" data-id="${b.id}" data-aktiv="${b.aktiv}">${b.aktiv ? "sperren" : "entsperren"}</button>
+      <td style="white-space:nowrap"><button class="sekundaer" data-aktion="bearbeiten" data-id="${b.id}" title="Name, Rolle, Mandanten, Passwort">bearbeiten</button>
+        ${b.id === ICH ? "" : `<button class="sekundaer" data-aktion="sperren" data-id="${b.id}" data-aktiv="${b.aktiv}">${b.aktiv ? "sperren" : "entsperren"}</button>`}
         ${b.totp_aktiv ? `<button class="sekundaer" data-aktion="totp" data-id="${b.id}" title="Bei Geräteverlust: 2FA zurücksetzen">2FA zurücksetzen</button>` : ""}</td>`;
     tb.appendChild(tr);
   }
   tb.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
     try {
+      if (btn.dataset.aktion === "bearbeiten") {
+        dialogOeffnen(benutzerListe.find(b => String(b.id) === btn.dataset.id));
+        return;
+      }
       if (btn.dataset.aktion === "totp") {
         if (!confirm("2FA für diesen Benutzer zurücksetzen?")) return;
         await api("PATCH", `/api/benutzer/${btn.dataset.id}`, { totp_zuruecksetzen: true });
@@ -83,6 +138,92 @@ async function lade() {
   }));
 }
 
+// ---- Bearbeiten: Stammdaten, Rolle, Mandanten, Passwort zurücksetzen ----
+const dialog = document.getElementById("bearbeiten-dialog");
+const stammForm = document.getElementById("bd-stamm");
+const pwForm = document.getElementById("bd-passwort");
+
+function rollenHinweis() {
+  const rolle = stammForm.rolle.value;
+  const mandantenFeld = stammForm.querySelector("[name=mandanten_ids]");
+  mandantenFeld.disabled = rolle === "ADMIN";
+  const hinweise = {
+    ADMIN: "Admin: sieht alle Mandanten und verwaltet Benutzer, Kontenrahmen und Sicherungen.",
+    BEARBEITER: "Bearbeiter: darf die zugeordneten Mandanten bearbeiten.",
+    LESER: "Leser: sieht die zugeordneten Mandanten, ohne zu ändern.",
+  };
+  let text = hinweise[rolle];
+  if (bearbeitet && bearbeitet.id === ICH && rolle !== "ADMIN") {
+    text += " Achtung: Sie entziehen sich selbst die Administratorrechte.";
+  }
+  document.getElementById("bd-rollen-hinweis").textContent = text;
+}
+
+function dialogOeffnen(b) {
+  bearbeitet = b;
+  document.getElementById("bd-titel").textContent = `Benutzer bearbeiten – ${b.email}`;
+  stammForm.name.value = b.name;
+  stammForm.rolle.value = b.rolle;
+  for (const o of stammForm.querySelector("[name=mandanten_ids]").options) {
+    o.selected = b.mandanten_ids.includes(parseInt(o.value));
+  }
+  rollenHinweis();
+  pwForm.reset();
+  const eigen = b.id === ICH;
+  pwForm.style.display = eigen ? "none" : "";
+  document.getElementById("bd-passwort-eigen").style.display = eigen ? "" : "none";
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function dialogSchliessen() {
+  if (typeof dialog.close === "function") dialog.close(); else dialog.removeAttribute("open");
+}
+
+stammForm.rolle.addEventListener("change", rollenHinweis);
+document.getElementById("bd-schliessen").addEventListener("click", dialogSchliessen);
+
+stammForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const rolle = stammForm.rolle.value;
+  if (bearbeitet.id === ICH && bearbeitet.rolle === "ADMIN" && rolle !== "ADMIN"
+      && !confirm("Sich selbst die Administratorrechte entziehen? Die Benutzerverwaltung ist danach nicht mehr erreichbar.")) return;
+  const daten = {
+    name: stammForm.name.value, rolle,
+    mandanten_ids: [...stammForm.querySelector("[name=mandanten_ids]").selectedOptions].map(o => parseInt(o.value)),
+  };
+  try {
+    await api("PATCH", `/api/benutzer/${bearbeitet.id}`, daten);
+    toast("Benutzer gespeichert.", false);
+    if (bearbeitet.id === ICH && rolle !== "ADMIN") { location.href = "/"; return; }
+    dialogSchliessen();
+    lade();
+  } catch (err) { toast(err.message); }
+});
+
+// Zufallspasswort ohne verwechselbare Zeichen (0/O, 1/l/I)
+document.getElementById("bd-generieren").addEventListener("click", () => {
+  const zeichen = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789-_+";
+  const zufall = new Uint32Array(14);
+  crypto.getRandomValues(zufall);
+  pwForm.passwort.value = [...zufall].map(z => zeichen[z % zeichen.length]).join("");
+  pwForm.passwort.select();
+});
+
+pwForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!confirm(`Passwort für ${bearbeitet.email} zurücksetzen?`)) return;
+  try {
+    await api("PATCH", `/api/benutzer/${bearbeitet.id}`, {
+      passwort: pwForm.passwort.value,
+      passwort_aendern: pwForm.passwort_aendern.checked,
+    });
+    toast(`Passwort für ${bearbeitet.email} zurückgesetzt – bestehende Anmeldungen wurden beendet.`, false);
+    dialogSchliessen();
+    lade();
+  } catch (err) { toast(err.message); }
+});
+
 document.getElementById("neu-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
@@ -90,6 +231,7 @@ document.getElementById("neu-form").addEventListener("submit", async (e) => {
     email: f.get("email"), name: f.get("name"), passwort: f.get("passwort"),
     rolle: f.get("rolle"),
     mandanten_ids: [...e.target.querySelector("[name=mandanten_ids]").selectedOptions].map(o => parseInt(o.value)),
+    passwort_aendern: f.get("passwort_aendern") === "on",
   };
   try { await api("POST", "/api/benutzer", daten); e.target.reset(); lade(); }
   catch (err) { toast(err.message); }
