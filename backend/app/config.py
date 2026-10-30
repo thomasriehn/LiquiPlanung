@@ -23,6 +23,21 @@ class Settings(BaseSettings):
     backup_intervall_stunden: int = 24
     backup_aufbewahrung_tage: int = 30
 
+    # Lokale Belegablage (Bestelldateien): Stammverzeichnis; je Mandant ein
+    # Unterordner (Standard: Kurzname). Maximale Dateigröße eines Uploads.
+    ablage_verzeichnis: str = "ablage"
+    ablage_max_mb: int = 25
+
+    # Schlüssel für gespeicherte Geheimnisse (Graph-Secret, KI-API-Key);
+    # ohne Angabe wird er aus SECRET_KEY abgeleitet.
+    geheimnis_schluessel: str | None = None
+    # Optional: Geheimnisse nur in der Umgebung (.env) statt in der Datenbank;
+    # gesetzt haben sie Vorrang vor den in der Oberfläche hinterlegten Werten.
+    graph_client_secret: str | None = None
+    llm_api_key: str | None = None
+    graph_timeout_sekunden: int = 30
+    llm_timeout_sekunden: int = 120
+
 
 @lru_cache
 def get_settings() -> Settings:

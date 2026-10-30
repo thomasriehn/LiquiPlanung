@@ -109,6 +109,27 @@ class UStZeitraum(str, enum.Enum):
     QUARTAL = "QUARTAL"
 
 
+class AblageTyp(str, enum.Enum):
+    """Ablageort für Belege (Bestelldateien) eines Mandanten."""
+
+    LOKAL = "LOKAL"            # Unterordner von ABLAGE_VERZEICHNIS auf dem Server
+    SHAREPOINT = "SHAREPOINT"  # Ordner einer SharePoint-Dokumentbibliothek (Microsoft Graph)
+
+
+class BestellStatus(str, enum.Enum):
+    OFFEN = "OFFEN"              # erfasst, Freigabe ausstehend
+    FREIGEGEBEN = "FREIGEGEBEN"  # vom Sachwalter freigegeben
+    ABGELEHNT = "ABGELEHNT"      # vom Sachwalter abgelehnt (mit Begründung)
+    ABGELOEST = "ABGELOEST"      # durch Zahlung, Rechnung oder manuell ersetzt
+    STORNIERT = "STORNIERT"      # zurückgezogen
+
+
+class AbloeseArt(str, enum.Enum):
+    ZAHLUNG = "ZAHLUNG"    # Ist-Buchung oder Bankumsatz (Ausgangszahlung)
+    RECHNUNG = "RECHNUNG"  # Eingangsrechnung (offener Posten) übernimmt die Planung
+    MANUELL = "MANUELL"    # ohne Beleg, Betrag/Datum von Hand
+
+
 benutzer_mandanten = Table(
     "benutzer_mandanten",
     Base.metadata,
@@ -135,6 +156,8 @@ class Benutzer(Base):
     passwort_aendern: Mapped[bool] = mapped_column(Boolean, default=False)
     # persönliche Anzeige-Einstellungen, z. B. {"ansicht": "wochen"} (Spalten in Plan/Budget)
     einstellungen: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # darf Bestellungen freigeben/ablehnen (Sachwalter); Administratoren immer
+    darf_freigeben: Mapped[bool] = mapped_column(Boolean, default=False)
     erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     mandanten: Mapped[list["Mandant"]] = relationship(
@@ -164,6 +187,17 @@ class Mandant(Base):
     insolvenzgeld_bis: Mapped[date | None] = mapped_column(Date, nullable=True)
     aktiv: Mapped[bool] = mapped_column(Boolean, default=True)
     erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Belegablage (Bestelldateien): None = lokal im Standardordner (Kurzname)
+    ablage_typ: Mapped[str | None] = mapped_column(String(16), nullable=True)   # AblageTyp
+    # LOKAL: Pfad relativ zu ABLAGE_VERZEICHNIS; SHAREPOINT: Anzeigepfad
+    # („Website › Bibliothek › Ordner/Unterordner“)
+    ablage_pfad: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    ablage_site_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ablage_drive_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ablage_ordner_id: Mapped[str | None] = mapped_column(String(255), nullable=True)  # None = Bibliothekswurzel
+    ablage_web_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # auch noch nicht freigegebene Bestellungen als Auszahlung einplanen (vorsichtig)
+    bestellungen_offen_einplanen: Mapped[bool] = mapped_column(Boolean, default=True)
 
     benutzer: Mapped[list[Benutzer]] = relationship(
         secondary=benutzer_mandanten, back_populates="mandanten"
@@ -637,6 +671,143 @@ class SzenarioRegel(Base):
     szenario: Mapped[Szenario] = relationship(back_populates="regeln")
     konto: Mapped["Konto | None"] = relationship()
     gruppe: Mapped["KontoGruppe | None"] = relationship()
+
+
+class SystemEinstellung(Base):
+    """Globale Einstellungen (Administrator) als Schlüssel/Wert.
+
+    Geheimnisse (Client-Secret, API-Key) stehen als Fernet-Token in `wert`
+    (`verschluesselt=True`), abgeleitet aus GEHEIMNIS_SCHLUESSEL bzw. SECRET_KEY.
+    """
+
+    __tablename__ = "system_einstellungen"
+
+    schluessel: Mapped[str] = mapped_column(String(64), primary_key=True)
+    wert: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verschluesselt: Mapped[bool] = mapped_column(Boolean, default=False)
+    geaendert_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    geaendert_von: Mapped[int | None] = mapped_column(
+        ForeignKey("benutzer.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class Bestellung(Base):
+    """Bestellung (Auftrag an einen Kreditor) zur Freigabe durch den Sachwalter.
+
+    Fließt brutto zum erwarteten Zahldatum als Auszahlung in den Plan (verbraucht
+    das Restbudget des Kontos), bis sie durch die Ausgangszahlung, eine
+    Eingangsrechnung oder manuell abgelöst wird.
+    """
+
+    __tablename__ = "bestellungen"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mandant_id: Mapped[int] = mapped_column(ForeignKey("mandanten.id", ondelete="CASCADE"), index=True)
+    kreditor: Mapped[str] = mapped_column(String(255))
+    bestellnummer: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    beschreibung: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bestelldatum: Mapped[date] = mapped_column(Date)
+    lieferdatum: Mapped[date | None] = mapped_column(Date, nullable=True)
+    zahldatum: Mapped[date] = mapped_column(Date, index=True)  # erwartetes Zahldatum
+    betrag_netto: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    ust_satz: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)  # None = ohne USt
+    konto_id: Mapped[int | None] = mapped_column(ForeignKey("konten.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(12), default=BestellStatus.OFFEN.value)
+    entschieden_am: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    entschieden_von: Mapped[int | None] = mapped_column(
+        ForeignKey("benutzer.id", ondelete="SET NULL"), nullable=True
+    )
+    # Ablösung (Status ABGELOEST): Tag und Art der abschließenden Ablösung
+    abgeloest_am: Mapped[date | None] = mapped_column(Date, nullable=True)
+    abgeloest_durch: Mapped[str | None] = mapped_column(String(10), nullable=True)  # AbloeseArt
+    # Bestelldatei: liegt in der Mandantenablage (lokal oder SharePoint); die
+    # Referenz bleibt gültig, auch wenn der Mandant später einen anderen Ordner wählt
+    datei_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    datei_mime: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    datei_groesse: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    datei_ablage: Mapped[str | None] = mapped_column(String(16), nullable=True)  # AblageTyp
+    datei_pfad: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    datei_drive_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    datei_item_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    datei_web_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # Ergebnis der KI-Auslesung (Vorschlag, Modell, Quelle) zur Nachvollziehbarkeit
+    ki_daten: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    erstellt_von: Mapped[int | None] = mapped_column(
+        ForeignKey("benutzer.id", ondelete="SET NULL"), nullable=True
+    )
+    geaendert_am: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    konto: Mapped["Konto | None"] = relationship()
+    abloesungen: Mapped[list["BestellAbloesung"]] = relationship(
+        back_populates="bestellung", cascade="all, delete-orphan",
+        order_by="BestellAbloesung.id",
+    )
+
+
+class BestellAbloesung(Base):
+    """Ablösung einer Bestellung durch eine Zahlung (Ist-Buchung oder
+    Bankumsatz), eine Eingangsrechnung (offener Posten) oder manuell.
+
+    `abschliessend`: die Bestellung ist damit erledigt, auch wenn der Betrag
+    abweicht (z. B. Minderlieferung); sonst Teilzahlung – der Rest bleibt geplant.
+    """
+
+    __tablename__ = "bestell_abloesungen"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mandant_id: Mapped[int] = mapped_column(ForeignKey("mandanten.id", ondelete="CASCADE"), index=True)
+    bestellung_id: Mapped[int] = mapped_column(
+        ForeignKey("bestellungen.id", ondelete="CASCADE"), index=True
+    )
+    art: Mapped[str] = mapped_column(String(10), default=AbloeseArt.ZAHLUNG.value)
+    buchung_id: Mapped[int | None] = mapped_column(
+        ForeignKey("buchungen.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    transaktion_id: Mapped[int | None] = mapped_column(
+        ForeignKey("bank_transaktionen.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    posten_id: Mapped[int | None] = mapped_column(
+        ForeignKey("offene_posten.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    betrag: Mapped[Decimal] = mapped_column(Numeric(14, 2))  # positiv, brutto
+    datum: Mapped[date] = mapped_column(Date)
+    abschliessend: Mapped[bool] = mapped_column(Boolean, default=True)
+    notiz: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    benutzer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("benutzer.id", ondelete="SET NULL"), nullable=True
+    )
+
+    bestellung: Mapped[Bestellung] = relationship(back_populates="abloesungen")
+
+
+class BestellJournal(Base):
+    """Unveränderliches Journal der Bestellfreigabe (Erfassung, Änderungen,
+    Freigabe/Ablehnung mit Begründung und den damals gezeigten Kennzahlen,
+    Ablösung). Bleibt beim Löschen einer Bestellung erhalten."""
+
+    __tablename__ = "bestell_journal"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mandant_id: Mapped[int] = mapped_column(ForeignKey("mandanten.id", ondelete="CASCADE"), index=True)
+    bestellung_id: Mapped[int | None] = mapped_column(
+        ForeignKey("bestellungen.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    zeit: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    benutzer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("benutzer.id", ondelete="SET NULL"), nullable=True
+    )
+    benutzer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    aktion: Mapped[str] = mapped_column(String(24))
+    status_vorher: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    status_nachher: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    begruendung: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # eingefrorene Kurzbeschreibung („Kreditor · Nr. · 1.234,56 € netto“)
+    bestellung_text: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # bei Freigabe/Ablehnung: die gezeigten Kennzahlen (KW, Basis, Plan, gebunden,
+    # Abweichung, verfügbar …) als Momentaufnahme
+    kennzahlen: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class AuditLog(Base):

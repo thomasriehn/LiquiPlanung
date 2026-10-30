@@ -29,11 +29,18 @@ services:
       BACKUP_VERZEICHNIS: /srv/liquiplanung/backups
       BACKUP_INTERVALL_STUNDEN: ${BACKUP_INTERVALL_STUNDEN:-24}
       BACKUP_AUFBEWAHRUNG_TAGE: ${BACKUP_AUFBEWAHRUNG_TAGE:-30}
+      ABLAGE_VERZEICHNIS: /srv/liquiplanung/ablage
+      ABLAGE_MAX_MB: ${ABLAGE_MAX_MB:-25}
+      GEHEIMNIS_SCHLUESSEL: ${GEHEIMNIS_SCHLUESSEL:-}
+      GRAPH_CLIENT_SECRET: ${GRAPH_CLIENT_SECRET:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
     volumes:
       - backups:/srv/liquiplanung/backups
+      - ${ABLAGE_HOST_PFAD:-ablage}:/srv/liquiplanung/ablage
     ports:
       - "${APP_PORT:-8000}:8000"
 
 volumes:
   pgdata:
   backups:
+  ablage:
