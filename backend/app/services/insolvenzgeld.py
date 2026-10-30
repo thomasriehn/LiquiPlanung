@@ -175,17 +175,23 @@ def vorschau(
 
     # 3) Budgets auf Personalkonten: Tagesanteile gemäß Verteilungsprofil des
     #    Kontos (z. B. Lohnlauf am Monatsende) im Fenster und Zeitraum
-    from .liquiditaet import VERTEILUNGEN, _monats_verteilung
+    from .liquiditaet import MonatsBudgets, _monats_verteilung, budget_profil
 
-    budgets = db.scalars(
-        select(models.Budget).where(models.Budget.mandant_id == mandant.id)
-    )
-    for b in budgets:
+    monatsbudgets = MonatsBudgets(db.scalars(
+        select(models.Budget).where(models.Budget.mandant_id == mandant.id)))
+    wirksame = []                       # (Monat, Satz) – erfasst oder fortgeschrieben
+    for konto_id in monatsbudgets.konto_ids:
+        j, m = start.year, start.month
+        while (j, m) <= (ende.year, ende.month):
+            satz = monatsbudgets.quelle(konto_id, j, m)
+            if satz is not None:
+                wirksame.append((j, m, satz))
+            j, m = (j + 1, 1) if m == 12 else (j, m + 1)
+    for jahr, monat, b in wirksame:
         konto = konten.get(b.konto_id)
         if konto is None or b.konto_id not in personal_ids or not konto.aktiv:
             continue
-        profil = konto.verteilung if konto.verteilung in VERTEILUNGEN else "GLEICH"
-        verteilung = _monats_verteilung(b.jahr, b.monat, profil, bl)
+        verteilung = _monats_verteilung(jahr, monat, budget_profil(konto, b.aufteilung), bl)
         anteil = sum(
             (a for d, a in verteilung.items()
              if start <= d <= ende and f_von <= d <= f_bis),
@@ -201,8 +207,8 @@ def vorschau(
         positionen.append(
             {
                 "art": "PERSONAL_BUDGET",
-                "text": f"{konto.nummer} {konto.bezeichnung} – Budget {b.monat:02d}/{b.jahr}",
-                "datum": f"{b.jahr}-{b.monat:02d}-01",
+                "text": f"{konto.nummer} {konto.bezeichnung} – Budget {monat:02d}/{jahr}",
+                "datum": f"{jahr}-{monat:02d}-01",
                 "betrag": float(abs(brutto)),
                 "entlastung": float(entlastung),
             }

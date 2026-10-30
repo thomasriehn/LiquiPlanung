@@ -2464,7 +2464,9 @@ def budget_raster_abrufen(
     db: Session = Depends(get_db),
 ):
     """Budget in Tages-, Wochen- oder Monatsspalten: wirksame Netto-Werte und
-    die auf dieser Ebene erfassten Werte (Monate: Jahr; Tage/Wochen: Fenster)."""
+    die auf dieser Ebene erfassten Werte, gegliedert nach BWA-Gruppen. Fenster
+    wie im 13-Wochen-Plan (Monate: alle berührten Monate; mit `jahr` das ganze
+    Kalenderjahr)."""
     from ..services.budget import ANSICHTEN, budget_raster
 
     mandant = mandant_oder_403(db, benutzer, mandant_id)
@@ -2472,8 +2474,61 @@ def budget_raster_abrufen(
         raise HTTPException(422, "Ansicht: tage, wochen oder monate")
     if not (1 <= wochen <= 26):
         raise HTTPException(422, "Wochen muss zwischen 1 und 26 liegen")
-    return budget_raster(db, mandant, ansicht, jahr or date.today().year,
+    return budget_raster(db, mandant, ansicht, jahr,
                          _datum(start, "start") if start else date.today(), wochen)
+
+
+@router.get("/mandanten/{mandant_id}/budget-zelle")
+def budget_zelle_abrufen(
+    mandant_id: int,
+    konto_id: int,
+    tag: str,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    """Für den Eingabedialog: erfasste Monats-, Wochen- und Tageswerte, die den
+    Tag betreffen (inkl. Herkunft fortgeschriebener Monatswerte)."""
+    from ..services.budget import budget_zelle
+
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    _konto_pruefen(db, mandant.id, konto_id)
+    return budget_zelle(db, mandant, db.get(models.Konto, konto_id), _datum(tag, "tag"))
+
+
+class BudgetZelleSpeichern(BaseModel):
+    konto_id: int
+    ebene: str                      # monat | woche | tag
+    periode: str                    # JJJJ-MM | JJJJ-Www | JJJJ-MM-TT
+    betrag_netto: float | None = None   # None = Eintrag entfernen
+    aufteilung: str | None = "KW"   # KW | TAG | KONTO (Verteilungsprofil des Kontos)
+    fortschreiben: bool = True      # nur Monat: in die Folgemonate fortschreiben
+    spaetere_entfernen: bool = False    # nur Monat: spätere Monatswerte löschen
+
+
+@router.put("/mandanten/{mandant_id}/budget-zelle")
+def budget_zelle_setzen(
+    mandant_id: int,
+    daten: BudgetZelleSpeichern,
+    benutzer=Depends(aktueller_benutzer),
+    db: Session = Depends(get_db),
+):
+    from ..services.budget import budget_zelle_speichern
+
+    nur_schreibend(benutzer)
+    mandant = mandant_oder_403(db, benutzer, mandant_id)
+    _konto_pruefen(db, mandant.id, daten.konto_id)
+    try:
+        beschreibung = budget_zelle_speichern(
+            db, mandant, db.get(models.Konto, daten.konto_id), daten.ebene, daten.periode,
+            None if daten.betrag_netto is None else _dec(daten.betrag_netto),
+            daten.aufteilung, daten.fortschreiben, daten.spaetere_entfernen)
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(422, str(e) if "Ebene" in str(e) or "Aufteilung" in str(e)
+                            or "positiv" in str(e) else f"Ungültige Periode: {daten.periode}")
+    audit(db, benutzer, mandant.id, "BUDGET_GESPEICHERT", beschreibung)
+    db.commit()
+    return {"ok": True}
 
 
 class BudgetRasterZelle(BaseModel):

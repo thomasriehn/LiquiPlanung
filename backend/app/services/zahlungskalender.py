@@ -127,7 +127,7 @@ def ust_zahllast_aus_budget(
     budgets (jeweils Netto-Budget × USt-Satz des Kontos). Negativ = erwartete
     Erstattung. None, wenn keine umsatzsteuerrelevanten Budgets vorliegen.
     """
-    from .liquiditaet import _konto_richtung
+    from .liquiditaet import MonatsBudgets, _konto_richtung
 
     if not monate:
         return None
@@ -141,22 +141,24 @@ def ust_zahllast_aus_budget(
     }
     zahllast = Decimal("0")
     gefunden = False
-    for b in db.scalars(
-        select(models.Budget).where(models.Budget.mandant_id == mandant.id)
-    ):
-        if (b.jahr, b.monat) not in monate:
-            continue
-        konto = konten.get(b.konto_id)
+    budgets = MonatsBudgets(db.scalars(
+        select(models.Budget).where(models.Budget.mandant_id == mandant.id)))
+    for konto_id in budgets.konto_ids:
+        konto = konten.get(konto_id)
         if konto is None or konto.ust_satz is None or konto.ust_satz <= 0:
             continue
         richtung = _konto_richtung(konto)
-        steuer = abs(b.betrag_netto) * konto.ust_satz / Decimal("100")
-        if richtung == models.Richtung.EIN.value:
-            zahllast += steuer
-            gefunden = True
-        elif richtung == models.Richtung.AUS.value:
-            zahllast -= steuer
-            gefunden = True
+        for jahr, monat in monate:
+            satz = budgets.wert(konto_id, jahr, monat)      # erfasst oder fortgeschrieben
+            if satz is None:
+                continue
+            steuer = abs(satz[0]) * konto.ust_satz / Decimal("100")
+            if richtung == models.Richtung.EIN.value:
+                zahllast += steuer
+                gefunden = True
+            elif richtung == models.Richtung.AUS.value:
+                zahllast -= steuer
+                gefunden = True
     return zahllast.quantize(Decimal("0.01")) if gefunden else None
 
 

@@ -223,28 +223,25 @@ table.liste td.fix-spalte, table.liste th.fix-spalte {
 }
 table.liste thead th.fix-spalte { background: var(--blau-hell); z-index: 5; }
 
-/* Budgetraster: erfasste Werte schwarz/fett, abgeleitete als graue Vorgabe */
-.budget-raster td, .budget-raster th { padding: 3px 5px; }
-.budget-raster input { text-align: right; font-variant-numeric: tabular-nums; padding: 3px 4px; }
-.budget-raster input.erfasst { font-weight: 600; color: var(--text); }
-.budget-raster input.abgeleitet::placeholder { color: #8a939f; opacity: 1; }
-.budget-raster input.geaendert { background: #fdf3d7; }
-.budget-raster input:disabled { background: transparent; border-color: transparent; }
-.budget-raster .we { background: #f7f8fa; }
-.budget-raster input.abweichend { box-shadow: inset 3px 0 0 #eb6834; }
-.budget-raster thead th { position: sticky; top: 0; z-index: 2; background: var(--blau-hell); }
-.budget-raster thead th.fix-spalte { z-index: 5; }
-.budget-raster { border-collapse: separate; border-spacing: 0; }
-.budget-raster td.fix-spalte, .budget-raster th.fix-spalte {
-  min-width: 230px; box-shadow: -6px 0 0 #fff, 2px 0 0 var(--rand);   /* links nichts durchscheinen lassen */
+/* Budgetplanung im Plan-Layout */
+.budget-matrix td.erfasst { font-weight: 700; color: var(--text); }
+.budget-matrix td.fortgeschrieben { font-style: italic; color: var(--grau); }
+.budget-matrix td.abweichend { position: relative; }
+.budget-matrix td.abweichend::after {
+  content: ""; position: absolute; top: 0; right: 0; width: 0; height: 0;
+  border-top: 7px solid #eb6834; border-left: 7px solid transparent;
 }
-.budget-raster tfoot td.fix-spalte { box-shadow: -6px 0 0 #e8eef6, 2px 0 0 var(--rand); }
-.budget-raster thead th.fix-spalte { box-shadow: -6px 0 0 var(--blau-hell), 2px 0 0 var(--rand); }
-.budget-raster tfoot td { background: #e8eef6; font-weight: 600; white-space: nowrap;
-  height: 30px; position: sticky; z-index: 1; }
-.budget-raster tfoot tr.summe-ein td { bottom: 30px; border-top: 2px solid var(--rand); }
-.budget-raster tfoot tr.summe-aus td { bottom: 0; }
-.budget-raster tfoot td.fix-spalte { z-index: 3; }
+.bd-zeile { display: grid; grid-template-columns: 130px 1fr; gap: 8px; align-items: baseline; margin: 8px 0; }
+.bd-label { font-size: 12.5px; color: var(--grau); }
+.bd-optionen { display: flex; flex-direction: column; gap: 5px; }
+.bd-optionen label { display: flex; gap: 7px; align-items: baseline; font-size: 13px; }
+.bd-optionen input[type="radio"], .bd-optionen input[type="checkbox"] {
+  width: auto; flex: 0 0 auto; margin: 0; position: relative; top: 1px;
+}
+.bd-optionen .hinweis { font-size: 12px; }
+.bd-optionen .hinweis { margin: 0; }
+#bd-wirksam { font-size: 12.5px; line-height: 1.55; }
+button.gefahr-text { color: var(--rot); border-color: #e6b3ad; }
 
 /* Durchsuchbare Kontoauswahl mit Kategorie-Überschriften (PDF-Abstimmung) */
 .kombo { position: relative; display: inline-block; min-width: 250px; }

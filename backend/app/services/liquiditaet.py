@@ -176,11 +176,78 @@ def _monats_verteilung(jahr: int, monat: int, profil: str, bl: str) -> dict[date
             d += timedelta(days=1)
         anteil = Decimal("1") / len(zahltage) if zahltage else Decimal("0")
         verteilung = {t: anteil for t in zahltage}
+    elif profil.startswith("KW"):
+        # eine Zahlung je Kalenderwoche: Anteil der Woche = ihre Bankarbeitstage im
+        # Monat ÷ alle Bankarbeitstage; Zahltag = Wochentag laut Konto („KW:4“ =
+        # freitags, nächster Banktag der Woche) bzw. erster Bankarbeitstag der Woche
+        wtag = int(profil[3:]) if ":" in profil else None
+        wochen: dict[tuple[int, int], list[date]] = {}
+        for t in banktage:
+            wochen.setdefault(t.isocalendar()[:2], []).append(t)
+        verteilung = {}
+        for tage in wochen.values():
+            if wtag is None:
+                zahltag = tage[0]
+            else:
+                zahltag = next((t for t in tage if t.weekday() >= wtag), tage[-1])
+            verteilung[zahltag] = verteilung.get(zahltag, Decimal("0")) + Decimal(len(tage)) / len(banktage)
     else:  # GLEICH
         anteil = Decimal("1") / len(banktage)
         verteilung = {t: anteil for t in banktage}
     _verteilung_cache[key] = verteilung
     return verteilung
+
+
+# KW = eine Zahlung je Kalenderwoche, TAG = gleichmäßig auf die Bankarbeitstage,
+# KONTO = ausdrücklich das Verteilungsprofil des Kontos; leer (ältere Werte) = Konto
+AUFTEILUNGEN = ("KW", "TAG", "KONTO")
+
+
+def budget_profil(konto: models.Konto, aufteilung: str | None) -> str:
+    """Verteilungsprofil eines Budgetwerts: Aufteilung je KW bzw. Tag oder –
+    bei KONTO bzw. ohne Angabe – das Verteilungsprofil des Kontos."""
+    profil = konto.verteilung if konto.verteilung in VERTEILUNGEN else "GLEICH"
+    if aufteilung == "TAG":
+        return "GLEICH"
+    if aufteilung == "KW":
+        return f"KW:{_WOCHENTAG[profil]}" if profil in _WOCHENTAG else "KW"
+    return profil
+
+
+class MonatsBudgets:
+    """Wirksame Monatsbudgets je Konto: erfasster Monatswert oder – bis zum
+    nächsten erfassten Wert – der fortgeschriebene Wert eines Vormonats."""
+
+    def __init__(self, budgets):
+        self._je_konto: dict[int, list[tuple[tuple[int, int], models.Budget]]] = {}
+        for b in budgets:
+            self._je_konto.setdefault(b.konto_id, []).append(((b.jahr, b.monat), b))
+        for liste in self._je_konto.values():
+            liste.sort(key=lambda x: x[0])
+        self._schluessel = {k: [m for m, _ in v] for k, v in self._je_konto.items()}
+
+    @property
+    def konto_ids(self) -> set[int]:
+        return set(self._je_konto)
+
+    def quelle(self, konto_id: int, jahr: int, monat: int) -> models.Budget | None:
+        """Budgetsatz, der im Monat gilt (erfasst oder fortgeschrieben)."""
+        import bisect
+
+        schluessel = self._schluessel.get(konto_id)
+        if not schluessel:
+            return None
+        i = bisect.bisect_right(schluessel, (jahr, monat)) - 1
+        if i < 0:
+            return None
+        m, b = self._je_konto[konto_id][i]
+        if m == (jahr, monat) or b.fortschreiben:
+            return b
+        return None
+
+    def wert(self, konto_id: int, jahr: int, monat: int) -> tuple[Decimal, str | None] | None:
+        b = self.quelle(konto_id, jahr, monat)
+        return (b.betrag_netto, b.aufteilung) if b is not None else None
 
 
 def plan_fluesse(
@@ -663,38 +730,46 @@ def _monatstage(jahr: int, monat: int) -> int:
 
 
 def budget_basis_woche(
-    konto_id: int, profil: str, w_von: date, w_bis: date, bl: str,
-    monat_budget: dict[tuple[int, int, int], Decimal],
-    wochen_budget: dict[tuple[int, int, int], Decimal],
+    konto: models.Konto, w_von: date, w_bis: date, bl: str,
+    monat_budget: "MonatsBudgets",
+    wochen_budget: dict[tuple[int, int, int], tuple[Decimal, str | None]],
     tag_budget: dict[tuple[int, date], Decimal],
 ) -> dict[date, tuple[Decimal, Decimal, int]]:
     """Budgetbasis eines Kontos in der Woche ab `w_von` (bis `w_bis`): je Tag
     (Netto-Quellbetrag, Anteil, Teiler) – der Tageswert ist Quelle × Anteil ÷ Teiler.
-    Vorrang: Tageswert > Wochenwert > Monatsbudget nach Verteilungsprofil."""
+    Vorrang: Tageswert > Wochenwert > Monatsbudget (ggf. fortgeschrieben), verteilt
+    nach seiner Aufteilung (KW/Tag) bzw. dem Verteilungsprofil des Kontos."""
+    konto_id = konto.id
+    profil = konto.verteilung if konto.verteilung in VERTEILUNGEN else "GLEICH"
     iso = w_von.isocalendar()
     tage = [w_von + timedelta(days=i) for i in range(7) if w_von + timedelta(days=i) <= w_bis]
     banktage = [d for d in tage if ist_bankarbeitstag(d, bl)] or [w_von]
     basis: dict[date, tuple[Decimal, Decimal, int]] = {}
     if (konto_id, iso.year, iso.week) in wochen_budget:
-        netto = abs(wochen_budget[(konto_id, iso.year, iso.week)])
+        betrag, aufteilung = wochen_budget[(konto_id, iso.year, iso.week)]
+        netto = abs(betrag)
         if netto:
-            # Wochenwert: wöchentliche Profile auf den Zahltag der Woche,
-            # Monatsanker-Profile gleichmäßig auf die Banktage
-            if profil in _WOCHENTAG:
-                ziel = naechster_bankarbeitstag(w_von + timedelta(days=_WOCHENTAG[profil]), bl)
+            # Wochenwert: je KW auf einen Zahltag (Wochentag laut Konto bzw. erster
+            # Bankarbeitstag), je Tag gleichmäßig auf die Banktage; ohne Angabe
+            # wöchentliche Profile auf den Zahltag, sonst auf die Banktage
+            wtag = _WOCHENTAG.get(profil)
+            if aufteilung == "TAG" or (aufteilung is None and wtag is None):
+                zieltage = banktage
+            elif wtag is not None:
+                ziel = naechster_bankarbeitstag(w_von + timedelta(days=wtag), bl)
                 zieltage = [ziel if ziel <= w_bis else banktage[-1]]
             else:
-                zieltage = banktage
+                zieltage = [banktage[0]]
             for d in zieltage:
                 basis[d] = (netto, Decimal("1"), len(zieltage))
     else:
         for d in tage:
-            mb = monat_budget.get((konto_id, d.year, d.month))
-            if mb is None:
+            satz = monat_budget.wert(konto_id, d.year, d.month)
+            if satz is None:
                 continue
-            anteil = _monats_verteilung(d.year, d.month, profil, bl).get(d)
+            anteil = _monats_verteilung(d.year, d.month, budget_profil(konto, satz[1]), bl).get(d)
             if anteil:
-                basis[d] = (abs(mb), anteil, 1)
+                basis[d] = (abs(satz[0]), anteil, 1)
     for d in tage:
         if (konto_id, d) in tag_budget:
             netto = abs(tag_budget[(konto_id, d)])
@@ -716,18 +791,15 @@ def _budget_einarbeiten(
     igeld: tuple[date, date] | None = None,
 ) -> None:
     bl = mandant.bundesland
-    budgets = list(
+    monat_budget = MonatsBudgets(
         db.scalars(select(models.Budget).where(models.Budget.mandant_id == mandant.id))
     )
     overrides = {
-        (bw.konto_id, bw.jahr, bw.kw): bw.betrag_netto
+        (bw.konto_id, bw.jahr, bw.kw): (bw.betrag_netto, bw.aufteilung)
         for bw in db.scalars(
             select(models.BudgetWoche).where(models.BudgetWoche.mandant_id == mandant.id)
         )
     }
-    monat_budget: dict[tuple[int, int, int], Decimal] = {}
-    for b in budgets:
-        monat_budget[(b.konto_id, b.jahr, b.monat)] = b.betrag_netto
     tag_budget = {
         (bt.konto_id, bt.datum): bt.betrag_netto
         for bt in db.scalars(select(models.BudgetTag).where(
@@ -736,7 +808,7 @@ def _budget_einarbeiten(
             models.BudgetTag.datum <= ende,
         ))
     }
-    konto_ids = ({b.konto_id for b in budgets} | {k for (k, _, _) in overrides}
+    konto_ids = (monat_budget.konto_ids | {k for (k, _, _) in overrides}
                  | {k for (k, _) in tag_budget})
 
     # Wochen des Fensters
@@ -757,7 +829,6 @@ def _budget_einarbeiten(
             continue
         vorzeichen = Decimal("1") if richtung == Richtung.EIN.value else Decimal("-1")
         faktor = szenario_faktor(konto, richtung)
-        profil = konto.verteilung if konto.verteilung in VERTEILUNGEN else "GLEICH"
         # Insolvenzgeld: Personal-/SV-Budgets im Zeitraum entfallen (tagesgenau)
         igeld_konto = (
             igeld
@@ -771,7 +842,7 @@ def _budget_einarbeiten(
             basis: dict[date, Decimal] = {
                 d: _brutto(quelle, konto.ust_satz) * faktor * anteil / teiler
                 for d, (quelle, anteil, teiler) in budget_basis_woche(
-                    konto_id, profil, w_von, w_bis, bl, monat_budget, overrides, tag_budget
+                    konto, w_von, w_bis, bl, monat_budget, overrides, tag_budget
                 ).items()
             }
             if igeld_konto:

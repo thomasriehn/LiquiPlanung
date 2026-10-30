@@ -212,7 +212,14 @@ dadurch entstehen die BWA-Zeilen. Bank-an-Bank = Umbuchung (nur Bestandsverschie
    je Bankarbeitstag, Monatsanfang/-mitte/-ende (z. B. Lohnlauf) oder wöchentlicher
    Zahllauf an einem Wochentag (z. B. freitags); Wochen-Overrides folgen dem
    Wochenprofil, Tages-Overrides ersetzen den Wert ihres Tages (Vorrang Tag >
-   Woche > Monat; 0 = kein Budget). Die Verteilung je Woche liefert eine gemeinsame
+   Woche > Monat; 0 = kein Budget). Monats- und Wochenwerte tragen eine
+   **Aufteilung**: `KW` = eine Zahlung je Kalenderwoche (Anteil der Woche = ihre
+   Bankarbeitstage im Monat ÷ alle Bankarbeitstage; Zahltag = Wochentag laut
+   Konto bzw. erster Bankarbeitstag der Woche), `TAG` = gleichmäßig auf die
+   Bankarbeitstage, `KONTO`/leer = Verteilungsprofil des Kontos (ältere Werte).
+   Monatswerte mit `fortschreiben` gelten auch in allen Folgemonaten bis zum
+   nächsten erfassten Monatswert (`MonatsBudgets`); das nutzen Engine,
+   Budgetseite, USt-Vorschau und Insolvenzgeld-Vorschau gleichermaßen. Die Verteilung je Woche liefert eine gemeinsame
    Funktion (`budget_basis_woche`), die auch die Budgetseite nutzt
    (`services/budget.py`: wirksames Netto-Budget je Tag, summiert auf Tage, Wochen
    oder Monate). Wochenweise **gekürzt** um explizite Posten desselben Kontos

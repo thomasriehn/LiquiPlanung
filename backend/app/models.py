@@ -445,6 +445,11 @@ class Budget(Base):
     jahr: Mapped[int] = mapped_column(Integer)
     monat: Mapped[int] = mapped_column(Integer)
     betrag_netto: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    # Aufteilung auf die Tage: KW (eine Zahlung je Kalenderwoche), TAG (gleichmäßig
+    # auf die Bankarbeitstage) oder leer (Verteilungsprofil des Kontos)
+    aufteilung: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    # gilt auch für alle Folgemonate bis zum nächsten erfassten Monatswert
+    fortschreiben: Mapped[bool] = mapped_column(Boolean, default=False)
 
     konto: Mapped[Konto] = relationship()
 
@@ -461,6 +466,7 @@ class BudgetWoche(Base):
     jahr: Mapped[int] = mapped_column(Integer)  # ISO-Jahr
     kw: Mapped[int] = mapped_column(Integer)    # ISO-Kalenderwoche
     betrag_netto: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    aufteilung: Mapped[str | None] = mapped_column(String(5), nullable=True)   # KW | TAG | leer
 
 
 class BudgetTag(Base):

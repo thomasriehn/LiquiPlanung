@@ -105,14 +105,19 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Budget je Konto/Monat (Restbudget-Logik, Netto→Brutto über USt-Satz) mit
   Verteilungsprofil je Konto (gleichmäßig, Monatsanfang/-mitte/-ende,
   wöchentlicher Zahllauf z. B. freitags).
-- **Budgetplanung in Tages-, Wochen- und Monatsansicht**: Monatswerte (Jahr),
-  Wochen- und Tageswerte (Fenster wie im 13-Wochen-Plan) sind direkt editierbar;
-  Wochen- bzw. Tageswerte übersteuern den verteilten Monatswert (Vorrang Tag vor
-  Woche vor Monat, 0 = kein Budget, leer = Übersteuerung entfernen). Abgeleitete
-  Werte erscheinen grau, auf der Ebene erfasste schwarz, übersteuerte Werte mit
-  orangefarbenem Rand; Summenzeilen für Ein- und Auszahlungen. Die Spaltenwahl
-  (Tage/Wochen/Monate) wird je Benutzer gespeichert und gilt gemeinsam für den
-  13-Wochen-Plan und das Budget – auch auf anderen Geräten.
+- **Budgetplanung im Aufbau des 13-Wochen-Plans**: BWA-Gruppen (auf-/zuklappbar)
+  mit ihren Konten, Tages-, Wochen- oder Monatsspalten im Fenster des Plans und
+  Summenzeilen (Einzahlungen, Auszahlungen, Saldo; netto). Ein Klick auf eine
+  Kontozelle öffnet den **Eingabedialog**: Gültigkeit (Monat bzw. nur diese KW / nur
+  dieser Tag), Betrag, **Aufteilung je KW** (Standard: eine Zahlung je Kalenderwoche
+  am Wochentag laut Konto bzw. am ersten Bankarbeitstag), je Tag (gleichmäßig auf die
+  Bankarbeitstage) oder laut Verteilungsprofil des Kontos, und **Fortschreiben in die
+  Folgemonate** (Standard an; gilt bis zum nächsten erfassten Monatswert, spätere
+  Monatswerte lassen sich dabei ersetzen). Wochen- bzw. Tageswerte übersteuern den
+  verteilten Monatswert (Vorrang Tag vor Woche vor Monat, 0 = kein Budget). In der
+  Matrix sind erfasste Werte fett, fortgeschriebene kursiv, übersteuerte markiert.
+  Die Spaltenwahl (Tage/Wochen/Monate) wird je Benutzer gespeichert und gilt gemeinsam
+  für den 13-Wochen-Plan und das Budget – auch auf anderen Geräten.
 - **Zahlungskalender**: SV-Beiträge (drittletzter Bankarbeitstag, Feiertage je
   Bundesland), USt-VA (Monat/Quartal, Dauerfrist), LSt, GewSt, KSt – Beträge fest,
   aus Historie geschätzt oder (USt-VA) als Zahllast-Vorschau aus dem Budget;
