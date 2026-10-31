@@ -1381,6 +1381,25 @@ def test_ki_key_ohne_url_geht_nicht_an_erste_url(client, monkeypatch):
     assert gesehen[-1] == ("https://boese.example", None)
 
 
+def test_ki_key_fuer_ui_url_geht_nicht_an_spaetere_llm_url(client, monkeypatch):
+    """Key für die in der Oberfläche eingetragene URL A, danach LLM_URL=C ohne
+    LLM_API_KEY: nichts an C, Hinweis „neu eingeben“; danach eingegeben gilt er für C."""
+    gesehen = _ki_mitschnitt(monkeypatch)
+    _login(client)
+    r = client.put("/api/system/einstellungen", json={
+        "llm_url": "https://api.a.example/v1", "llm_modell": "m", "llm_api_key": GEHEIM_KI})
+    assert r.status_code == 200, r.text
+    monkeypatch.setattr(get_settings(), "llm_url", "https://anderer.example/v1")
+    d = client.get("/api/system/einstellungen").json()["llm"]
+    assert "für LLM_URL neu eingeben" in d["api_key_hinweis"]
+    client.post("/api/system/ki/test")
+    assert gesehen[-1] == ("https://anderer.example", None)
+    assert client.put("/api/system/einstellungen", json={"llm_api_key": "sk-FUER-C"}).status_code == 200
+    client.post("/api/system/ki/test")
+    assert gesehen[-1] == ("https://anderer.example", "Bearer sk-FUER-C")
+    assert all(GEHEIM_KI not in (auth or "") for ziel, auth in gesehen if ziel != "https://api.a.example")
+
+
 def test_abgeloeste_bestellung_markiert_erledigende_zahlung(client):
     """N6: zwei Zahlungen ohne „vollständig abgelöst“ decken das Brutto – die zweite
     ist die erledigende (erledigt), die erste eine Teilzahlung."""

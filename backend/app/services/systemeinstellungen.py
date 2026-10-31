@@ -18,7 +18,10 @@ anderen Server gehen):
   (Schema, Host, Port) – auch von leer auf gesetzt oder durch Löschen – und kommt
   in derselben Änderung kein neuer Key mit, wird er verworfen (Audit). Wird ein
   Key gespeichert, während die URL aus der Umgebung kommt, gehört er zu dieser;
-  eine (verdeckte) gespeicherte URL wird dabei entfernt.
+  eine (verdeckte) gespeicherte URL wird dabei entfernt. Umgekehrt geht ein Key,
+  der noch zu einer hier gespeicherten URL gehört, nicht an eine LLM_URL mit
+  anderem Ursprung (Hinweis über `ki_key_hinweis`, bis er neu eingegeben wird);
+  ohne LLM_URL gilt er wieder für seine URL.
 - Über http:// geht ein Key nur an localhost bzw. Adressen im eigenen Netz;
   sonst lehnt `setze` ab und `ki_zugang` lässt den Key weg.
 """
@@ -68,6 +71,10 @@ URL_UMGEBUNG_FEHLER = (
 ENV_KEY_OHNE_URL = (
     "Der API-Key aus der Umgebungsvariable LLM_API_KEY wird nur an eine ebenfalls in der Umgebung "
     "festgelegte API-URL gesendet – bitte LLM_URL ebenfalls in der Umgebung setzen"
+)
+KEY_ANDERE_URL = (
+    "Der gespeicherte API-Key gehört zur früher hier eingetragenen API-URL – "
+    "bitte für LLM_URL neu eingeben"
 )
 
 
@@ -220,7 +227,8 @@ def _ki_key_plan(db: Session, plan: list[tuple[str, dict, str | None]]) -> tuple
         raise ValueError(URL_UMGEBUNG_FEHLER)
     if env_url is not None:
         # Key gehört zur URL aus der Umgebung; eine gespeicherte URL ist verdeckt und
-        # darf ihn später (ohne LLM_URL) nicht bekommen
+        # darf ihn später (ohne LLM_URL) nicht bekommen. Erst ohne diese Zeile gilt
+        # der Key für eine LLM_URL mit anderem Ursprung (`_key_fuer_andere_url`).
         ziel, wechsel = env_url, False
         url_entfernen = bool(neu.get("llm_api_key")) and _zeile(db, "llm_url") is not None
     else:
@@ -327,9 +335,24 @@ def graph_zugang(db: Session) -> GraphZugang | None:
     return GraphZugang(tenant_id=tenant, client_id=client, client_secret=secret)
 
 
+def _key_fuer_andere_url(db: Session) -> bool:
+    """Gälte für LLM_URL der gespeicherte Key, gehört er aber zu einer früher hier
+    eingetragenen URL mit anderem Ursprung? (Ein unter LLM_URL eingegebener Key
+    entfernt diese Zeile, siehe `_ki_key_plan`.)"""
+    env_url = _env_url()
+    if env_url is None or _umgebung_wirksam("llm_api_key", SCHLUESSEL["llm_api_key"]) is not None:
+        return False
+    alt_url = _gespeichert(_zeile(db, "llm_url"))
+    if not alt_url or _ursprung(alt_url) == _ursprung(env_url):
+        return False
+    return bool(_gespeichert(_zeile(db, "llm_api_key")))
+
+
 def _ki_api_key(db: Session, url: str | None) -> str | None:
     """API-Key für `url`: Env-Key (nur zusammen mit LLM_URL, siehe Modul), sonst
-    der gespeicherte; nie per http:// nach außen."""
+    der gespeicherte, solange er zu dieser URL gehört; nie per http:// nach außen."""
+    if _key_fuer_andere_url(db):
+        return None
     key = wert(db, "llm_api_key")
     return None if key and key_unverschluesselt(url) else key
 
@@ -338,6 +361,8 @@ def ki_key_hinweis(db: Session) -> str | None:
     """Warum ein eingerichteter API-Key nicht gesendet wird – None, wenn er es wird."""
     if wert(db, "llm_api_key") and key_unverschluesselt(wert(db, "llm_url")):
         return HTTP_KEY_FEHLER
+    if _key_fuer_andere_url(db):
+        return KEY_ANDERE_URL
     if _aus_umgebung(SCHLUESSEL["llm_api_key"]) is not None and _env_url() is None:
         if _gespeichert(_zeile(db, "llm_api_key")):
             return f"{ENV_KEY_OHNE_URL}; bis dahin gilt der hier gespeicherte API-Key"

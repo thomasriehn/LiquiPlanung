@@ -308,6 +308,48 @@ def test_key_bei_url_aus_umgebung_entfernt_verdeckte_url(db, monkeypatch):
     assert se.ki_zugang(db).api_key is None
 
 
+def test_key_fuer_ui_url_geht_nicht_an_llm_url_mit_anderem_ursprung(db, monkeypatch):
+    """Key für die in der Oberfläche eingetragene URL A; der Betreiber setzt später
+    LLM_URL=C (ohne LLM_API_KEY): der Key für A geht nicht an C."""
+    se.setze(db, None, {"llm_url": "https://api.a.example/v1", "llm_modell": "m", "llm_api_key": "sk-a"})
+    monkeypatch.setattr(get_settings(), "llm_url", "https://anderer.example/v1")
+    z = se.ki_zugang(db)
+    assert (z.url, z.api_key) == ("https://anderer.example/v1", None)
+    o = se.oeffentlich(db)["llm"]
+    assert o["api_key_hinweis"] == se.KEY_ANDERE_URL and "neu eingeben" in o["api_key_hinweis"]
+    assert o["api_key"] == {"gesetzt": True, "lesbar": True, "aus_umgebung": False}
+    # ohne LLM_URL gilt er wieder für seine URL
+    monkeypatch.setattr(get_settings(), "llm_url", None)
+    z = se.ki_zugang(db)
+    assert (z.url, z.api_key) == ("https://api.a.example/v1", "sk-a")
+    assert se.ki_key_hinweis(db) is None
+    # unter LLM_URL neu eingegeben: gilt für C (verdeckte URL A wird entfernt)
+    monkeypatch.setattr(get_settings(), "llm_url", "https://anderer.example/v1")
+    geaendert = se.setze(db, None, {"llm_api_key": "sk-c"})
+    assert geaendert[0] == "llm_api_key" and geaendert[1].startswith("llm_url (entfernt")
+    z = se.ki_zugang(db)
+    assert (z.url, z.api_key) == ("https://anderer.example/v1", "sk-c")
+    assert se.ki_key_hinweis(db) is None
+
+
+@pytest.mark.parametrize("llm_url", ["https://api.a.example/v2", "https://API.A.example.:443/anders"])
+def test_key_fuer_ui_url_gilt_fuer_llm_url_mit_gleichem_ursprung(db, monkeypatch, llm_url):
+    se.setze(db, None, {"llm_url": "https://api.a.example/v1", "llm_modell": "m", "llm_api_key": "sk-a"})
+    monkeypatch.setattr(get_settings(), "llm_url", llm_url)
+    z = se.ki_zugang(db)
+    assert (z.url, z.api_key) == (llm_url, "sk-a")
+    assert se.ki_key_hinweis(db) is None
+
+
+def test_key_fuer_ui_url_env_key_hat_vorrang(db, monkeypatch):
+    """LLM_URL=C mit LLM_API_KEY: der Env-Key geht an C, kein Hinweis zur alten URL."""
+    se.setze(db, None, {"llm_url": "https://api.a.example/v1", "llm_modell": "m", "llm_api_key": "sk-a"})
+    monkeypatch.setattr(get_settings(), "llm_url", "https://anderer.example/v1")
+    monkeypatch.setattr(get_settings(), "llm_api_key", "env-key")
+    assert se.ki_zugang(db).api_key == "env-key"
+    assert se.ki_key_hinweis(db) is None
+
+
 def test_alte_bindungszeile_wird_ignoriert_und_entfernt(db, monkeypatch):
     import hashlib
 

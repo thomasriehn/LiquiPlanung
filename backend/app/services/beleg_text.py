@@ -840,9 +840,12 @@ def _eml(daten: bytes, max_seiten: int, tiefe: int) -> BelegText:
                                  f"über {_mb(ZIP_SUMME_MAX)}.")
                 continue
             office_rest -= umfang
-        unter = _beleg_text(inhalt, art, min(max_seiten, seiten_rest), name, tiefe + 1)
+        grenze = min(max_seiten, seiten_rest)
+        unter = _beleg_text(inhalt, art, grenze, name, tiefe + 1)
         if seitenweise:
-            seiten_rest -= max(1, min(unter.seiten, seiten_rest))
+            # nur die ausgewerteten Seiten abziehen: `unter.seiten` ist bei PDFs und
+            # mehrseitigen Bildern die Gesamtzahl, gelesen werden höchstens `grenze`
+            seiten_rest -= max(1, min(unter.seiten, grenze))
         warnungen += [f"Anhang „{name}“: {w}" for w in unter.warnungen]
         if unter.text.strip():
             teile.append(f"--- Anhang: {name} ---\n{unter.text}")

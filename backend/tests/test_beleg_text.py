@@ -782,6 +782,18 @@ def test_eml_gemeinsames_seitenbudget(monkeypatch):
     assert any("D.pdf" in w and "höchstens 10 Seiten" in w for w in erg.warnungen), erg.warnungen
 
 
+def test_eml_seitenbudget_zaehlt_nur_gelesene_seiten_langer_agb():
+    # 12-seitige AGB: gelesen werden 5 Seiten, abgezogen werden nur diese 5 (nicht 12)
+    agb = _text_pdf(["Allgemeine Geschaeftsbedingungen der Muster AG"], seiten=12)
+    bestellung = _text_pdf(["Bestellung 4711 Holz Meier GmbH", "Summe 1.234,56 EUR"])
+    erg = beleg_text(_eml_anhaenge([(agb, "application", "pdf", "AGB.pdf"),
+                                    (bestellung, "application", "pdf", "Bestellung.pdf")]), EML)
+    assert "--- Anhang: Bestellung.pdf ---" in erg.text and "Holz Meier" in erg.text
+    assert "4711" in erg.text.split("--- Anhang: Bestellung.pdf ---")[1]
+    assert not any("höchstens 10 Seiten" in w for w in erg.warnungen), erg.warnungen
+    assert any("AGB.pdf" in w and "ersten 5 von 12 Seiten" in w for w in erg.warnungen), erg.warnungen
+
+
 def test_eml_office_anhaenge_zusammen_begrenzt(monkeypatch):
     docx_typ = "vnd.openxmlformats-officedocument.wordprocessingml.document"
     dokumente = [_docx_roh({"word/document.xml": _w_dok(_w_p(f"Angebot {nr}") + _w_p("x" * 1500))})

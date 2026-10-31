@@ -672,7 +672,9 @@ Konten bleiben dann ohne Gruppe erhalten.
   beim ersten Setzen oder Löschen der URL –, außer in derselben Änderung kommt ein
   neuer Key mit (Audit-Vermerk „verworfen“). Wird ein Key gespeichert, während
   `LLM_URL` gilt, gehört er zu dieser URL; eine verdeckte gespeicherte URL wird dabei
-  entfernt. Per `http://` geht ein Key nur an localhost bzw. Adressen im eigenen Netz
+  entfernt. Umgekehrt geht ein Key, der noch zu einer hier eingetragenen URL gehört,
+  nicht an eine später gesetzte `LLM_URL` mit anderem Ursprung (Hinweis „bitte für
+  LLM_URL neu eingeben“); ohne `LLM_URL` gilt er wieder für seine URL. Per `http://` geht ein Key nur an localhost bzw. Adressen im eigenen Netz
   (private und link-lokale IPs, auch in Zahlform, Namen ohne Punkt wie ein
   Docker-Dienst, `.local`, `.lan`, `.internal` u. a.); sonst lehnt das Speichern eines
   Keys ab (422), und eine solche URL – auch aus `LLM_URL` oder einer älteren
