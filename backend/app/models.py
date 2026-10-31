@@ -189,7 +189,8 @@ class Mandant(Base):
     insolvenzgeld_bis: Mapped[date | None] = mapped_column(Date, nullable=True)
     aktiv: Mapped[bool] = mapped_column(Boolean, default=True)
     erstellt_am: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    # Belegablage (Bestelldateien): None = lokal im Standardordner (Kurzname)
+    # Belegablage (Bestelldateien): None = lokal im Standardordner
+    # („<sicherer Kurzname>-<id>“, siehe ablage.standard_lokal_pfad)
     ablage_typ: Mapped[str | None] = mapped_column(String(16), nullable=True)   # AblageTyp
     # LOKAL: Pfad relativ zu ABLAGE_VERZEICHNIS; SHAREPOINT: Anzeigepfad
     # („Website › Bibliothek › Ordner/Unterordner“)
@@ -620,6 +621,10 @@ class PlanSnapshotWert(Base):
     termin_typ: Mapped[str | None] = mapped_column(String(16), nullable=True)  # für Termine ohne Konto
     datum: Mapped[date] = mapped_column(Date, index=True)
     betrag: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    # Anteil der zum Stichtag noch nicht entschiedenen Bestellungen (Mandantenschalter
+    # „offene einplanen“): Differenz zum Plan nur mit entschiedenen Bestellungen. Zählt
+    # zum eingefrorenen Plan, nicht aber als Soll-Basis der Bestellfreigabe.
+    bestellung_offen: Mapped[bool] = mapped_column(Boolean, default=False)
 
     snapshot: Mapped[PlanSnapshot] = relationship(back_populates="werte")
 

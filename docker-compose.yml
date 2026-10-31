@@ -33,6 +33,7 @@ services:
       ABLAGE_MAX_MB: ${ABLAGE_MAX_MB:-25}
       GEHEIMNIS_SCHLUESSEL: ${GEHEIMNIS_SCHLUESSEL:-}
       GRAPH_CLIENT_SECRET: ${GRAPH_CLIENT_SECRET:-}
+      LLM_URL: ${LLM_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
     volumes:
       - backups:/srv/liquiplanung/backups

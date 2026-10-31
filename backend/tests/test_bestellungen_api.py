@@ -37,6 +37,7 @@ def _umgebung(tmp_path, monkeypatch):
     monkeypatch.setattr(s, "ablage_max_mb", 25)
     monkeypatch.setattr(s, "graph_client_secret", None)
     monkeypatch.setattr(s, "llm_api_key", None)
+    monkeypatch.setattr(s, "llm_url", None)
 
     def kein_netz(req: httpx.Request) -> httpx.Response:
         raise AssertionError(f"Unerwarteter Netzzugriff: {req.url}")
@@ -1322,3 +1323,79 @@ def test_ki_url_wechsel_sendet_key_nicht_weiter(client, monkeypatch):
         "llm_url": "http://localhost:11434/v1", "llm_api_key": "sk-lokal"}).status_code == 200
     client.post("/api/system/ki/test")
     assert gesehen[-1].headers["authorization"] == "Bearer sk-lokal"
+
+
+def _ki_mitschnitt(monkeypatch) -> list:
+    """KI-Server-Attrappe: protokolliert (Ziel, Authorization) je Anfrage."""
+    gesehen: list = []
+
+    def llm(req: httpx.Request) -> httpx.Response:
+        gesehen.append((f"{req.url.scheme}://{req.url.host}", req.headers.get("authorization")))
+        return httpx.Response(200, json={"model": "x", "choices": [{"message": {"content": '{"antwort":"ok"}'}}]})
+
+    monkeypatch.setattr(ki, "http_client_fabrik", lambda: httpx.Client(transport=httpx.MockTransport(llm)))
+    return gesehen
+
+
+def test_ki_env_key_nur_an_url_aus_umgebung(client, monkeypatch):
+    """N5 a/b: LLM_API_KEY geht nicht an die erste in der Oberfläche gesetzte URL;
+    mit LLM_URL nur dorthin, auch nach einem Schlüsseltausch."""
+    s = get_settings()
+    monkeypatch.setattr(s, "llm_api_key", "sk-UMGEBUNG-999")
+    gesehen = _ki_mitschnitt(monkeypatch)
+    _login(client)
+    assert client.post("/api/system/ki/test").status_code == 409
+    assert "LLM_URL ebenfalls in der Umgebung setzen" in client.post("/api/system/ki/test").json()["detail"]
+    r = client.put("/api/system/einstellungen", json={"llm_url": "https://boese.example/v1", "llm_modell": "m"})
+    assert r.status_code == 200, r.text
+    assert "LLM_URL ebenfalls in der Umgebung setzen" in r.json()["llm"]["api_key_hinweis"]
+    assert client.post("/api/system/ki/test").status_code == 200
+    assert gesehen[-1] == ("https://boese.example", None)
+
+    monkeypatch.setattr(s, "llm_url", "https://ki.example/v1")
+    d = client.get("/api/system/einstellungen").json()["llm"]
+    assert d["url"] == "https://ki.example/v1" and d["url_aus_umgebung"] is True
+    assert d["api_key"]["aus_umgebung"] is True and d["api_key_hinweis"] is None
+    client.post("/api/system/ki/test")
+    assert gesehen[-1] == ("https://ki.example", "Bearer sk-UMGEBUNG-999")
+    # URL aus der Umgebung lässt sich nicht umstellen
+    r = client.put("/api/system/einstellungen", json={"llm_url": "https://boese.example/v1"})
+    assert r.status_code == 422 and "LLM_URL" in r.json()["detail"]
+    monkeypatch.setattr(s, "llm_api_key", "sk-UMGEBUNG-NEU")
+    client.post("/api/system/ki/test")
+    assert gesehen[-1] == ("https://ki.example", "Bearer sk-UMGEBUNG-NEU")
+    assert all("UMGEBUNG" not in (auth or "") for ziel, auth in gesehen if ziel != "https://ki.example")
+
+
+def test_ki_key_ohne_url_geht_nicht_an_erste_url(client, monkeypatch):
+    """N5 c: Key bei leerer URL gespeichert (Formular sendet llm_url ""), danach
+    fremde URL ohne Key → Key verworfen, nicht gesendet."""
+    gesehen = _ki_mitschnitt(monkeypatch)
+    _login(client)
+    r = client.put("/api/system/einstellungen", json={"llm_url": "", "llm_modell": "m", "llm_api_key": GEHEIM_KI})
+    assert r.status_code == 200 and r.json()["llm"]["api_key"]["gesetzt"] is True
+    r = client.put("/api/system/einstellungen", json={"llm_url": "https://boese.example/v1"})
+    assert r.status_code == 200 and r.json()["llm"]["api_key"]["gesetzt"] is False
+    assert any("llm_api_key (verworfen" in x for x in _audit("SYSTEMEINSTELLUNGEN_GEAENDERT"))
+    assert client.post("/api/system/ki/test").status_code == 200
+    assert gesehen[-1] == ("https://boese.example", None)
+
+
+def test_abgeloeste_bestellung_markiert_erledigende_zahlung(client):
+    """N6: zwei Zahlungen ohne „vollständig abgelöst“ decken das Brutto – die zweite
+    ist die erledigende (erledigt), die erste eine Teilzahlung."""
+    _login(client)
+    mid, konten = _mandant(client)
+    bid = _neu(client, mid, konten["3400"], betrag_netto=1000, ust_satz=0)["id"]
+    for betrag in (400, 600):
+        r = client.post(f"/api/bestellungen/{bid}/abloesung", json={
+            "art": "MANUELL", "betrag": betrag, "datum": HEUTE.isoformat(), "abschliessend": False})
+        assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["status"] == "ABGELOEST"
+    assert [(a["betrag"], a["abschliessend"], a["erledigt"]) for a in d["abloesungen"]] == [
+        (400.0, False, False), (600.0, False, True)]
+    # Teilzahlung wieder aufheben → offen, keine Ablösung „erledigt“
+    r = client.delete(f"/api/bestell-abloesungen/{d['abloesungen'][1]['id']}")
+    assert r.status_code == 200 and r.json()["status"] == "OFFEN"
+    assert [a["erledigt"] for a in r.json()["abloesungen"]] == [False]

@@ -188,10 +188,10 @@ ein Teil ist als Ausbaustufe vorgesehen (→ Roadmap, Kap. 10):
 | `budgets`, `budget_wochen`, `budget_tage` | Budget je Konto/Monat (netto) + Wochen- und Tages-Override |
 | `termin_regeln`, `zahlungstermine` | Kalenderregeln (SV, USt-VA, LSt, GewSt, KSt) und generierte, editierbare Termine |
 | `bestaende` | Anfangs-/Stichtagsbestände Bank/Kasse/Waren |
-| `plan_snapshots`, `plan_snapshot_werte` | Eingefrorene Plandaten für den Soll-/Ist-Vergleich |
+| `plan_snapshots`, `plan_snapshot_werte` | Eingefrorene Plandaten für den Soll-/Ist-Vergleich; Anteil noch nicht entschiedener Bestellungen gekennzeichnet (`bestellung_offen`) |
 | `plan_verschiebungen` | Manuelle Verschiebungen von Planwerten/Vorträgen einer Planzeile (Ursprungstag → Zieltag, Teilbetrag) |
 | `bestellungen` | Bestellungen: Kreditor, Nr., Bestell-/Liefer-/erwartetes Zahldatum, Netto + USt-Satz, Konto, Status, Ablösung, Dateireferenz (lokal/SharePoint), KI-Ergebnis |
-| `bestell_abloesungen` | Ablösung einer Bestellung durch Ist-Buchung, Bankumsatz, Eingangsrechnung (offener Posten) oder manuell; abschließend oder Teilzahlung |
+| `bestell_abloesungen` | Ablösung einer Bestellung durch Ist-Buchung, Bankumsatz, Eingangsrechnung (offener Posten) oder manuell; ausdrücklich abschließend oder Teilzahlung; je Buchung bzw. Bankumsatz höchstens eine Ablösung (partielle eindeutige Indizes) |
 | `bestell_journal` | Unveränderliches Freigabejournal mit Begründung und eingefrorenen Kennzahlen |
 | `system_einstellungen` | Globale Einstellungen als Schlüssel/Wert (Graph, KI); Geheimnisse Fernet-verschlüsselt |
 | `audit_log` | Protokoll wesentlicher Aktionen |
@@ -274,11 +274,19 @@ noch geplanten Betrag** gleicher Richtung (Ursprung außerhalb des Fensters: Pla
 dieses Tages aus einer Wochenberechnung). Planverschiebungen wirken dauerhaft
 (auch für den Soll/Ist-Vergleich vergangener Tage). Ist der Ursprungstag vorbei,
 der Zieltag aber nicht, sind überfällige offene Posten inzwischen auf den Rolltag
-gewandert – der noch fehlende Teil wird dann von dort genommen (nur aus dem
-gerollten Postenanteil, nicht aus anderen Planwerten des Rolltags). Die
+gewandert – die Verschiebung nimmt dann zuerst diesen gerollten Postenanteil (nicht
+andere Planwerte des Rolltags) und erst den Rest vom Ursprungstag, an dem nur noch
+Bezahltes, Erledigtes oder Budget steht. So steht ein verschobener überfälliger
+Posten nicht zugleich am Rolltag und am Zieltag – im angezeigten Plan, in
+Planständen und in der LIVE-Basis der Bestellfreigabe gleichermaßen. Die
 Restplan-Sicht der Bestandsfortschreibung übernimmt die Wirkung: künftige
 Ursprungstage werden entlastet, bei vergangenem Ursprungstag nur gerollte Posten;
-der Zieltag erhält den Betrag, solange er in der Zukunft liegt. Für den Vortrag
+der Zieltag erhält den Betrag, solange er in der Zukunft liegt. Den Teil einer
+Verschiebung, der am Ursprungstag auf schon Erledigtes entfällt (bezahlte Posten,
+abgelöste Bestellungen, erledigte Termine – auch an Tagen außerhalb des Fensters),
+überträgt sie nicht: Er steckt bereits im Ist-Bestand. Den verschobenen Betrag
+ordnet sie dafür zuerst Offenem, dann Erledigtem, zuletzt Budget zu (eine verschobene
+vergangene Dauerschuld-Rate wird so weiter am Zieltag gebucht). Für den Vortrag
 gelten verschobene Dauerschuld-Raten am Ursprungstag als nicht fällig, am Zieltag
 als fällig. **Vortragsverschiebungen** greifen auf den jeweils aktuellen
 Vortragstag zu (begrenzt auf den offenen Vortrag) und enden mit ihrem Zieltag –
@@ -341,7 +349,8 @@ Termine werden bei Neugenerierung nicht überschrieben.
   (Sachkonto an Bank, DATEV-Logik); alle Buchungen eines PDFs hängen an einem
   Import-Batch und sind gesammelt löschbar.
 - **Texterkennung (OCR):** PDFs ohne Textebene (Scan, „Microsoft Print to PDF“
-  mit Glyphen als Vektorpfaden) werden mit pypdfium2 gerendert (300 dpi) und
+  mit Glyphen als Vektorpfaden) werden mit pypdfium2 gerendert (300 dpi, höchstens
+  36 MP je Seite – bis A2 unverändert, übergroße Seiten gröber; Seite für Seite) und
   per tesseract (`deu`, Wortpositionen als TSV) gelesen. Für das UC-Layout
   trennen die Wortpositionen die Spalten (Datum | Valuta | Zweck | Empfänger/
   IBAN/BIC | Umsatz); die Umsatzsumme wird gegen Anfangs-/Endsaldo des Auszugs
@@ -439,9 +448,18 @@ manuell), vom Sachwalter je Kalenderwoche gegen den verfügbaren Rahmen geprüft
 freigegeben oder abgelehnt, fließen in den Plan ein und werden später durch die
 tatsächliche Zahlung abgelöst. Status: `OFFEN` (zur Freigabe) → `FREIGEGEBEN` /
 `ABGELEHNT` → `ABGELOEST`; daneben `STORNIERT`. Ändert sich an einer freigegebenen
-Bestellung Betrag, USt-Satz oder Konto, fällt sie auf `OFFEN` zurück (erneute
-Freigabe). Eine geänderte abgelehnte Bestellung gilt als Wiedervorlage. Freigeben
+Bestellung Betrag, USt-Satz, Konto oder Kreditor, wandert das Zahldatum in eine
+andere ISO-KW oder wird ihre Datei ersetzt, fällt sie auf `OFFEN` zurück (erneute
+Freigabe, Journalvermerk „erneute Freigabe erforderlich“). Reine Korrekturen
+behalten die Freigabe: Schreibweise des Kreditors (Groß-/Kleinschreibung, Leer- und
+Satzzeichen, Umlaute), Bestellnummer, Beschreibung, Bestell- und Lieferdatum, ein
+Zahldatum in derselben KW und eine erstmals nachgereichte Datei. Eine geänderte
+abgelehnte Bestellung gilt als Wiedervorlage. Freigeben
 dürfen Administratoren und Benutzer mit dem Recht `darf_freigeben` (Leser nie).
+Statuswechsel (Entscheiden, Zurücksetzen, Stornieren, Ablösen) sperren die
+Bestellung (`SELECT … FOR UPDATE`) und setzen den Status nur, wenn er noch dem
+geprüften entspricht (bedingtes UPDATE, wirkt auch unter SQLite); eine gleichzeitige
+zweite Änderung erhält 409.
 
 **Erfassung und KI.** Uploads werden am Inhalt erkannt (Magic Bytes, nicht am
 Content-Type des Browsers), zunächst in einer Zwischenablage gehalten (Token,
@@ -455,13 +473,58 @@ der Auszahlungskonten des Mandanten. Die Antwort wird serverseitig normalisiert
 + 30 Tage auf den nächsten Bankarbeitstag). Die Konto-Historie des Kreditors hat
 Vorrang vor dem KI-Vorschlag. Fehler der KI blockieren die Erfassung nie.
 
+**Grenzen beim Auslesen** (Schutz vor Archiv-, XML- und Bildbomben; was eine Grenze
+überschreitet, wird mit Warnung übersprungen, die Erfassung bleibt möglich).
+Office-Dateien: höchstens 2.000 Archiveinträge, 20 MB je ausgewertetem Teil und
+50 MB entpackt insgesamt; vor jedem Parser keine DTD/Entity-Deklaration,
+Namensraum-URIs bis 256 Zeichen, höchstens 1.000 Attribute je Element, dann eine
+Vorprüfung mit expat ohne Baum (höchstens 5.000 verschiedene Element-/Attributnamen
+je Teil, 500.000 Elemente für alle ganz eingelesenen Teile zusammen).
+Excel-Arbeitsblätter, die openpyxl zeilenweise liest, zählen dagegen je Blatt
+(Elemente außerhalb von Zeilen plus größte Zeile, ebenfalls 500.000); welche Teile
+das sind, ist openpyxl 3.1.5 nachgebildet (bei einem Update prüfen). Gelesen werden
+bis zu 10 Blätter mit je 1.000 Zeilen × 50 Spalten. PDF-Seiten werden für die
+Texterkennung mit höchstens 36 MP, als Seitenbild mit höchstens 2.000 px Kantenlänge
+gerendert; Bilder werden einzeln dekodiert und verkleinert, über 40 MP abgelehnt.
+E-Mails: höchstens 10 Anhänge, ein gemeinsames Seitenbudget für PDF- und
+Bildanhänge (doppelt so groß wie bei einem Einzelbeleg) und zusammen höchstens
+50 MB entpackte Office-Anhänge. Im HTML-Text eingebettete Bilder (Content-ID) zählen
+ohne echte Anhänge ab 300 px längster Kante, neben Anhängen nur große (kürzere Kante
+≥ 300 px, Fläche ≥ 250.000 px, z. B. Foto oder Screenshot der Bestellung) hinter den
+Anhängen; Logos und Signatur-Banner bleiben außen vor.
+
 **Ablage.** Je Mandant `LOKAL` (Unterordner von `ABLAGE_VERZEICHNIS`, Standard =
-Kurzname) oder `SHAREPOINT` (Drive-ID + Ordner-ID einer Dokumentbibliothek). Die
+`<sicherer Kurzname>-<Mandanten-ID>`, abgeleitet über `ablage.standard_lokal_pfad`
+und nicht gespeichert; durch die ID eindeutig, auch wenn verschiedene Kurznamen
+denselben sicheren Namen ergeben) oder `SHAREPOINT` (Drive-ID + Ordner-ID einer
+Dokumentbibliothek). Die
 Bestellung speichert ihre eigene Dateireferenz (relativer Pfad bzw. Drive-/Item-ID),
 alte Links bleiben bei einem späteren Ordnerwechsel gültig. Lokale Pfade werden
 gegen Ausbrüche geprüft (absolute Pfade, `..`, Symlinks); Dateien werden nie
-überschrieben. SharePoint: app-only über Microsoft Graph (Client-Credentials,
-Token-Cache), Upload bis 4 MB direkt, darüber per Upload-Session. Das Durchsuchen
+überschrieben.
+
+Ordner zweier Mandanten dürfen weder gleich sein noch ineinander liegen (Vergleich
+ohne Groß-/Kleinschreibung, Symlinks aufgelöst; der Standardordner jedes Mandanten
+bleibt reserviert, auch bei SharePoint-Ablage). Lokal prüft der Server das vor jedem
+Zugriff (Durchsuchen, Speichern, Auslesen) und beim Festlegen – dort auch, ob im
+Ordner Belege von Bestellungen anderer Mandanten liegen –, für SharePoint beim
+Festlegen (dieselbe Bibliothek: gleicher Ordner, darüber, darunter oder die
+Bibliothekswurzel). Ein Konflikt ergibt 409; Nicht-Administratoren erfahren dabei
+weder Namen noch Ordner des anderen Mandanten. Ein neuer Mandant wird abgelehnt (409),
+wenn sein Standardordner sich überschneidet oder schon Dateien enthält. Beim Löschen
+eines Mandanten werden seine lokalen Ordner nach den Datenbanklöschungen nach
+`.geloescht/<Kurzname>-<ID>-<Zeitstempel>` im Ablagestamm verschoben, nie gelöscht
+(scheitert der Commit, werden sie zurückverschoben); so erbt ein später angelegter
+Mandant keine Belege. Ordner, die sich mit der Ablage eines anderen Mandanten
+überschneiden, bleiben stehen; das Audit-Log nennt das Ziel.
+
+SharePoint: app-only über Microsoft Graph (Client-Credentials, Token-Cache; der
+Verbindungstest holt immer ein frisches Token, ein 403 mit einem über 5 Minuten alten
+Token löst einmal eine Neuanmeldung aus – etwa nach geänderten Berechtigungen),
+Upload bis 4 MB direkt, darüber per Upload-Session. Websites lassen sich auch über
+ihre Adresse wählen, ebenso über einen Freigabelink aus „Link kopieren“
+(`/:f:/s/NAME/…` = `/sites/NAME`, `/t/` = `/teams/`, `/p/` = `/personal/`; bei
+`/:f:/r/…` gilt der Pfad dahinter); ohne erkennbare Website gibt es 422. Das Durchsuchen
 der Mandantenablage ist auf den gewählten Ordner und seine Unterordner beschränkt.
 Die Anzeige läuft über einen Proxy (`/mandanten/{id}/bestellungen/{bid}/datei`) mit
 `Content-Disposition` (ASCII + `filename*`), `nosniff`, `no-store` und CSP-Sandbox
@@ -473,14 +536,30 @@ Teilzahlungen zum erwarteten Zahldatum als Auszahlung ein. Überfällige rollen 
 offene Posten auf den nächsten Bankarbeitstag ab heute. Weil sie vor dem Budget
 eingeplant werden, **verbrauchen sie das Restbudget** ihrer Woche
 (Plan = max(Budget, explizit)). Abgelöste Bestellungen stehen in der Planansicht
-mit dem vollen Bestellbetrag am Tag min(Zahldatum, Ablösetag) – Plan − Ist zeigt
-damit die Minderlieferung –, nicht in der Restplan-Sicht. Abgelöst durch eine
+wie ein bezahlter Posten mit dem vollen Bestellbetrag am erwarteten Zahldatum (liegt
+es vor dem Fensterbeginn, am ersten Bankarbeitstag ab Fensterbeginn; liegen Zahldatum
+und Ablösung vor dem Fensterbeginn, entfällt sie), nicht in der Restplan-Sicht.
+Plan − Ist zeigt damit die Minderlieferung, und eine früh bezahlte Bestellung
+verbraucht weiter das Budget ihrer Zahlwoche. Abgelöst durch eine
 Eingangsrechnung plant nur noch der Posten. Ob noch nicht freigegebene Bestellungen
 eingeplant werden, ist je Mandant schaltbar (Standard: ja).
 Behoben wurde dabei ein Fehler der Restplan-Sicht: Bezahlte Posten (und abgelöste
 Bestellungen) fielen dort heraus, und das Wochenbudget erschien auf den künftigen
 Tagen wieder in voller Höhe. Der Restbudget-Abzug richtet sich jetzt in beiden Sichten
 nach den expliziten Zahlungen der Planansicht.
+
+**Planstände.** `erstelle_snapshot` friert den angezeigten Plan ein, bei
+eingeschaltetem Mandantenschalter also einschließlich noch nicht entschiedener
+Bestellungen. Deren Anteil – die Differenz zum Plan nur mit entschiedenen
+Bestellungen, Verschiebungen in beiden Sichten gleich angewendet – steht je Zeile
+und Tag in eigenen Werten mit `plan_snapshot_werte.bestellung_offen = true`
+(Migration a4d7c2e9b310; bestehende Planstände bleiben ungekennzeichnet). Soll/Ist,
+Basis-Spalte, Excel-Export und KPI lesen den vollständigen Planstand
+(`snapshot_fluesse`): Planstand und angezeigter Plan stimmen überein, und eine
+eingeplante, später freigegebene und bezahlte Bestellung erscheint im Soll/Ist nicht
+als ungeplante Mehrausgabe. Die Freigabeprüfung liest den Planstand ohne den
+gekennzeichneten Anteil – eine noch nicht entschiedene Bestellung schafft sich so
+keinen eigenen Rahmen.
 
 **Freigabe-Kennzahlen** für Konto, BWA-Gruppe und alle Auszahlungen
 (Auszahlungen positiv; „heute“ zählt zur Zukunft, Ist reicht bis gestern):
@@ -493,24 +572,53 @@ nach den expliziten Zahlungen der Planansicht.
 - **C – bisherige Abweichung inkl. Vorträge:** Σ (Ist − Soll) seit Basisbeginn bis
   gestern als Mehrausgabe, zuzüglich offener Dauerschuld-Vorträge und überfälliger
   Posten bzw. freigegebener Bestellungen. Eine nicht gezahlte geplante Rate erscheint
-  so nicht als Ersparnis (−X im Ist-Vergleich, +X als Vortrag).
-- **verfügbar = A − B − C**, **nach Freigabe = verfügbar − Bestellung brutto**.
+  so nicht als Ersparnis (−X im Ist-Vergleich, +X als Vortrag). Zahlungen
+  abgelöster Bestellungen vor dem Basisbeginn fehlen dem Ist der Prüfung; sie werden
+  am Plantag ins Ist bzw. in B nachgetragen (bei einem Planstand nur, wenn die
+  Ablösung vor seinem Stichtag lag) – sonst gäbe eine früh bezahlte Bestellung ihren
+  Planbetrag wieder als Rahmen frei.
+- **verfügbar = A − B − C**, **nach Freigabe = verfügbar − Prüfbetrag**. Der
+  Prüfbetrag ist der offene Rest der Bestellung: brutto abzüglich der Teilzahlungen
+  vor heute (heutige stehen noch nicht im Ist bis gestern), mindestens 0. Die
+  Kennzahlen weisen dazu `bestellung_brutto` und `bereits_gezahlt` aus; die
+  KW-Übersicht summiert die Prüfbeträge der offenen Bestellungen.
   Maßgeblich ist das Konto, ohne Plan auf dem Konto die Gruppe. Dazu die Liquidität
   zum KW-Ende laut Plan vor und nach Freigabe.
 
 Basis: Soll-Referenz, wenn sie die KW abdeckt, sonst der jüngste abdeckende
-Planstand, sonst der aktuelle Plan (ohne nicht freigegebene Bestellungen, mit
-Hinweis; Abweichung dann nur für die laufende Woche). Weil das Soll je Woche
+Planstand (jeweils ohne den gekennzeichneten Anteil offener Bestellungen), sonst der
+aktuelle Plan (LIVE, mit Hinweis): nur entschiedene Bestellungen, ab Montag der
+laufenden Woche ungerollt wie ein Planstand zu diesem Tag; die Abweichung umfasst
+dann nur die laufende Woche. Überfälliges steht im LIVE-Soll an seinem
+Fälligkeitstag: Seine Minderausgabe im Ist-Vergleich und sein Betrag als
+Überfälliges heben sich in C auf. Vor dem Wochenbeginn Überfälliges steht am ersten
+Bankarbeitstag der Woche und zählt, solange dieser bevorsteht, für spätere KWs nicht
+als Überfälliges. Weil das Soll je Woche
 max(Budget, explizit) ist und B alle expliziten Zahlungen enthält, bleibt die
 Rechnung für eingefrorene und aktuelle Pläne konsistent. Bei der Entscheidung
 rechnet der Server die Kennzahlen neu und friert sie im Journal ein.
 
 **Ablösung und Abgleich.** Ablösungen verweisen auf eine Ist-Buchung, einen Bankumsatz
-(nicht zugleich im OP-Ausgleich) oder einen Kreditoren-Posten. Vorschläge bewerten
+(nicht zugleich im OP-Ausgleich; umgekehrt lässt der OP-Ausgleich Umsätze mit
+Bestell-Ablösung aus) oder einen Kreditoren-Posten (keine Insolvenzforderung). Eine
+Buchung bzw. ein Bankumsatz löst höchstens eine Bestellung ab: partielle eindeutige
+Indizes `uq_bestell_abloesungen_buchung_id` / `…_transaktion_id` (`WHERE … IS NOT
+NULL`, Migration 799a2322545e – bestehen beim Update schon Doppelzuordnungen, bricht
+sie mit einer Meldung ab); eine gleichzeitige Zuordnung derselben Zahlung erhält 409.
+Abgelöst ist die Bestellung mit einer ausdrücklich abschließenden Ablösung
+(Eingangsrechnung: immer) oder sobald alle Ablösungen zusammen das Brutto bis auf
+1 Cent decken; sonst sind es Teilzahlungen, und der Rest bleibt geplant. Gespeichert
+wird nur die ausdrückliche Wahl; wird eine Ablösung aufgehoben, bewertet der Server
+den Status neu (sonst zurück auf `FREIGEGEBEN` bzw. `OFFEN`). Vorschläge bewerten
 Kreditor-Token und Bestellnummer im Buchungstext, gleiches Konto, Betragsnähe und
-Datumsnähe. Vor dem Löschen von Buchungen, Bankumsätzen oder Posten (Importe,
-PDF-Zuordnungen, Einzelbuchungen) werden betroffene Ablösungen aufgehoben, und die
-Bestellung lebt im Plan wieder auf.
+Datumsnähe (berücksichtigt werden Zahlungen bzw. Rechnungen – nach Rechnungs- oder
+Fälligkeitsdatum – ab 7 Tage vor dem Bestelldatum). Eine Buchung, die eine
+Bestellung abgelöst hat, ist in Datum, Konten, Betrag und S/H gesperrt (422; Text
+und Beleg bleiben änderbar). Vor dem
+Löschen von Buchungen, Bankumsätzen oder Posten (Importe, PDF-Zuordnungen,
+Einzelbuchungen) werden betroffene Ablösungen aufgehoben, und die Bestellung lebt im
+Plan wieder auf – ebenso, wenn ein ablösender Posten storniert, zum Debitor oder zur
+Insolvenzforderung wird.
 
 ## 8. Kontenrahmen
 
@@ -550,10 +658,25 @@ Konten bleiben dann ohne Gruppe erhalten.
 - Systemeinstellungen (SharePoint/Graph, KI) nur für Administratoren. Client-Secret
   und API-Key werden Fernet-verschlüsselt gespeichert (HKDF aus `GEHEIMNIS_SCHLUESSEL`
   bzw. `SECRET_KEY`), nie ausgeliefert und nicht ins Audit-Log geschrieben (nur die
-  geänderten Schlüsselnamen). Gesetzte Umgebungsvariablen (`GRAPH_CLIENT_SECRET`,
-  `LLM_API_KEY`) haben Vorrang. Ist ein Geheimnis mit dem aktuellen Schlüssel nicht
-  entschlüsselbar (z. B. Sicherung einer anderen Installation), gilt der Zugang als
-  nicht eingerichtet.
+  geänderten Schlüsselnamen). `GRAPH_CLIENT_SECRET` aus der Umgebung hat Vorrang. Ist
+  ein Geheimnis mit dem aktuellen Schlüssel nicht entschlüsselbar (z. B. Sicherung
+  einer anderen Installation), gilt der Zugang als nicht eingerichtet.
+- KI-Key und API-URL gehören zusammen, damit ein Key nicht per URL-Wechsel an einen
+  anderen Server geht. `LLM_API_KEY` aus der Umgebung gilt nur zusammen mit `LLM_URL`
+  (dann mit Vorrang vor einem gespeicherten Key); ist `LLM_URL` gesetzt, ist die
+  API-URL in der Oberfläche schreibgeschützt (Änderungsversuche → 422). Fehlt
+  `LLM_URL`, wird `LLM_API_KEY` nicht verwendet, es gilt ein in der Oberfläche
+  gespeicherter Key
+  (Hinweis unter „System“ und beim KI-Test). Ein gespeicherter Key wird verworfen,
+  sobald sich der Ursprung der gespeicherten URL (Schema, Host, Port) ändert – auch
+  beim ersten Setzen oder Löschen der URL –, außer in derselben Änderung kommt ein
+  neuer Key mit (Audit-Vermerk „verworfen“). Wird ein Key gespeichert, während
+  `LLM_URL` gilt, gehört er zu dieser URL; eine verdeckte gespeicherte URL wird dabei
+  entfernt. Per `http://` geht ein Key nur an localhost bzw. Adressen im eigenen Netz
+  (private und link-lokale IPs, auch in Zahlform, Namen ohne Punkt wie ein
+  Docker-Dienst, `.local`, `.lan`, `.internal` u. a.); sonst lehnt das Speichern eines
+  Keys ab (422), und eine solche URL – auch aus `LLM_URL` oder einer älteren
+  Einstellung – erhält den Key nie (Hinweis unter „System“).
 - Die Belegablage eines Mandanten wählt nur der Administrator, weil der app-only-Zugang
   alle für die App freigegebenen SharePoint-Websites sieht. Bearbeiter durchsuchen nur
   den Mandantenordner.

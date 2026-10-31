@@ -302,3 +302,69 @@ def test_system_speichern_belegt_nur_eigenen_abschnitt_neu(tmp_path):
     assert erg["modell"] == "modell-x" and erg["key"] == "geheim-ki"
     assert erg["kiGeaendert"] is True
     assert erg["graphGeaendert"] is False and erg["tenant"] == "t-neu" and erg["secret"] == ""
+
+
+def test_system_url_aus_umgebung_schreibgeschuetzt_und_hinweis(tmp_path):
+    """N5: API-URL aus LLM_URL schreibgeschützt („aus Umgebung“) und beim Speichern nicht
+    gesendet; llm.api_key_hinweis wird angezeigt. Ohne LLM_URL wird die URL gesendet."""
+    hinweis = "LLM_API_KEY … bitte LLM_URL ebenfalls in der Umgebung setzen <b>"
+    env = dict(_SYS, llm={"url": "https://ki.example.invalid/v1", "url_aus_umgebung": True, "modell": "m",
+                          "vision": False, "api_key": {"gesetzt": True, "lesbar": True, "aus_umgebung": True},
+                          "api_key_hinweis": None, "konfiguriert": True})
+    ohne = dict(_SYS, llm=dict(_SYS["llm"], url="https://x.example.invalid/v1", url_aus_umgebung=False,
+                               api_key_hinweis=hinweis))
+    code = f"""
+      const gesendet = [];
+      let stand = {json.dumps(env)};
+      __antworten.push([(m, u) => m === "PUT", (m, u, d) => {{ gesendet.push(d); return stand; }}]);
+      __antworten.push([(m, u) => m === "GET", () => stand]);
+      const kf = document.getElementById("sys-ki-form");
+      await sysLaden();
+      const mitEnv = {{ url: kf.llm_url.value, nurLesen: kf.llm_url.readOnly,
+                       status: document.getElementById("sys-ki-url-status").textContent,
+                       hinweis: document.getElementById("sys-ki-hinweis").innerHTML }};
+      kf.llm_modell.value = "m2";
+      await __ausloesen(kf, "submit");
+      stand = {json.dumps(ohne)};
+      await sysLaden();
+      const ohneEnv = {{ url: kf.llm_url.value, nurLesen: kf.llm_url.readOnly,
+                        status: document.getElementById("sys-ki-url-status").textContent,
+                        hinweis: document.getElementById("sys-ki-hinweis").innerHTML }};
+      await __ausloesen(kf, "submit");
+      return {{ mitEnv, ohneEnv, gesendet }};
+    """
+    erg = _lauf(tmp_path, ["app.js", "system.js"], code)
+    m, o = erg["mitEnv"], erg["ohneEnv"]
+    assert m["url"] == "https://ki.example.invalid/v1" and m["nurLesen"] is True
+    assert "LLM_URL" in m["status"] and m["hinweis"] == ""
+    assert "llm_url" not in erg["gesendet"][0] and erg["gesendet"][0]["llm_modell"] == "m2"
+    assert o["url"] == "https://x.example.invalid/v1" and o["nurLesen"] is False and o["status"] == ""
+    assert "LLM_URL ebenfalls in der Umgebung setzen" in o["hinweis"] and "<b>" not in o["hinweis"]
+    assert erg["gesendet"][1]["llm_url"] == "https://x.example.invalid/v1"
+
+
+def test_detail_abgeloest_erledigende_zahlung_keine_teilzahlung(tmp_path):
+    """N6: abgelöst durch 400 € + 600 € (beide ohne „vollständig abgelöst“): nur die erste
+    ist „(Teilzahlung)“, die erledigende „(abschließend)“; einzelne Ablösung ohne Zusatz."""
+    heute = _iso(date.today())
+
+    def abl(i, betrag, erledigt, abschliessend=False):
+        return {"id": i, "art": "MANUELL", "betrag": betrag, "datum": heute, "abschliessend": abschliessend,
+                "erledigt": erledigt, "notiz": None, "beleg": "manuell"}
+
+    zwei = {"status": "ABGELOEST", "abgeloest_am": heute, "abgeloest_durch": "MANUELL",
+            "abgeloest_betrag": 1000.0, "abweichung": 0.0,
+            "abloesungen": [abl(1, 400.0, False), abl(2, 600.0, True)]}
+    eine = dict(zwei, abloesungen=[abl(3, 1000.0, True, True)])
+    offen = dict(zwei, status="OFFEN", abloesungen=[abl(4, 400.0, False)])
+    code = f"""
+      const teile = (b) => fdAbloesungenHtml(b).split("<li>").slice(1);
+      return {{ zwei: teile({json.dumps(zwei)}), eine: teile({json.dumps(eine)}),
+               offen: teile({json.dumps(offen)}) }};
+    """
+    erg = _lauf(tmp_path, ["app.js", "bestellungen.js"], code)
+    erste, zweite = erg["zwei"]
+    assert "(Teilzahlung)" in erste and "400,00" in erste
+    assert "(Teilzahlung)" not in zweite and "(abschließend)" in zweite and "600,00" in zweite
+    assert "(Teilzahlung)" not in erg["eine"][0] and "(abschließend)" not in erg["eine"][0]
+    assert "(Teilzahlung)" in erg["offen"][0]

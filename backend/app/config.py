@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     backup_aufbewahrung_tage: int = 30
 
     # Lokale Belegablage (Bestelldateien): Stammverzeichnis; je Mandant ein
-    # Unterordner (Standard: Kurzname). Maximale Dateigröße eines Uploads.
+    # Unterordner (Standard: „<sicherer Kurzname>-<Mandanten-ID>“, siehe
+    # ablage.standard_lokal_pfad). Maximale Dateigröße eines Uploads.
     ablage_verzeichnis: str = "ablage"
     ablage_max_mb: int = 25
 
@@ -34,6 +35,9 @@ class Settings(BaseSettings):
     # Optional: Geheimnisse nur in der Umgebung (.env) statt in der Datenbank;
     # gesetzt haben sie Vorrang vor den in der Oberfläche hinterlegten Werten.
     graph_client_secret: str | None = None
+    # LLM_API_KEY gilt nur zusammen mit LLM_URL (der Key geht nie an eine in der
+    # Oberfläche eingestellte URL); gesetzt ist die API-URL dort nicht änderbar.
+    llm_url: str | None = None
     llm_api_key: str | None = None
     graph_timeout_sekunden: int = 30
     llm_timeout_sekunden: int = 120

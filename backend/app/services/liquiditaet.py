@@ -290,6 +290,8 @@ def plan_fluesse(
     mit_budget: bool = True,
     bestellungen: str | None = None,
     ohne_bestellung_id: int | None = None,
+    explizit: dict[Key, dict[date, Decimal]] | None = None,
+    erledigt: dict[Key, dict[date, Decimal]] | None = None,
 ) -> dict[Key, dict[date, Decimal]]:
     """Planzahlungen je Konto/Tag für das Fenster [start, ende].
 
@@ -308,6 +310,10 @@ def plan_fluesse(
                `bestellungen_offen_einplanen` auch offene), "FREIGEGEBEN" = nur
                freigegebene, "KEINE" = gar keine; abgelöste stets wie bezahlte Posten.
     ohne_bestellung_id: diese Bestellung auslassen (Freigabeprüfung).
+    explizit:  nimmt die expliziten Flüsse (ohne Budget) auf.
+    erledigt:  nimmt in der vollen Sicht die erledigten Flüsse an ihrem Plantag auf
+               (bezahlte Posten, abgelöste Bestellungen, erledigte Termine) – für
+               Verschiebungen, die solche Beträge nicht erneut in die Projektion tragen.
     """
     heute = heute or start
     konten = _lade_konten(db, mandant.id)
@@ -325,7 +331,12 @@ def plan_fluesse(
     plan = _explizite_fluesse(
         db, mandant, konto_by_id, start, ende, heute, nur_offen, szenario, gerollt,
         igeld, bestell_status, ohne_bestellung_id, ausgelassen,
+        erledigt_sicht=None if nur_offen else erledigt,
     )
+    if explizit is not None:
+        for key, tageswerte in plan.items():
+            for d, v in tageswerte.items():
+                explizit[key][d] += v
 
     # 4) Budget mit Restbudget-Logik
     if mit_budget:
@@ -372,11 +383,14 @@ def _explizite_fluesse(
     bestell_status: set[str] | None,
     ohne_bestellung_id: int | None,
     ausgelassen: dict[Key, dict[date, Decimal]] | None = None,
+    erledigt_sicht: dict[Key, dict[date, Decimal]] | None = None,
 ) -> dict[Key, dict[date, Decimal]]:
     """Explizite Planflüsse (Schritte 1–3b von plan_fluesse, ohne Budget).
 
     ausgelassen: nimmt bei nur_offen die als erledigt ausgelassenen Flüsse an ihrem
-                 Tag der vollen Sicht auf (Restbudget der Projektion)."""
+                 Tag der vollen Sicht auf (Restbudget der Projektion).
+    erledigt_sicht: nimmt in der vollen Sicht bezahlte Posten, abgelöste Bestellungen und
+                 erledigte Termine an ihrem Plantag auf (zusätzlich zu `plan`)."""
     bl = mandant.bundesland
     plan: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
 
@@ -432,6 +446,8 @@ def _explizite_fluesse(
             ausgelassen[key][d] += betrag   # bezahlt: nur fürs Restbudget
             continue
         plan[key][d] += betrag
+        if erledigt_sicht is not None and p.status == PostenStatus.BEZAHLT.value:
+            erledigt_sicht[key][d] += betrag
         if gerollt is not None and p.status != PostenStatus.BEZAHLT.value and d == roll_ziel \
                 and zahltag < d:
             gerollt[key] = gerollt.get(key, Decimal("0")) + betrag
@@ -497,6 +513,8 @@ def _explizite_fluesse(
             ausgelassen[key][t.datum] += -betrag   # nur fürs Restbudget
             continue
         plan[key][t.datum] += -betrag
+        if erledigt_sicht is not None and t.status == models.TerminStatus.ERLEDIGT.value:
+            erledigt_sicht[key][t.datum] += -betrag
 
     # 3b) Bestellungen: brutto zum erwarteten Zahldatum, vor dem Budget (verbrauchen
     #     das Restbudget ihres Kontos); kein Szenariofaktor (wie Kreditor-Posten)
@@ -528,6 +546,8 @@ def _explizite_fluesse(
                 if d > ende:
                     continue
                 (ausgelassen if nur_offen else plan)[key][d] -= _brutto(b.betrag_netto, b.ust_satz)
+                if erledigt_sicht is not None:
+                    erledigt_sicht[key][d] -= _brutto(b.betrag_netto, b.ust_satz)
                 continue
             rest = bestellung_rest(b)
             if rest <= 0:
@@ -576,8 +596,10 @@ def _dauer_termine(d: models.Dauerbuchung, start: date, ende: date) -> list[date
 # ist aber stets auf den dort tatsächlich geplanten Betrag begrenzt – ändert
 # sich die Planbasis (Posten bezahlt, Dauerbuchung beendet), entsteht kein
 # Phantombetrag. Ist `von` vorbei, der Zieltag aber noch offen, sind
-# überfällige Posten inzwischen auf den Rolltag gewandert und werden von dort
-# genommen. Vorträge (Quelle VORTRAG) wirken nur bis zu ihrem Zieltag – danach
+# überfällige Posten inzwischen auf den Rolltag gewandert und werden zuerst von
+# dort genommen (am Ursprungstag steht dann nur noch Erledigtes, Vergangenes oder
+# Budget). In die Projektion trägt eine Verschiebung bereits Bezahltes nicht
+# erneut. Vorträge (Quelle VORTRAG) wirken nur bis zu ihrem Zieltag – danach
 # ist der noch offene Betrag wieder regulär vorzutragen.
 
 def verschiebung_key(v: models.PlanVerschiebung) -> Key:
@@ -597,17 +619,31 @@ def plan_verschiebungen(db: Session, mandant_id: int, quelle: str,
 
 def _extern_plan(db: Session, mandant: models.Mandant, heute: date,
                  bestellungen: str | None = None, ohne_bestellung_id: int | None = None):
-    """Planbetrag eines Tages außerhalb des Fensters (wochenweise gecacht)."""
-    cache: dict[date, dict] = {}
+    """Planbetrag eines Tages außerhalb des Fensters (wochenweise gecacht).
+    `verfuegbar.anteile(key, tag)` liefert dazu (explizit, erledigt) dieses Tages."""
+    cache: dict[date, tuple[dict, dict, dict]] = {}
 
-    def verfuegbar(key: Key, tag: date) -> Decimal:
+    def woche(tag: date) -> tuple[dict, dict, dict]:
         w = wochen_start(tag)
         if w not in cache:
-            cache[w] = plan_fluesse(db, mandant, w, w + timedelta(days=6), heute=heute,
-                                    bestellungen=bestellungen,
-                                    ohne_bestellung_id=ohne_bestellung_id)
-        return cache[w].get(key, {}).get(tag, Decimal("0"))
+            explizit: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+            erledigt: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+            plan = plan_fluesse(db, mandant, w, w + timedelta(days=6), heute=heute,
+                                bestellungen=bestellungen,
+                                ohne_bestellung_id=ohne_bestellung_id,
+                                explizit=explizit, erledigt=erledigt)
+            cache[w] = (plan, explizit, erledigt)
+        return cache[w]
 
+    def verfuegbar(key: Key, tag: date) -> Decimal:
+        return woche(tag)[0].get(key, {}).get(tag, Decimal("0"))
+
+    def anteile(key: Key, tag: date) -> tuple[Decimal, Decimal]:
+        _, explizit, erledigt = woche(tag)
+        return (explizit.get(key, {}).get(tag, Decimal("0")),
+                erledigt.get(key, {}).get(tag, Decimal("0")))
+
+    verfuegbar.anteile = anteile
     return verfuegbar
 
 
@@ -617,7 +653,12 @@ def verschiebungen_anwenden(
 ) -> list[tuple]:
     """Wendet Plan-Verschiebungen auf `plan` an. Liefert die tatsächlichen
     Bewegungen (key, ursprungstag, zieltag, betrag, art, verschiebung_id) mit
-    art "fest" (vom Ursprungstag) oder "rollend" (vom Rolltag überfälliger Posten)."""
+    art "fest" (vom Ursprungstag) oder "rollend" (vom Rolltag überfälliger Posten).
+
+    Liegt der Ursprungstag vor dem Rollzeitpunkt (max(start, heute)), ist das dort
+    Unbezahlte auf den Rolltag gewandert: die Verschiebung nimmt zuerst diesen
+    gerollten Anteil und erst den Rest vom Ursprungstag (dort steht nur noch
+    Erledigtes, Vergangenes oder Budget) – sonst stünde der Posten doppelt im Plan."""
     bewegungen: list[tuple] = []
     pool = dict(gerollt)
     for v in verschiebungen:
@@ -626,26 +667,40 @@ def verschiebungen_anwenden(
         rest = abs(v.betrag)
         ziel_im_fenster = start <= v.nach <= ende
         im_fenster = start <= v.von <= ende
-        verfuegbar = plan.get(key, {}).get(v.von, Decimal(0)) if im_fenster else extern(key, v.von)
-        if verfuegbar * vz > 0:
+
+        def fest(rest: Decimal) -> Decimal:
+            verfuegbar = plan.get(key, {}).get(v.von, Decimal(0)) if im_fenster else extern(key, v.von)
+            if rest <= 0 or verfuegbar * vz <= 0:
+                return rest
             anteil = min(rest, abs(verfuegbar))
             if im_fenster:
                 plan[key][v.von] -= vz * anteil
             if ziel_im_fenster:
                 plan[key][v.nach] += vz * anteil
             bewegungen.append((key, v.von, v.nach, vz * anteil, "fest", v.id))
-            rest -= anteil
-        if (rest > 0 and v.von <= heute < v.nach and v.von != roll_ziel
-                and start <= roll_ziel <= ende):
+            return rest - anteil
+
+        def rollend(rest: Decimal) -> Decimal:
             am_rolltag = plan.get(key, {}).get(roll_ziel, Decimal(0))
             gerollt_rest = pool.get(key, Decimal(0))
-            if am_rolltag * vz > 0 and gerollt_rest * vz > 0:
-                anteil = min(rest, abs(am_rolltag), abs(gerollt_rest))
-                plan[key][roll_ziel] -= vz * anteil
-                pool[key] = gerollt_rest - vz * anteil
-                if ziel_im_fenster:
-                    plan[key][v.nach] += vz * anteil
-                bewegungen.append((key, roll_ziel, v.nach, vz * anteil, "rollend", v.id))
+            if rest <= 0 or am_rolltag * vz <= 0 or gerollt_rest * vz <= 0:
+                return rest
+            anteil = min(rest, abs(am_rolltag), abs(gerollt_rest))
+            plan[key][roll_ziel] -= vz * anteil
+            pool[key] = gerollt_rest - vz * anteil
+            if ziel_im_fenster:
+                plan[key][v.nach] += vz * anteil
+            bewegungen.append((key, roll_ziel, v.nach, vz * anteil, "rollend", v.id))
+            return rest - anteil
+
+        rollbar = (v.von <= heute < v.nach and v.von != roll_ziel
+                   and start <= roll_ziel <= ende)
+        if rollbar and v.von < max(start, heute):
+            fest(rollend(rest))
+        elif rollbar:
+            rollend(fest(rest))
+        else:
+            fest(rest)
     return bewegungen
 
 
@@ -653,34 +708,58 @@ def verschiebungen_projektion(
     projektion: dict[Key, dict[date, Decimal]], verschiebungen: list, bewegungen: list[tuple],
     start: date, ende: date, heute: date, roll_ziel: date, gerollt: dict[Key, Decimal],
     ist_liquide,
+    anteile=None,
 ) -> None:
     """Überträgt die Verschiebungen auf die Restplan-Sicht (nur noch offene
     Zahlungen): künftige Ursprungstage werden entlastet, bei vergangenem
     Ursprungstag nur überfällige, auf den Rolltag gewanderte Posten (Dauer-
     buchungen und Termine sind dort ohnehin nicht mehr enthalten). Der Zieltag
-    erhält den Betrag, solange er in der Zukunft liegt."""
+    erhält den Betrag, solange er in der Zukunft liegt.
+
+    anteile(key, tag) -> (explizit, erledigt) der vollen Sicht am Ursprungstag: der
+    Teil einer festen Bewegung, der dort auf Erledigtes entfällt (bezahlte Posten,
+    abgelöste Bestellungen, erledigte Termine), ist schon gezahlt und wird nicht
+    übertragen. Zugeordnet wird zuerst Offenes, dann Erledigtes, zuletzt Budget."""
     bewegt: dict[int, Decimal] = defaultdict(Decimal)
-    for _, _, _, betrag, _, vid in bewegungen:
+    fest: dict[int, Decimal] = defaultdict(Decimal)
+    for _, _, _, betrag, art, vid in bewegungen:
         bewegt[vid] += betrag
+        if art == "fest":
+            fest[vid] += betrag
     pool = dict(gerollt)
+    # je (key, Ursprungstag, Richtung): noch nicht zugeordnetes [offen, erledigt]
+    rest_tag: dict[tuple[Key, date, Decimal], list[Decimal]] = {}
     for v in verschiebungen:
         menge = bewegt.get(v.id, Decimal(0))
         key = verschiebung_key(v)
         if not menge or not ist_liquide(key):
             continue
         vz = Decimal(1) if menge > 0 else Decimal(-1)
-        zubuchen = menge
+        offen_menge = abs(menge)
+        if anteile is not None and fest.get(v.id):
+            if (key, v.von, vz) not in rest_tag:
+                explizit, erledigt = anteile(key, v.von)
+                rest_tag[(key, v.von, vz)] = [max(Decimal(0), vz * (explizit - erledigt)),
+                                              max(Decimal(0), vz * erledigt)]
+            r = rest_tag[(key, v.von, vz)]
+            f = abs(fest[v.id])
+            aus_offen = min(f, r[0])
+            aus_erledigt = min(f - aus_offen, r[1])
+            r[0] -= aus_offen
+            r[1] -= aus_erledigt
+            offen_menge -= aus_erledigt
+        zubuchen = vz * offen_menge
         if v.von > heute:
             if start <= v.von <= ende:
                 verfuegbar = projektion.get(key, {}).get(v.von, Decimal(0))
-                anteil = min(abs(menge), abs(verfuegbar)) if verfuegbar * vz > 0 else Decimal(0)
+                anteil = min(offen_menge, abs(verfuegbar)) if verfuegbar * vz > 0 else Decimal(0)
                 projektion[key][v.von] -= vz * anteil
                 zubuchen = vz * anteil
         elif start <= roll_ziel <= ende:
             am_rolltag = projektion.get(key, {}).get(roll_ziel, Decimal(0))
             gerollt_rest = pool.get(key, Decimal(0))
             if am_rolltag * vz > 0 and gerollt_rest * vz > 0:
-                anteil = min(abs(menge), abs(am_rolltag), abs(gerollt_rest))
+                anteil = min(offen_menge, abs(am_rolltag), abs(gerollt_rest))
                 projektion[key][roll_ziel] -= vz * anteil
                 pool[key] = gerollt_rest - vz * anteil
         if zubuchen and v.nach > heute and start <= v.nach <= ende:
@@ -1105,9 +1184,17 @@ def liquiditaet_zum(db: Session, mandant: models.Mandant, tag: date,
     return Decimal(str(werte["liquiditaet"][tag.isoformat()]))
 
 
-def snapshot_fluesse(snap: models.PlanSnapshot) -> dict[Key, dict[date, Decimal]]:
+def snapshot_fluesse(
+    snap: models.PlanSnapshot, ohne_offene_bestellungen: bool = False,
+) -> dict[Key, dict[date, Decimal]]:
+    """Eingefrorene Planflüsse je Key/Tag: der zum Stichtag angezeigte Plan
+    (Soll/Ist, Basis-Spalte, Exporte, KPI). ohne_offene_bestellungen: ohne den
+    gekennzeichneten Anteil noch nicht entschiedener Bestellungen – Soll-Basis der
+    Bestellfreigabe, damit sich eine offene Bestellung keinen eigenen Rahmen schafft."""
     werte: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
     for w in snap.werte:
+        if ohne_offene_bestellungen and w.bestellung_offen:
+            continue
         key: Key = w.konto_id if w.konto_id is not None else f"TERMIN:{w.termin_typ}"
         werte[key][w.datum] += w.betrag
     return werte
@@ -1197,8 +1284,10 @@ def berechne_plan(
     # ---- Plan (aktuelle Erwartung) und Projektionsplan ----
     gerollt_plan: dict[Key, Decimal] = {}
     gerollt_proj: dict[Key, Decimal] = {}
+    explizit_plan: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+    erledigt_plan: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
     plan = plan_fluesse(db, mandant, start, ende, heute=heute, szenario=szenario,
-                        gerollt=gerollt_plan)
+                        gerollt=gerollt_plan, explizit=explizit_plan, erledigt=erledigt_plan)
     plan_projektion = plan_fluesse(
         db, mandant, start, ende, heute=heute, nur_offen=True, szenario=szenario,
         gerollt=gerollt_proj,
@@ -1216,15 +1305,23 @@ def berechne_plan(
     # ---- manuelle Verschiebungen (Plan und Restplan-Sicht) ----
     bl = mandant.bundesland
     verschiebungen = plan_verschiebungen(db, mandant.id, "PLAN")
+    extern = _extern_plan(db, mandant, heute)
     plan_bewegungen = verschiebungen_anwenden(
         plan, verschiebungen, start, ende, heute,
-        naechster_bankarbeitstag(max(start, heute), bl), gerollt_plan,
-        _extern_plan(db, mandant, heute),
+        naechster_bankarbeitstag(max(start, heute), bl), gerollt_plan, extern,
     )
+
+    def anteile(key: Key, tag: date) -> tuple[Decimal, Decimal]:
+        if start <= tag <= ende:
+            return (explizit_plan.get(key, {}).get(tag, Decimal("0")),
+                    erledigt_plan.get(key, {}).get(tag, Decimal("0")))
+        return extern.anteile(key, tag)
+
     verschiebungen_projektion(
         plan_projektion, verschiebungen, plan_bewegungen, start, ende, heute,
         naechster_bankarbeitstag(max(start, heute + timedelta(days=1)), bl), gerollt_proj,
         lambda key: liquiditaets_richtung(key, konto_by_id, gruppe_fuer_key) is not None,
+        anteile=anteile,
     )
 
     # ---- Vortrag nicht gebuchter Dauerschuld-Zahlungen (Ansicht „mit Vortrag“) ----
@@ -1698,35 +1795,54 @@ def erstelle_snapshot(
     heute = heute or date.today()
     start = wochen_start(start or heute)
     ende = start + timedelta(days=wochen * 7 - 1)
-    gerollt: dict[Key, Decimal] = {}
-    # nur entschiedene Bestellungen (freigegebene, abgelöste) – noch nicht entschiedene
-    # schüfen sich als Soll-Referenz der Freigabe ihren eigenen Rahmen
-    plan = plan_fluesse(db, mandant, start, ende, heute=start, gerollt=gerollt,
-                        bestellungen="FREIGEGEBEN")
-    # manuelle Verschiebungen gehören zum Plan (Sicht zum Stichtag)
-    verschiebungen_anwenden(
-        plan, plan_verschiebungen(db, mandant.id, "PLAN"), start, ende, start,
-        naechster_bankarbeitstag(start, mandant.bundesland), gerollt,
-        _extern_plan(db, mandant, start, bestellungen="FREIGEGEBEN"),
-    )
+    verschiebungen = plan_verschiebungen(db, mandant.id, "PLAN")
+    roll_ziel = naechster_bankarbeitstag(start, mandant.bundesland)
+
+    def sicht(bestellungen: str | None) -> dict[Key, dict[date, Decimal]]:
+        gerollt: dict[Key, Decimal] = {}
+        plan = plan_fluesse(db, mandant, start, ende, heute=start, gerollt=gerollt,
+                            bestellungen=bestellungen)
+        # manuelle Verschiebungen gehören zum Plan (Sicht zum Stichtag)
+        verschiebungen_anwenden(
+            plan, verschiebungen, start, ende, start, roll_ziel, gerollt,
+            _extern_plan(db, mandant, start, bestellungen=bestellungen),
+        )
+        return plan
+
+    # eingefroren wird der angezeigte Plan (Mandantenstandard, ggf. mit noch offenen
+    # Bestellungen); deren Anteil – Differenz zum Plan nur mit entschiedenen
+    # Bestellungen, Verschiebungen gleich angewendet – ist gekennzeichnet: als
+    # Soll-Basis der Freigabe schüfe sich eine offene Bestellung sonst ihren Rahmen
+    plan = sicht(None)
+    entschieden = plan
+    if models.BestellStatus.OFFEN.value in (bestell_plan_status(mandant, None) or set()) and \
+            db.scalar(select(models.Bestellung.id).where(
+                models.Bestellung.mandant_id == mandant.id,
+                models.Bestellung.status == models.BestellStatus.OFFEN.value).limit(1)):
+        entschieden = sicht("FREIGEGEBEN")
     snap = models.PlanSnapshot(
         mandant_id=mandant.id, stichtag=start, wochen=wochen, kommentar=kommentar
     )
     db.add(snap)
     db.flush()
-    for key, tageswerte in plan.items():
-        for d, v in tageswerte.items():
-            if not v:
-                continue
-            db.add(
-                models.PlanSnapshotWert(
-                    snapshot_id=snap.id,
-                    konto_id=key if isinstance(key, int) else None,
-                    termin_typ=None if isinstance(key, int) else str(key).replace("TERMIN:", ""),
-                    datum=d,
-                    betrag=v,
+    for key in sorted(set(plan) | set(entschieden), key=str):
+        tage = set(plan.get(key, {})) | set(entschieden.get(key, {}))
+        for d in sorted(tage):
+            fest = entschieden.get(key, {}).get(d, Decimal("0"))
+            offen = plan.get(key, {}).get(d, Decimal("0")) - fest
+            for betrag, bestellung_offen in ((fest, False), (offen, True)):
+                if not betrag:
+                    continue
+                db.add(
+                    models.PlanSnapshotWert(
+                        snapshot_id=snap.id,
+                        konto_id=key if isinstance(key, int) else None,
+                        termin_typ=None if isinstance(key, int) else str(key).replace("TERMIN:", ""),
+                        datum=d,
+                        betrag=betrag,
+                        bestellung_offen=bestellung_offen,
+                    )
                 )
-            )
     db.commit()
     return snap
 
@@ -1763,10 +1879,7 @@ def soll_ist_vergleich(
         if k.typ in (models.KontoTyp.BANK.value, models.KontoTyp.KASSE.value)
     }
 
-    plan: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
-    for w in snap.werte:
-        key: Key = w.konto_id if w.konto_id is not None else f"TERMIN:{w.termin_typ}"
-        plan[key][w.datum] += w.betrag
+    plan = snapshot_fluesse(snap)   # angezeigter Plan zum Stichtag (inkl. offener Bestellungen)
 
     sach, _ = ist_zahlungsfluesse(db, mandant.id, finanz_nrn, start, min(heute, ende))
     ist: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))

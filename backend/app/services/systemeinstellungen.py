@@ -10,20 +10,20 @@ als „nicht eingerichtet“ – keine Funktion hier wirft deswegen eine Ausnahm
 
 KI-API-Key und URL gehören zusammen (der Key darf nicht per URL-Wechsel an einen
 anderen Server gehen):
-- Ändert sich der Ursprung (Schema, Host, Port) der API-URL – auch durch Löschen –
-  ohne neuen Key, wird der gespeicherte Key verworfen (Audit).
-- LLM_API_KEY aus der Umgebung wird an den Ursprung gebunden, der beim ersten
-  solchen Wechsel galt (interne Zeile `_BINDUNG`, nur Ursprung + Fingerabdruck
-  des Keys); an einen anderen Ursprung geht er nicht – dort gilt ein in der
-  Oberfläche eingegebener Key. Ein neuer Env-Key (anderer Fingerabdruck) gilt
-  wieder für die dann eingestellte URL. Ohne Wechsel bleibt alles wie bisher.
+- LLM_API_KEY aus der Umgebung wird nur gesendet, wenn auch die API-URL aus der
+  Umgebung kommt (LLM_URL). Fehlt LLM_URL, gilt der Env-Key nicht (Hinweis über
+  `ki_key_hinweis`); ein in der Oberfläche gespeicherter Key gilt weiter. Eine URL
+  aus der Umgebung lässt sich über `setze` nicht ändern.
+- Ein gespeicherter Key gehört zur gespeicherten URL: Ändert sich deren Ursprung
+  (Schema, Host, Port) – auch von leer auf gesetzt oder durch Löschen – und kommt
+  in derselben Änderung kein neuer Key mit, wird er verworfen (Audit). Wird ein
+  Key gespeichert, während die URL aus der Umgebung kommt, gehört er zu dieser;
+  eine (verdeckte) gespeicherte URL wird dabei entfernt.
 - Über http:// geht ein Key nur an localhost bzw. Adressen im eigenen Netz;
   sonst lehnt `setze` ab und `ki_zugang` lässt den Key weg.
 """
 
-import hashlib
 import ipaddress
-import json
 import re
 import socket
 from urllib.parse import urlsplit
@@ -41,7 +41,7 @@ SCHLUESSEL: dict[str, dict] = {
     "graph_tenant_id": {"geheim": False},
     "graph_client_id": {"geheim": False},
     "graph_client_secret": {"geheim": True, "umgebung": "graph_client_secret"},
-    "llm_url": {"geheim": False},
+    "llm_url": {"geheim": False, "umgebung": "llm_url"},
     "llm_modell": {"geheim": False},
     "llm_api_key": {"geheim": True, "umgebung": "llm_api_key"},
     "llm_vision": {"geheim": False, "bool": True},
@@ -54,12 +54,20 @@ _URL_MUSTER = re.compile(r"^https?://[^\s/]+\S*$", re.IGNORECASE)
 _WAHR = {"1", "true", "ja", "on", "yes"}
 _FALSCH = {"0", "false", "nein", "off", "no"}
 
-# interne Zeile (nicht über `setze` änderbar): Ursprung, an den LLM_API_KEY gebunden ist
-_BINDUNG = "llm_api_key_umgebung_bindung"
+# Zeile aus einer nie ausgelieferten Zwischenstufe (Bindung des Env-Keys an einen
+# Ursprung): wird ignoriert und beim nächsten Speichern entfernt
+_ALTE_BINDUNG = "llm_api_key_umgebung_bindung"
 _LOKALE_ENDUNGEN = (".localhost", ".local", ".lan", ".internal", ".home.arpa", ".localdomain")
 HTTP_KEY_FEHLER = (
     "Der API-Key wird nur verschlüsselt übertragen: http:// ist nur für localhost bzw. "
     "Adressen im eigenen Netz zulässig – bitte https:// verwenden oder den API-Key entfernen"
+)
+URL_UMGEBUNG_FEHLER = (
+    "Die API-URL ist über die Umgebungsvariable LLM_URL festgelegt und lässt sich hier nicht ändern"
+)
+ENV_KEY_OHNE_URL = (
+    "Der API-Key aus der Umgebungsvariable LLM_API_KEY wird nur an eine ebenfalls in der Umgebung "
+    "festgelegte API-URL gesendet – bitte LLM_URL ebenfalls in der Umgebung setzen"
 )
 
 
@@ -84,6 +92,19 @@ def _aus_umgebung(info: dict) -> str | None:
     return None
 
 
+def _env_url() -> str | None:
+    """LLM_URL aus der Umgebung (None = URL kommt aus der Oberfläche)."""
+    return _aus_umgebung(SCHLUESSEL["llm_url"])
+
+
+def _umgebung_wirksam(schluessel: str, info: dict) -> str | None:
+    """Wert aus der Umgebung, der tatsächlich gilt: LLM_API_KEY nur zusammen mit LLM_URL."""
+    wert_ = _aus_umgebung(info)
+    if wert_ is not None and schluessel == "llm_api_key" and _env_url() is None:
+        return None
+    return wert_
+
+
 def _zeile(db: Session, schluessel: str) -> models.SystemEinstellung | None:
     return db.get(models.SystemEinstellung, schluessel)
 
@@ -98,10 +119,11 @@ def _gespeichert(zeile: models.SystemEinstellung | None) -> str | None:
 
 
 def wert(db: Session, schluessel: str) -> str | None:
-    """Aktueller Wert (entschlüsselt); Umgebungsvariable hat Vorrang bei Geheimnissen.
-    None, wenn nicht gesetzt oder nicht entschlüsselbar."""
+    """Aktueller Wert (entschlüsselt); eine Umgebungsvariable hat Vorrang (Geheimnisse,
+    LLM_URL; LLM_API_KEY nur zusammen mit LLM_URL). None, wenn nicht gesetzt oder
+    nicht entschlüsselbar."""
     info = _pruefe_schluessel(schluessel)
-    umgebung = _aus_umgebung(info)
+    umgebung = _umgebung_wirksam(schluessel, info)
     if umgebung is not None:
         return umgebung
     wert_ = _gespeichert(_zeile(db, schluessel))
@@ -185,55 +207,39 @@ def key_unverschluesselt(url: str | None) -> bool:
     return (teile.scheme or "").lower() == "http" and not lokale_adresse(teile.hostname)
 
 
-def _fingerabdruck(key: str) -> str:
-    return hashlib.sha256(f"llm-bindung\0{key}".encode("utf-8")).hexdigest()[:16]
-
-
-def _bindung(db: Session, env_key: str) -> str | None:
-    """Ursprung, an den der Env-Key gebunden ist; None = ungebunden (auch wenn
-    die Bindung zu einem früheren Env-Key gehört)."""
-    zeile = _zeile(db, _BINDUNG)
-    try:
-        daten = json.loads(zeile.wert) if zeile is not None and zeile.wert else None
-    except ValueError:
-        return None
-    if not isinstance(daten, dict) or daten.get("key") != _fingerabdruck(env_key):
-        return None
-    return daten.get("ursprung")
-
-
-def _env_key_fuer(db: Session, url: str | None) -> str | None:
-    """LLM_API_KEY aus der Umgebung – nur für den Ursprung, an den er gebunden ist."""
-    env = _aus_umgebung(SCHLUESSEL["llm_api_key"])
-    if env is None:
-        return None
-    gebunden = _bindung(db, env)
-    return env if gebunden is None or gebunden == _ursprung(url) else None
-
-
-def _ki_key_plan(db: Session, plan: list[tuple[str, dict, str | None]]) -> tuple[bool, str | None]:
-    """Folgen einer Änderung von llm_url/llm_api_key → (gespeicherten Key
-    verwerfen?, neue Bindung des Env-Keys oder None). Ginge danach ein Key per
-    http:// nach außen → ValueError."""
+def _ki_key_plan(db: Session, plan: list[tuple[str, dict, str | None]]) -> tuple[bool, bool]:
+    """Folgen einer Änderung von llm_url/llm_api_key → (gespeicherten Key verwerfen?,
+    verdeckte gespeicherte URL entfernen?). ValueError, wenn die URL aus der Umgebung
+    kommt und geändert werden soll oder danach ein gespeicherter Key per http://
+    nach außen ginge."""
     neu = {s: w for s, _, w in plan}
     if "llm_url" not in neu and "llm_api_key" not in neu:
-        return False, None
-    alt_url = _gespeichert(_zeile(db, "llm_url")) or None
-    neu_url = neu.get("llm_url", alt_url)
-    wechsel = "llm_url" in neu and alt_url is not None and _ursprung(alt_url) != _ursprung(neu_url)
+        return False, False
+    env_url = _env_url()
+    if env_url is not None and "llm_url" in neu:
+        raise ValueError(URL_UMGEBUNG_FEHLER)
+    if env_url is not None:
+        # Key gehört zur URL aus der Umgebung; eine gespeicherte URL ist verdeckt und
+        # darf ihn später (ohne LLM_URL) nicht bekommen
+        ziel, wechsel = env_url, False
+        url_entfernen = bool(neu.get("llm_api_key")) and _zeile(db, "llm_url") is not None
+    else:
+        alt_url = _gespeichert(_zeile(db, "llm_url")) or None
+        ziel = neu.get("llm_url", alt_url)
+        # auch leer → gesetzt und gesetzt → leer ist ein Wechsel
+        wechsel = _ursprung(alt_url) != _ursprung(ziel)
+        url_entfernen = False
     verwerfen = wechsel and "llm_api_key" not in neu and _zeile(db, "llm_api_key") is not None
-    env = _aus_umgebung(SCHLUESSEL["llm_api_key"])
-    gebunden = _bindung(db, env) if env else None
-    bindung = _ursprung(alt_url) if env and wechsel and gebunden is None else None
     if "llm_api_key" in neu:
         gespeichert = neu["llm_api_key"]
     else:
         gespeichert = None if verwerfen else _gespeichert(_zeile(db, "llm_api_key"))
-    gebunden = bindung or gebunden
-    env_nutzbar = env is not None and (gebunden is None or gebunden == _ursprung(neu_url))
-    if (gespeichert or env_nutzbar) and key_unverschluesselt(neu_url):
+    # ein wirksamer Env-Key (LLM_URL + LLM_API_KEY) ist Sache des Betreibers – dann
+    # wird der gespeicherte gar nicht gesendet (Hinweis über `ki_key_hinweis`)
+    env_key = _umgebung_wirksam("llm_api_key", SCHLUESSEL["llm_api_key"])
+    if env_key is None and gespeichert and key_unverschluesselt(ziel):
         raise ValueError(HTTP_KEY_FEHLER)
-    return verwerfen, bindung
+    return verwerfen, url_entfernen
 
 
 def setze(db: Session, benutzer, aenderungen: dict[str, str | bool | None]) -> list[str]:
@@ -243,7 +249,8 @@ def setze(db: Session, benutzer, aenderungen: dict[str, str | bool | None]) -> l
     Geheimnis: None = unverändert, "" = löschen, sonst verschlüsselt speichern.
     Normal: None/"" = löschen, bool → "1"/"0".
     Neuer Ursprung der llm_url ohne neuen Key: gespeicherter Key wird verworfen
-    (gemeldet als „llm_api_key (verworfen …)“), siehe Moduldokumentation.
+    (gemeldet als „llm_api_key (verworfen …)“); llm_url bei LLM_URL aus der
+    Umgebung → ValueError. Siehe Moduldokumentation.
     """
     # erst alles prüfen, dann schreiben (keine halben Änderungen)
     plan: list[tuple[str, dict, str | None]] = []
@@ -260,7 +267,7 @@ def setze(db: Session, benutzer, aenderungen: dict[str, str | bool | None]) -> l
             plan.append((schluessel, info, text or None))
         else:
             plan.append((schluessel, info, _normalisieren(schluessel, info, wert_)))
-    key_verwerfen, bindung = _ki_key_plan(db, plan)
+    key_verwerfen, url_entfernen = _ki_key_plan(db, plan)
 
     benutzer_id = getattr(benutzer, "id", None)
     geaendert: list[str] = []
@@ -286,23 +293,20 @@ def setze(db: Session, benutzer, aenderungen: dict[str, str | bool | None]) -> l
         # gehört zum bisherigen Server – nie an einen anderen senden
         db.delete(_zeile(db, "llm_api_key"))
         geaendert.append("llm_api_key (verworfen: API-URL auf anderen Server geändert)")
-    if bindung is not None:
-        zeile = _zeile(db, _BINDUNG) or models.SystemEinstellung(schluessel=_BINDUNG)
-        if zeile not in db:
-            db.add(zeile)
-        zeile.wert = json.dumps({"ursprung": bindung,
-                                 "key": _fingerabdruck(_aus_umgebung(SCHLUESSEL["llm_api_key"]))})
-        zeile.verschluesselt = False
-        zeile.geaendert_am = models.utcnow()
-        zeile.geaendert_von = benutzer_id
-    if geaendert or bindung is not None:
+    if url_entfernen:
+        db.delete(_zeile(db, "llm_url"))
+        geaendert.append("llm_url (entfernt: API-URL kommt aus der Umgebung)")
+    alte_bindung = _zeile(db, _ALTE_BINDUNG)
+    if alte_bindung is not None:
+        db.delete(alte_bindung)
+    if geaendert or alte_bindung is not None:
         db.flush()
     return geaendert
 
 
 def _geheimnis_status(db: Session, schluessel: str) -> dict:
     info = SCHLUESSEL[schluessel]
-    if _aus_umgebung(info) is not None:
+    if _umgebung_wirksam(schluessel, info) is not None:
         return {"gesetzt": True, "lesbar": True, "aus_umgebung": True}
     zeile = _zeile(db, schluessel)
     gesetzt = zeile is not None and bool(zeile.wert)
@@ -324,23 +328,20 @@ def graph_zugang(db: Session) -> GraphZugang | None:
 
 
 def _ki_api_key(db: Session, url: str | None) -> str | None:
-    """API-Key für `url`: Env-Key (nur für seinen Ursprung, siehe Modul), sonst
+    """API-Key für `url`: Env-Key (nur zusammen mit LLM_URL, siehe Modul), sonst
     der gespeicherte; nie per http:// nach außen."""
-    key = _env_key_fuer(db, url) or _gespeichert(_zeile(db, "llm_api_key")) or None
+    key = wert(db, "llm_api_key")
     return None if key and key_unverschluesselt(url) else key
 
 
 def ki_key_hinweis(db: Session) -> str | None:
     """Warum ein eingerichteter API-Key nicht gesendet wird – None, wenn er es wird."""
-    url = wert(db, "llm_url")
-    env = _aus_umgebung(SCHLUESSEL["llm_api_key"])
-    gespeichert = _gespeichert(_zeile(db, "llm_api_key"))
-    if (_env_key_fuer(db, url) or gespeichert) and key_unverschluesselt(url):
+    if wert(db, "llm_api_key") and key_unverschluesselt(wert(db, "llm_url")):
         return HTTP_KEY_FEHLER
-    if env and _env_key_fuer(db, url) is None and not gespeichert:
-        return ("Der API-Key aus der Umgebungsvariable LLM_API_KEY wird nicht an diese API-URL "
-                "gesendet, weil sie auf einen anderen Server geändert wurde – bitte den API-Key für "
-                "die neue URL hier eingeben oder die URL zurücksetzen")
+    if _aus_umgebung(SCHLUESSEL["llm_api_key"]) is not None and _env_url() is None:
+        if _gespeichert(_zeile(db, "llm_api_key")):
+            return f"{ENV_KEY_OHNE_URL}; bis dahin gilt der hier gespeicherte API-Key"
+        return f"{ENV_KEY_OHNE_URL}; bis dahin wird kein API-Key gesendet"
     return None
 
 
@@ -377,6 +378,7 @@ def oeffentlich(db: Session) -> dict:
         },
         "llm": {
             "url": wert(db, "llm_url"),
+            "url_aus_umgebung": _env_url() is not None,
             "modell": wert(db, "llm_modell"),
             "vision": wert(db, "llm_vision") == "1",
             "api_key": _geheimnis_status(db, "llm_api_key"),

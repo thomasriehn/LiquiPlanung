@@ -41,7 +41,10 @@
     Auslesen an den hier eingetragenen KI-Dienst übertragen. Nur Dienste mit Auftragsverarbeitungsvertrag
     (AVV) bzw. selbst betriebene Modelle verwenden.</div>
   <form id="sys-ki-form" class="formular-zeilen" autocomplete="off">
-    <label>API-URL<input name="llm_url" spellcheck="false" placeholder="https://api.openai.com/v1"></label>
+    <label>API-URL
+      <input name="llm_url" spellcheck="false" placeholder="https://api.openai.com/v1">
+      <span class="hinweis" id="sys-ki-url-status"></span>
+    </label>
     <label>Modell<input name="llm_modell" spellcheck="false" placeholder="gpt-4o-mini"></label>
     <label>API-Key
       <input name="llm_api_key" type="password" autocomplete="new-password" spellcheck="false">
@@ -56,6 +59,7 @@
       <span class="hinweis" id="sys-ki-status"></span>
     </div>
   </form>
+  <div id="sys-ki-hinweis"></div>
   <div id="sys-ki-ergebnis"></div>
 
   <h2>Lokale Ablage</h2>

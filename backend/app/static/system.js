@@ -3,6 +3,7 @@
 // lokale Ablage. Geheimnisse kommen nie zum Browser zurück – nur ihr Status.
 
 const sysGeaendert = { graph: false, ki: false };    // ungespeicherte Eingaben je Formular
+const sysKi = { urlAusUmgebung: false };              // API-URL aus LLM_URL: nicht änderbar, nicht senden
 
 function sysGeheimText(g, umgebungsName) {
   if (!g) return "";
@@ -33,10 +34,19 @@ function sysGraphStatus(s) {
 function sysKiStatus(s) {
   const k = s.llm || {};
   const key = k.api_key || {};
-  document.getElementById("sys-ki-form").llm_api_key.placeholder = key.gesetzt || key.aus_umgebung
+  const kf = document.getElementById("sys-ki-form");
+  sysKi.urlAusUmgebung = !!k.url_aus_umgebung;
+  kf.llm_url.readOnly = sysKi.urlAusUmgebung;
+  if (sysKi.urlAusUmgebung) kf.llm_url.value = k.url || "";     // schreibgeschützt: keine Eingabe zu verlieren
+  document.getElementById("sys-ki-url-status").textContent = sysKi.urlAusUmgebung
+    ? "aus der Umgebungsvariable LLM_URL (hier nicht änderbar)" : "";
+  kf.llm_api_key.placeholder = key.gesetzt || key.aus_umgebung
     ? "gespeichert – leer lassen = unverändert" : "leer = ohne Schlüssel (z. B. lokaler Server)";
   document.getElementById("sys-ki-key-status").textContent = sysGeheimText(key, "LLM_API_KEY");
   document.getElementById("sys-ki-key-entfernen").style.display = key.gesetzt ? "" : "none";
+  // z. B. Key wegen http:// bzw. fehlender LLM_URL nicht gesendet
+  document.getElementById("sys-ki-hinweis").innerHTML = k.api_key_hinweis
+    ? `<div class="warnung">${esc(k.api_key_hinweis)}</div>` : "";
   document.getElementById("sys-ki-status").innerHTML =
     sysStatusHtml(k.konfiguriert, "eingerichtet", "nicht eingerichtet (API-URL und Modell fehlen)");
 }
@@ -108,11 +118,11 @@ function sysGraphDaten() {
 
 function sysKiDaten() {
   const f = document.getElementById("sys-ki-form");
-  const daten = {
-    llm_url: f.llm_url.value.trim(),
-    llm_modell: f.llm_modell.value.trim(),
-    llm_vision: f.llm_vision.checked,
-  };
+  const daten = {};
+  // URL aus der Umgebung lehnt der Server ab – nur eine hier eingetragene senden
+  if (!sysKi.urlAusUmgebung) daten.llm_url = f.llm_url.value.trim();
+  daten.llm_modell = f.llm_modell.value.trim();
+  daten.llm_vision = f.llm_vision.checked;
   if (f.llm_api_key.value) daten.llm_api_key = f.llm_api_key.value.trim();
   return daten;
 }

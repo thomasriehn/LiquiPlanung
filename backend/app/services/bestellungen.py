@@ -372,6 +372,9 @@ def als_dict(db: Session, b: models.Bestellung) -> dict:
     abgeloest_betrag = sum((a.betrag for a in b.abloesungen), NULL)
     im_plan = bestellung_im_plan(b, m)
     rest = bestellung_rest(b) if b.status in (_OFFEN, _FREIGEGEBEN) else NULL
+    # Ablösung, mit der die Bestellung erledigt ist (auch ohne „abschließend“, wenn
+    # die Summe das Brutto deckt) – Anzeige ohne „(Teilzahlung)“
+    erledigend = _abschluss(b) if b.status == _ABGELOEST else None
     konto = b.konto
     datei = None
     if b.datei_name:
@@ -424,6 +427,7 @@ def als_dict(db: Session, b: models.Bestellung) -> dict:
                 "betrag": _f(a.betrag),
                 "datum": _iso(a.datum),
                 "abschliessend": bool(a.abschliessend),
+                "erledigt": a is erledigend,
                 "notiz": a.notiz,
                 "buchung_id": a.buchung_id,
                 "transaktion_id": a.transaktion_id,
@@ -1461,7 +1465,9 @@ def _kennzahlen(
     # Überfälliges in C1 (Minderausgabe) und C3 aufhebt
     soll_gerollt: dict[Key, Decimal] = {}
     if snap is not None:
-        soll = snapshot_fluesse(snap)
+        # Planstand ohne den Anteil der zum Stichtag offenen Bestellungen: eine noch
+        # nicht entschiedene Bestellung schafft sich keinen eigenen Rahmen
+        soll = snapshot_fluesse(snap, ohne_offene_bestellungen=True)
         s0 = snap.stichtag
     else:
         s0 = wochen_start(heute)

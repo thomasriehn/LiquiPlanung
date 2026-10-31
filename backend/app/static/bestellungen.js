@@ -1116,6 +1116,13 @@ async function fdEntscheiden(entscheidung, knopf) {
   } catch (e) { toast(e.message); }
 }
 
+// Zusatz je Ablösung: die erledigende (Server: `erledigt`, auch ohne ausdrückliches
+// „abschließend“, wenn die Summe das Brutto deckt) ist keine Teilzahlung
+function fdAbloesungZusatz(a, anzahl) {
+  if (a.erledigt) return anzahl > 1 ? " (abschließend)" : "";
+  return a.abschliessend ? "" : " (Teilzahlung)";
+}
+
 function fdAbloesungenHtml(b) {
   const liste = b.abloesungen || [];
   const ART = { ZAHLUNG: "Zahlung", RECHNUNG: "Eingangsrechnung", MANUELL: "manuell" };
@@ -1124,7 +1131,7 @@ function fdAbloesungenHtml(b) {
       ${esc(ART[b.abgeloest_durch] || b.abgeloest_durch || "–")}: ${bsEur(b.abgeloest_betrag)}
       ${b.abweichung !== null && b.abweichung !== undefined ? ` · Abweichung zum Bestellbrutto ${b.abweichung > 0 ? "+" : ""}${eur(b.abweichung)} €` : ""}</p>` : ""}
     ${liste.length ? `<ul class="zd-liste">${liste.map(a => `<li><span>${bsDatum(a.datum)}</span>
-        <span>${esc(ART[a.art] || a.art)}${a.abschliessend ? "" : " (Teilzahlung)"}</span>
+        <span>${esc(ART[a.art] || a.art)}${fdAbloesungZusatz(a, liste.length)}</span>
         <span class="zahl">${eur(a.betrag)} €</span>
         <span class="hinweis">${esc(a.beleg || "")}${a.notiz ? " · " + esc(a.notiz) : ""}</span>
         ${LESER ? "" : `<button type="button" class="sekundaer klein-knopf" data-abloesung-aufheben="${a.id}" title="Ablösung aufheben">aufheben</button>`}</li>`).join("")}</ul>`

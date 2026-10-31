@@ -15,6 +15,7 @@ import email.policy
 import functools
 import html
 import logging
+import posixpath
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ from decimal import Decimal
 from io import BytesIO
 from pathlib import PurePosixPath
 from xml.etree import ElementTree
+from xml.parsers import expat
 
 from . import pdf_kontoauszug as _pk
 
@@ -37,11 +39,16 @@ OCR_MAX_KANTE = 4000
 TEXT_MAX = 200_000            # Schutz vor riesigen Tabellen/Mails (KI kürzt weiter)
 BILD_MAX_PIXEL = 40_000_000   # je Einzelbild nach dem Dekodieren (A4 mit 600 dpi ≈ 35 MP)
 BILD_MIN_KANTE = 300          # kleinere Bilder in Mails (Logos, Symbole) auslassen
+BILD_GROSS_FLAECHE = 250_000  # eingebettete Mailbilder neben echten Anhängen (Foto, Screenshot)
+EML_MAX_ANHAENGE = 10         # ausgewertete Anhänge je E-Mail
 # Office-Dateien sind ZIP-Archive: Grenzen gegen Archivbomben (entpackt)
 XML_MAX_BYTES = 20 * 1024 * 1024      # je ausgewertetem Teil
-ZIP_SUMME_MAX = 50 * 1024 * 1024      # alle ausgewerteten Teile zusammen
+ZIP_SUMME_MAX = 50 * 1024 * 1024      # alle ausgewerteten Teile zusammen (E-Mail: alle Office-Anhänge)
 ZIP_MAX_EINTRAEGE = 2000
-ZIP_MAX_ELEMENTE = 500_000            # XML-Elemente aller ausgewerteten Teile
+ZIP_MAX_ELEMENTE = 500_000            # XML-Elemente der ganz eingelesenen Teile zusammen, XLSX-Blätter je Blatt
+XML_MAX_NAMEN = 5_000                 # verschiedene Element- und Attributnamen (mit Namensraum) je Teil
+XML_MAX_ATTRIBUTE = 1_000             # Attribute je Element
+XML_MAX_NS_URI = 256                  # Zeichen je Namensraum-URI (OOXML: unter 100)
 DOCX_MAX_KOPF_FUSS = 10               # je Kopf- bzw. Fußzeilenteile
 XLSX_MAX_BLAETTER = 10
 XLSX_MAX_ZEILEN = 1000
@@ -323,6 +330,18 @@ def _kleines_bild(daten: bytes) -> bool:
         return True
 
 
+def _grosses_bild(daten: bytes) -> bool:
+    """Foto bzw. Screenshot statt Logo oder Signatur-Banner: kürzere Kante mindestens
+    BILD_MIN_KANTE, Fläche mindestens BILD_GROSS_FLAECHE (Banner sind flach und breit)."""
+    try:
+        from PIL import Image
+
+        breite, hoehe = Image.open(BytesIO(daten)).size
+    except Exception:  # noqa: BLE001
+        return False
+    return min(breite, hoehe) >= BILD_MIN_KANTE and breite * hoehe >= BILD_GROSS_FLAECHE
+
+
 def bild_normalisieren(bild, max_kante: int = VISION_MAX_KANTE):
     """PIL-Bild auf höchstens `max_kante` Pixel (längste Seite) verkleinern."""
     if max(bild.size) > max_kante:
@@ -369,36 +388,203 @@ def _bild(daten: bytes, max_seiten: int) -> BelegText:
 # ------------------------------------------------------------------ Office
 
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-_ENTITY = tuple("<!ENTITY".encode(k) for k in ("utf-8", "utf-16-le", "utf-16-be"))
+_SML_ZEILE = "http://schemas.openxmlformats.org/spreadsheetml/2006/main}row"   # expat-Schreibweise
+_NS_DEKLARATION = re.compile(rb"xmlns(?::[^\s=]*)?\s*=\s*([\"'])")
+_ZUWEISUNG = re.compile(rb"=\s*[\"']")
 
 
 def _mb(n: int) -> str:
     return f"{n // (1024 * 1024)} MB"
 
 
-def _zip_pruefen(z: zipfile.ZipFile, namen: list[str] | None = None) -> None:
-    """Schutz vor Archivbomben vor dem Parsen der Teile `namen` (sonst aller Einträge):
-    Zahl der Einträge, entpackte Größe je Teil und gesamt, Zahl der XML-Elemente.
-    Entity-Deklarationen (Entity-Expansion) sind in Office-Dateien nicht vorgesehen."""
-    eintraege = z.infolist()
-    if len(eintraege) > ZIP_MAX_EINTRAEGE:
-        raise ValueError(f"zu viele Teile im Archiv ({len(eintraege)}, höchstens {ZIP_MAX_EINTRAEGE})")
-    infos = eintraege if namen is None else [z.getinfo(n) for n in namen]
+def _zahl(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
+
+
+def _xml_roh_pruefen(name: str, roh: bytes) -> None:
+    """Prüfungen auf dem Rohtext, vor jedem Parser: keine DTD (Entity-Expansion, über
+    Standardattribute versteckte Namensräume), Namensraum-URIs höchstens XML_MAX_NS_URI
+    Zeichen, höchstens XML_MAX_ATTRIBUTE Attribute je Element. Beides vervielfacht sonst
+    schon in expat den Speicher: jeder Name wird samt URI aufgelöst („{uri}name“).
+    Attributwerte enthalten kein „<“: alle Attribute eines Tags stehen vor dem nächsten „<“."""
+    if roh[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in roh[:2]:   # UTF-16, Erkennung wie expat
+        be = roh[:2] == b"\xfe\xff" or roh[:1] == b"\x00"
+        roh = roh.decode("utf-16-be" if be else "utf-16-le", "replace").encode("utf-8")
+    if b"<!ENTITY" in roh:
+        raise ValueError(f"{name}: Entity-Deklaration nicht zulässig")
+    if b"<!DOCTYPE" in roh:
+        raise ValueError(f"{name}: Dokumenttyp-Deklaration (DTD) nicht zulässig")
+    for treffer in _NS_DEKLARATION.finditer(roh):
+        ende = roh.find(treffer.group(1), treffer.end())
+        if (ende if ende >= 0 else len(roh)) - treffer.end() > XML_MAX_NS_URI:
+            raise ValueError(f"{name}: Namensraum-Angabe zu lang (höchstens {XML_MAX_NS_URI} Zeichen)")
+    # nur lange Abschnitte von „<“ bis zum nächsten „<“ können so viele Attribute enthalten
+    for treffer in re.finditer(rb"<[^<]{%d,}" % XML_MAX_ATTRIBUTE, roh):
+        if len(_ZUWEISUNG.findall(roh, treffer.start(), treffer.end())) > XML_MAX_ATTRIBUTE:
+            raise ValueError(f"{name}: zu viele Attribute in einem Element "
+                             f"(höchstens {_zahl(XML_MAX_ATTRIBUTE)})")
+
+
+def _xml_vorpruefen(name: str, roh: bytes, grenze: int, blatt: bool = False) -> int:
+    """Vorprüfung mit expat ohne Baum: höchstens XML_MAX_NAMEN verschiedene aufgelöste
+    Element- und Attributnamen (ElementTree legt jeden zweimal in einem Zwischenspeicher
+    ab) und höchstens `grenze` Elemente, die der Parser gleichzeitig hält. Das sind alle,
+    bei streamend gelesenen XLSX-Blättern (`blatt`) die außerhalb von Zeilen (samt den
+    geleerten Zeilen) plus die größte Zeile: openpyxl leert jede Zeile nach dem Lesen,
+    andere Elemente nicht. Liefert diese Zahl. Ein Syntaxfehler beendet die Prüfung
+    still, dort bricht auch der eigentliche Parser ab."""
+    namen: set[str] = set()
+    elemente = zeile = groesste = tiefe = 0
+
+    def zu_viele() -> None:
+        raise ValueError(f"zu umfangreich zum Auslesen (über {_zahl(ZIP_MAX_ELEMENTE)} XML-Elemente)")
+
+    def start(tag: str, attribute: list[str]) -> None:
+        nonlocal elemente, zeile, tiefe
+        namen.add(tag)
+        if attribute:
+            namen.update(attribute[::2])
+        if len(namen) > XML_MAX_NAMEN:
+            raise ValueError(f"{name}: zu viele verschiedene XML-Namen (über {_zahl(XML_MAX_NAMEN)})")
+        if tiefe:
+            zeile += 1
+            tiefe += tag == _SML_ZEILE
+            if elemente + zeile > grenze:
+                zu_viele()
+        else:
+            elemente += 1
+            if blatt and tag == _SML_ZEILE:
+                tiefe = 1
+            if elemente + groesste > grenze:
+                zu_viele()
+
+    def ende(tag: str) -> None:
+        nonlocal zeile, groesste, tiefe
+        if tiefe and tag == _SML_ZEILE:
+            tiefe -= 1
+            if not tiefe:
+                groesste, zeile = max(groesste, zeile), 0
+
+    def dtd(*_args) -> None:
+        raise ValueError(f"{name}: Dokumenttyp-Deklaration (DTD) nicht zulässig")
+
+    parser = expat.ParserCreate(namespace_separator="}")   # Trenner wie ElementTree
+    parser.ordered_attributes = True
+    parser.StartElementHandler = start
+    parser.StartDoctypeDeclHandler = dtd
+    if blatt:
+        parser.EndElementHandler = ende
+    try:
+        parser.Parse(roh, True)
+    except expat.ExpatError:
+        pass
+    return elemente + max(groesste, zeile)
+
+
+def _zip_groessen(z: zipfile.ZipFile, infos: list[zipfile.ZipInfo]) -> None:
+    if len(z.infolist()) > ZIP_MAX_EINTRAEGE:
+        raise ValueError(f"zu viele Teile im Archiv ({len(z.infolist())}, höchstens {ZIP_MAX_EINTRAEGE})")
     if (any(i.file_size > XML_MAX_BYTES for i in infos)
             or sum(i.file_size for i in infos) > ZIP_SUMME_MAX):
         raise ValueError(f"Inhalt entpackt zu groß zum Auslesen (höchstens {_mb(ZIP_SUMME_MAX)}, "
                          f"je Teil {_mb(XML_MAX_BYTES)})")
-    elemente = 0
+
+
+def _teile_pruefen(z: zipfile.ZipFile, infos: list[zipfile.ZipInfo], elemente: int = 0,
+                   blaetter: frozenset[str] = frozenset()) -> int:
+    """Rohtext- und expat-Prüfung der Teile; liefert die Elementsumme der ganz eingelesenen
+    Teile (`blaetter` zählen nur je Blatt)."""
     for info in infos:
         if info.is_dir():
             continue
         roh = z.read(info)   # liefert höchstens file_size Bytes
-        if any(muster in roh for muster in _ENTITY):
-            raise ValueError(f"{info.filename}: Entity-Deklaration nicht zulässig")
-        elemente += roh.count(b"<") - roh.count(b"</")   # Schätzung, eher zu hoch
-        if elemente > ZIP_MAX_ELEMENTE:
-            raise ValueError(f"zu umfangreich zum Auslesen (über {ZIP_MAX_ELEMENTE:,} XML-Elemente)"
-                             .replace(",", "."))
+        _xml_roh_pruefen(info.filename, roh)
+        if info.filename in blaetter:
+            _xml_vorpruefen(info.filename, roh, ZIP_MAX_ELEMENTE, blatt=True)
+        else:
+            elemente += _xml_vorpruefen(info.filename, roh, ZIP_MAX_ELEMENTE - elemente)
+    return elemente
+
+
+def _zip_pruefen(z: zipfile.ZipFile, namen: list[str] | None = None) -> None:
+    """Schutz vor Archiv- und XML-Bomben vor dem Parsen der Teile `namen` (sonst aller
+    Einträge): Zahl der Einträge, entpackte Größe je Teil und gesamt, Rohtext (DTD,
+    Namensräume, Attribute) und expat-Vorprüfung (Namen, Elemente zusammen)."""
+    infos = z.infolist() if namen is None else [z.getinfo(n) for n in namen]
+    _zip_groessen(z, infos)
+    _teile_pruefen(z, infos)
+
+
+_CT_BLATT = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+_CT_MAPPE = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml",
+    "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+    "application/vnd.ms-excel.template.macroEnabled.main+xml",
+}
+# liest openpyxl (read_only) immer ganz bzw. als Ganzes, wenn vorhanden
+_XLSX_FEST = {"[Content_Types].xml", "xl/workbook.xml", "xl/styles.xml", "docProps/core.xml",
+              "docProps/custom.xml", "xl/theme/theme1.xml"}
+
+
+def _paketteil(name: str) -> bool:
+    return name == "[Content_Types].xml" or name.endswith(".rels")
+
+
+def _lokal(tag) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _xlsx_blaetter(z: zipfile.ZipFile) -> frozenset[str]:
+    """Arbeitsblätter, die openpyxl im read_only-Modus nur streamend liest: Ziele von
+    Blatt-Beziehungen einer Mappe, die nirgends sonst vorkommen. Diagrammblätter,
+    Zeichnungen, Diagramme, geteilte Zeichenketten usw. liest openpyxl ganz ein, auch
+    unter einem Blatt-Pfad. Die Datei bestimmt, welcher Teil was ist – daher wie openpyxl
+    auflösen (Elemente nur nach lokalem Namen, Ziele relativ zum Elternordner) und im
+    Zweifel nichts ausnehmen. Setzt geprüfte Paketteile ([Content_Types].xml, *.rels) voraus."""
+    vorhanden = set(z.namelist())
+    andere = set(_XLSX_FEST)
+    mappen = {"xl/workbook.xml"}
+    blaetter: set[str] = set()
+    try:
+        for el in ElementTree.fromstring(z.read("[Content_Types].xml")).iter():
+            if _lokal(el.tag) != "Override":
+                continue
+            teil = el.get("PartName") or ""
+            varianten = {teil, teil[1:], teil.lstrip("/")}   # openpyxl: PartName[1:]
+            if el.get("ContentType") in _CT_MAPPE:
+                mappen |= varianten
+            if el.get("ContentType") != _CT_BLATT:
+                andere |= varianten
+        mappen_rels = {posixpath.join(posixpath.dirname(m), "_rels", posixpath.basename(m) + ".rels")
+                       for m in mappen}
+        for name in sorted(vorhanden):
+            if not name.endswith(".rels"):
+                continue
+            eltern = posixpath.split(posixpath.dirname(name))[0]
+            for el in ElementTree.fromstring(z.read(name)).iter():
+                if _lokal(el.tag) != "Relationship" or el.get("TargetMode") == "External":
+                    continue
+                ziel = el.get("Target") or ""
+                ziel = ziel[1:] if ziel.startswith("/") else posixpath.normpath(posixpath.join(eltern, ziel))
+                typ = el.get("Type") or ""
+                if name in mappen_rels and typ.endswith("/worksheet") and "chartsheet" not in typ:
+                    blaetter.add(ziel)
+                else:
+                    andere.add(ziel)
+    except (KeyError, ElementTree.ParseError, ValueError):
+        return frozenset()
+    return frozenset(b for b in blaetter - andere - mappen if b in vorhanden and not _paketteil(b))
+
+
+def _xlsx_pruefen(z: zipfile.ZipFile) -> None:
+    """Wie `_zip_pruefen` für alle Einträge (welche Teile openpyxl liest, bestimmt die Datei),
+    aber streamend gelesene Arbeitsblätter zählen nicht in die Elementsumme: openpyxl liest
+    sie im read_only-Modus Zeile für Zeile und hier ohnehin nur bis XLSX_MAX_ZEILEN."""
+    infos = z.infolist()
+    _zip_groessen(z, infos)
+    elemente = _teile_pruefen(z, [i for i in infos if _paketteil(i.filename)])
+    _teile_pruefen(z, [i for i in infos if not _paketteil(i.filename)], elemente, _xlsx_blaetter(z))
 
 
 def _zip_xml(z: zipfile.ZipFile, name: str):
@@ -473,15 +659,20 @@ def _teil_nr(name: str) -> int:
     return int(treffer.group(1)) if treffer else 0
 
 
+def _docx_auswahl(z: zipfile.ZipFile) -> list[str]:
+    """Gelesene Teile: höchstens DOCX_MAX_KOPF_FUSS Kopf- und Fußzeilen, Haupttext."""
+    namen = list(dict.fromkeys(z.namelist()))
+    kopf = sorted((n for n in namen if re.fullmatch(r"word/header\d*\.xml", n)), key=_teil_nr)
+    fuss = sorted((n for n in namen if re.fullmatch(r"word/footer\d*\.xml", n)), key=_teil_nr)
+    vorhanden = set(namen)
+    return [n for n in (*kopf[:DOCX_MAX_KOPF_FUSS], "word/document.xml",
+                        *fuss[:DOCX_MAX_KOPF_FUSS]) if n in vorhanden]
+
+
 def docx_text(daten: bytes) -> str:
     """Text eines Word-Dokuments: Kopfzeilen (Briefkopf!), Haupttext, Fußzeilen."""
     with zipfile.ZipFile(BytesIO(daten)) as z:
-        namen = list(dict.fromkeys(z.namelist()))
-        kopf = sorted((n for n in namen if re.fullmatch(r"word/header\d*\.xml", n)), key=_teil_nr)
-        fuss = sorted((n for n in namen if re.fullmatch(r"word/footer\d*\.xml", n)), key=_teil_nr)
-        vorhanden = set(namen)
-        auswahl = [n for n in (*kopf[:DOCX_MAX_KOPF_FUSS], "word/document.xml",
-                               *fuss[:DOCX_MAX_KOPF_FUSS]) if n in vorhanden]
+        auswahl = _docx_auswahl(z)
         _zip_pruefen(z, auswahl)
         teile: list[str] = []
         laenge = 0
@@ -515,10 +706,8 @@ def xlsx_text(daten: bytes) -> tuple[str, int]:
     """Zellwerte je Blatt (Zeilen, Zellen mit „ | “ getrennt) und Anzahl der Blätter."""
     from openpyxl import load_workbook
 
-    # openpyxl liest u. a. sharedStrings.xml vollständig ein, welche Teile es liest,
-    # bestimmt die Datei selbst: daher alle Einträge prüfen
     with zipfile.ZipFile(BytesIO(daten)) as z:
-        _zip_pruefen(z)
+        _xlsx_pruefen(z)
     mappe = load_workbook(BytesIO(daten), read_only=True, data_only=True, keep_links=False)
     try:
         blaetter = mappe.worksheets
@@ -599,11 +788,24 @@ def _eml_zerlegen(daten: bytes) -> tuple[list[str], list[str], list[tuple[str, s
             klartext.append(_teil_text(teil))
         elif typ == "text/html":
             html_teile.append(_html_text(_teil_text(teil)))
-    # Signatur- und Logobilder nicht als Beleg werten: eingebettete Bilder nur ohne
-    # echte Anhänge und nur in brauchbarer Größe
-    if not anhaenge:
+    # Signatur- und Logobilder nicht als Beleg werten: ohne echte Anhänge zählen eingebettete
+    # Bilder ab brauchbarer Größe, daneben nur große (Foto/Screenshot der Bestellung), hinten
+    if anhaenge:
+        anhaenge += [e for e in eingebettet if _grosses_bild(e[2])]
+    else:
         anhaenge = [e for e in eingebettet if not _kleines_bild(e[2])]
     return kopf, (klartext or html_teile), anhaenge
+
+
+def _office_umfang(daten: bytes, typ: str) -> int:
+    """Entpackte Größe der Teile, die das Auslesen liest (DOCX: Auswahl, XLSX: alle)."""
+    try:
+        with zipfile.ZipFile(BytesIO(daten)) as z:
+            if typ == DOCX:
+                return sum(z.getinfo(n).file_size for n in _docx_auswahl(z))
+            return sum(i.file_size for i in z.infolist())
+    except (zipfile.BadZipFile, KeyError, ValueError, OSError):
+        return 0   # nicht lesbar: scheitert gleich beim Öffnen
 
 
 def _eml(daten: bytes, max_seiten: int, tiefe: int) -> BelegText:
@@ -613,11 +815,34 @@ def _eml(daten: bytes, max_seiten: int, tiefe: int) -> BelegText:
     warnungen: list[str] = []
     quelle = "TEXT"
     ocr = False
+    if len(anhaenge) > EML_MAX_ANHAENGE:
+        warnungen.append(f"Nur die ersten {EML_MAX_ANHAENGE} von {len(anhaenge)} Anhängen ausgewertet.")
+        anhaenge = anhaenge[:EML_MAX_ANHAENGE]
+    # Rechenzeit über alle Anhänge begrenzen: PDF-/Bildseiten (Text bzw. OCR) und entpackte
+    # Office-Teile. Doppelt so viele Seiten wie ein Einzeldokument, damit z. B. ein Foto
+    # der Bestellung hinter mehrseitigen AGB noch gelesen wird.
+    seiten_gesamt = seiten_rest = 2 * max_seiten
+    office_rest = ZIP_SUMME_MAX
     for name, typ, inhalt in anhaenge:
         if tiefe >= 1:
             warnungen.append(f"Anhang „{name}“ nicht ausgewertet (verschachtelt).")
             continue
-        unter = _beleg_text(inhalt, mime_bestimmen(inhalt, typ, name), max_seiten, name, tiefe + 1)
+        art = mime_bestimmen(inhalt, typ, name)
+        seitenweise = art == PDF or art in BILD_MIME
+        if seitenweise and seiten_rest <= 0:
+            warnungen.append(f"Anhang „{name}“ nicht ausgewertet: höchstens {seiten_gesamt} Seiten "
+                             "aller Anhänge zusammen.")
+            continue
+        if art in (DOCX, XLSX):
+            umfang = _office_umfang(inhalt, art)
+            if umfang > office_rest:
+                warnungen.append(f"Anhang „{name}“ nicht ausgewertet: Office-Anhänge zusammen entpackt "
+                                 f"über {_mb(ZIP_SUMME_MAX)}.")
+                continue
+            office_rest -= umfang
+        unter = _beleg_text(inhalt, art, min(max_seiten, seiten_rest), name, tiefe + 1)
+        if seitenweise:
+            seiten_rest -= max(1, min(unter.seiten, seiten_rest))
         warnungen += [f"Anhang „{name}“: {w}" for w in unter.warnungen]
         if unter.text.strip():
             teile.append(f"--- Anhang: {name} ---\n{unter.text}")
@@ -703,8 +928,9 @@ def vision_bilder(daten: bytes, mime: str, max_seiten: int = VISION_MAX_SEITEN,
         elif typ in BILD_MIME:
             bilder = _bild_frames(daten, max_seiten, VISION_MAX_KANTE)
         elif typ == EML:
-            # PDF-Anhänge vor Bildern, Kleinstbilder (Logos, Symbole) auslassen
-            anhaenge = [(t, inhalt) for _, t, inhalt in eml_anhaenge(daten)
+            # dieselben Anhänge wie beim Text; PDF-Anhänge vor Bildern, Kleinstbilder
+            # (Logos, Symbole) auslassen
+            anhaenge = [(t, inhalt) for _, t, inhalt in eml_anhaenge(daten)[:EML_MAX_ANHAENGE]
                         if t == PDF or (t in BILD_MIME and not _kleines_bild(inhalt))]
             anhaenge.sort(key=lambda a: a[0] != PDF)
             urls: list[str] = []

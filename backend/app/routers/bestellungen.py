@@ -316,15 +316,16 @@ def system_graph_test(admin=Depends(nur_admin), db: Session = Depends(get_db)):
 @router.post("/system/ki/test")
 def system_ki_test(admin=Depends(nur_admin), db: Session = Depends(get_db)):
     zugang = systemeinstellungen.ki_zugang(db)
+    hinweis = systemeinstellungen.ki_key_hinweis(db)
     if zugang is None:
         raise HTTPException(
-            409, "Der KI-Zugang ist nicht eingerichtet – bitte API-URL und Modell hinterlegen")
-    hinweis = systemeinstellungen.ki_key_hinweis(db)
+            409, "Der KI-Zugang ist nicht eingerichtet – bitte API-URL und Modell hinterlegen"
+            + (f" – {hinweis}" if hinweis else ""))
     with _fehler(db):
         try:
             return ki.verbindung_testen(zugang)
         except ki.KiFehler as e:
-            if hinweis:  # z. B. Key wegen http:// bzw. geänderter URL nicht gesendet
+            if hinweis:  # z. B. Key wegen http:// bzw. fehlender LLM_URL nicht gesendet
                 raise ki.KiFehler(f"{e} – {hinweis}", status=e.status) from e
             raise
 

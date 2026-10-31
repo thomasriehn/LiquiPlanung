@@ -316,9 +316,10 @@ def test_snapshot_friert_bestellung_ein(db):
     assert snapshot_fluesse(snap)[b.konto_id][date(2026, 8, 12)] == Decimal("-5950.00")
 
 
-def test_planstand_friert_nur_entschiedene_bestellungen_ein(db):
-    """Noch nicht entschiedene Bestellungen gehören nicht in den Planstand – auch
-    wenn der Mandant sie im aktuellen Plan mitführt."""
+def test_planstand_kennzeichnet_noch_nicht_entschiedene_bestellungen(db):
+    """Der Planstand friert den angezeigten Plan ein – auch noch nicht entschiedene
+    Bestellungen, die der Mandant mitführt; deren Anteil ist gekennzeichnet und fehlt
+    in der Soll-Basis der Freigabe."""
     m = _mandant(db)
     u = _benutzer(db)
     assert m.bestellungen_offen_einplanen is not False
@@ -329,8 +330,14 @@ def test_planstand_friert_nur_entschiedene_bestellungen_ein(db):
     live = plan_fluesse(db, m, START, START + timedelta(days=13), heute=START)
     assert live[offen.konto_id][date(2026, 8, 12)] == Decimal("-5950.00")
     assert live[offen.konto_id][START] == Decimal("-2380.00")          # gerollt
-    werte = snapshot_fluesse(erstelle_snapshot(db, m, start=START, heute=START))[offen.konto_id]
-    assert {d: v for d, v in werte.items() if v} == {date(2026, 8, 13): Decimal("-1190.00")}
+    snap = erstelle_snapshot(db, m, start=START, heute=START)
+    werte = snapshot_fluesse(snap)[offen.konto_id]
+    assert {d: v for d, v in werte.items() if v} == {
+        k: v for k, v in live[offen.konto_id].items() if v}
+    soll = snapshot_fluesse(snap, ohne_offene_bestellungen=True)[offen.konto_id]
+    assert {d: v for d, v in soll.items() if v} == {date(2026, 8, 13): Decimal("-1190.00")}
+    assert sorted((w.datum, w.betrag) for w in snap.werte if w.bestellung_offen) == [
+        (START, Decimal("-2380.00")), (date(2026, 8, 12), Decimal("-5950.00"))]
 
 
 def test_mandantenschalter_und_bestellfilter(db):

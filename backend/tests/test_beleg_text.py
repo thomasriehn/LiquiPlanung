@@ -576,9 +576,11 @@ def test_ocr_uebergrosse_seite_begrenzt_a4_unveraendert(monkeypatch):
     aufrufe = _render_beobachten(monkeypatch)
     seiten = pdf_kontoauszug._ocr_zeilen(_roh_pdf([(595.28, 841.89), (2000, 2000), (842, 595)]))
     assert len(seiten) == 3
+    # die Seiten werden parallel erkannt: Reihenfolge der Aufrufe beliebig, nach Breite ordnen
+    groessen.sort()
     assert abs(groessen[0][0] - 2481) <= 1 and abs(groessen[0][1] - 3508) <= 1   # A4 weiter 300 dpi
-    assert abs(groessen[2][0] - 3508) <= 1 and abs(groessen[2][1] - 2481) <= 1   # A4 quer
-    breite, hoehe = groessen[1]
+    assert abs(groessen[1][0] - 3508) <= 1 and abs(groessen[1][1] - 2481) <= 1   # A4 quer
+    breite, hoehe = groessen[2]
     assert breite * hoehe <= pdf_kontoauszug.OCR_MAX_PIXEL * 1.001
     assert breite >= 5990                                # nicht unnötig klein
     assert all(gesperrt for _, gesperrt in aufrufe) and len(aufrufe) == 3
@@ -663,7 +665,7 @@ def _png_bild(groesse, farbe="white") -> bytes:
 
 
 def _eml_mit_signatur(anhaenge: list[tuple[bytes, str, str, str]], logos: int = 3,
-                      bild: bytes | None = None) -> bytes:
+                      bild: bytes | None = None, banner: bytes | None = None) -> bytes:
     """HTML-Mail mit eingebetteten Signaturbildern (multipart/related, cid) und Anhängen."""
     nachricht = EmailMessage()
     nachricht["Subject"] = "Auftragsbestätigung 4711"
@@ -676,6 +678,9 @@ def _eml_mit_signatur(anhaenge: list[tuple[bytes, str, str, str]], logos: int = 
     for i in range(1, logos + 1):
         html_teil.add_related(_png_bild((120, 40), "red"), maintype="image", subtype="png",
                               cid=f"<logo{i}>", filename=f"image00{i}.png", disposition="inline")
+    if banner is not None:
+        html_teil.add_related(banner, maintype="image", subtype="png", cid="<banner>",
+                              filename="banner.png", disposition="inline")
     if bild is not None:
         html_teil.add_related(bild, maintype="image", subtype="png", cid="<foto>",
                               filename="foto.png", disposition="inline")
@@ -713,3 +718,227 @@ def test_vision_eml_pdf_vor_bildern_und_ohne_kleinstbilder():
     assert len(groessen) == 3
     assert all(abs(b - 1240) <= 2 for b, _ in groessen[:2])   # erst die PDF-Seiten
     assert groessen[2] == (900, 700)                           # dann das Foto, kein Symbol
+
+
+def test_eml_grosses_eingebettetes_bild_neben_pdf_bleibt():
+    # Foto/Screenshot der Bestellung (cid) neben echtem Anhang: hinten anstellen; Logos und
+    # flache Signatur-Banner bleiben draußen
+    daten = _eml_mit_signatur([(_text_pdf(ZEILEN, seiten=2), "application", "pdf", "AGB.pdf")], logos=2,
+                              bild=_png_bild((900, 700), "blue"), banner=_png_bild((1200, 150), "green"))
+    assert [name for name, _, _ in bt.eml_anhaenge(daten)] == ["AGB.pdf", "foto.png"]
+    groessen = [_bild_aus_data_url(u).size for u in vision_bilder(daten, EML)]
+    assert len(groessen) == 3
+    assert all(abs(b - 1240) <= 2 for b, _ in groessen[:2])   # erst die PDF-Seiten
+    assert groessen[2] == (900, 700)
+
+
+@ocr_noetig
+def test_eml_eingebettetes_foto_der_bestellung_wird_gelesen():
+    foto = _png(_seitenbild(["BESTELLUNG 4711", "Holz Meier GmbH", "Summe 1.234,56 EUR"], dpi=100))
+    agb = (_text_pdf(["Allgemeine Geschaeftsbedingungen"]), "application", "pdf", "AGB.pdf")
+    erg = beleg_text(_eml_mit_signatur([agb], logos=1, bild=foto), EML)
+    assert erg.quelle == "OCR", erg.warnungen
+    assert "Allgemeine Geschaeftsbedingungen" in erg.text and "Holz Meier" in erg.text
+    assert erg.text.index("--- Anhang: AGB.pdf ---") < erg.text.index("--- Anhang: foto.png ---")
+
+
+# ------------------------------------------------------------------ E-Mail: Aufwand begrenzt
+
+def _eml_anhaenge(anhaenge: list[tuple[bytes | str, str, str, str]]) -> bytes:
+    nachricht = EmailMessage()
+    nachricht["Subject"] = "Unterlagen zur Bestellung 4711"
+    nachricht["From"] = "einkauf@nordlicht.example"
+    nachricht["To"] = "vertrieb@lieferant.example"
+    nachricht.set_content("Anbei die Unterlagen.")
+    for inhalt, haupt, unter, name in anhaenge:
+        if isinstance(inhalt, str):
+            nachricht.add_attachment(inhalt, subtype=unter, filename=name)
+        else:
+            nachricht.add_attachment(inhalt, maintype=haupt, subtype=unter, filename=name)
+    return bytes(nachricht)
+
+
+def test_eml_hoechstens_zehn_anhaenge():
+    daten = _eml_anhaenge([(f"Position {nr} Kopierpapier", "text", "plain", f"pos{nr}.txt")
+                           for nr in range(1, 13)] + [(_text_pdf(ZEILEN), "application", "pdf", "AB.pdf")])
+    erg = beleg_text(daten, EML)
+    assert "Position 10 Kopierpapier" in erg.text
+    assert "Position 11" not in erg.text and "AB-4711" not in erg.text
+    assert any("ersten 10 von 13 Anhängen" in w for w in erg.warnungen), erg.warnungen
+    assert vision_bilder(daten, EML) == []   # dieselben zehn Anhänge wie beim Text
+
+
+def test_eml_gemeinsames_seitenbudget(monkeypatch):
+    aufrufe = []
+    original = bt.pdf_text
+    monkeypatch.setattr(bt, "pdf_text", lambda d, m=5: aufrufe.append(m) or original(d, m))
+    daten = _eml_anhaenge([(_text_pdf([f"Dokument {b}"], seiten=4), "application", "pdf", f"{b}.pdf")
+                           for b in "ABCD"])
+    erg = beleg_text(daten, EML)
+    assert aufrufe == [5, 5, 2]   # zusammen 2 × BELEG_MAX_SEITEN, je Anhang höchstens 5
+    teil_c = erg.text.split("--- Anhang: C.pdf ---")[1]
+    assert "Seite 2" in teil_c and "Seite 3" not in teil_c
+    assert "Dokument D" not in erg.text
+    assert any("D.pdf" in w and "höchstens 10 Seiten" in w for w in erg.warnungen), erg.warnungen
+
+
+def test_eml_office_anhaenge_zusammen_begrenzt(monkeypatch):
+    docx_typ = "vnd.openxmlformats-officedocument.wordprocessingml.document"
+    dokumente = [_docx_roh({"word/document.xml": _w_dok(_w_p(f"Angebot {nr}") + _w_p("x" * 1500))})
+                 for nr in (1, 2, 3)]
+    groesse = zipfile.ZipFile(BytesIO(dokumente[0])).getinfo("word/document.xml").file_size
+    monkeypatch.setattr(bt, "ZIP_SUMME_MAX", 2 * groesse + 100)   # je Datei reicht es, für alle nicht
+    erg = beleg_text(_eml_anhaenge([(d, "application", docx_typ, f"angebot{nr}.docx")
+                                    for nr, d in enumerate(dokumente, 1)]), EML)
+    assert "Angebot 1" in erg.text and "Angebot 2" in erg.text
+    assert "Angebot 3" not in erg.text
+    assert any("angebot3.docx" in w and "zusammen entpackt" in w for w in erg.warnungen), erg.warnungen
+
+
+# ------------------------------------------------------------------ Office: Namensräume, Namen, DTD
+
+def test_office_lange_namensraum_uri_abgelehnt():
+    # ElementTree legt je Name „{uri}name“ ab: lange URI × viele Namen = Gigabytes
+    uri = "urn:" + "A" * 10_000
+    namen = "".join(f"<a:e{i}/>" for i in range(300))
+    dok = f'<w:document {_WNS} xmlns:a="{uri}"><w:body>{_w_p("Bestellung 4711")}{namen}</w:body></w:document>'
+    standard = _w_dok(_w_p("Bestellung 4711") + f'<x xmlns="{uri}">{namen.replace("a:", "")}</x>')
+    for inhalt in (dok, standard, ('<?xml version="1.0" encoding="UTF-16"?>' + dok).encode("utf-16")):
+        erg = beleg_text(_docx_roh({"word/document.xml": inhalt}), DOCX)
+        assert erg.quelle == "LEER"
+        assert any("Namensraum" in w for w in erg.warnungen), erg.warnungen
+
+    def geteilt(f):
+        f.write(f'<sst {_XNS} xmlns:a="{uri}"><si><t>Holz Meier</t></si>{namen}</sst>'.encode())
+
+    erg = beleg_text(_xlsx_roh('<row r="1"><c r="A1" t="s"><v>0</v></c></row>', geteilt), XLSX)
+    assert erg.quelle == "LEER"
+    assert any("Namensraum" in w for w in erg.warnungen), erg.warnungen
+    # UTF-16 ohne Auffälligkeiten bleibt lesbar
+    utf16 = ('<?xml version="1.0" encoding="UTF-16"?>' + _w_dok(_w_p("Bestellung 4711"))).encode("utf-16")
+    assert beleg_text(_docx_roh({"word/document.xml": utf16}), DOCX).text == "Bestellung 4711"
+
+
+def test_office_viele_namen_oder_attribute_abgelehnt():
+    ns = 'xmlns:a="urn:liquiplanung:test"'
+    viele = "".join(f"<a:e{i}/>" for i in range(6000))   # über XML_MAX_NAMEN
+    erg = beleg_text(_docx_roh({"word/document.xml": _w_dok(f'<w:p {ns}>{viele}</w:p>')}), DOCX)
+    assert erg.quelle == "LEER" and any("verschiedene XML-Namen" in w for w in erg.warnungen), erg.warnungen
+    attribute = " ".join(f'a:x{i}=""' for i in range(1200))   # über XML_MAX_ATTRIBUTE
+    erg = beleg_text(_docx_roh({"word/document.xml": _w_dok(f"<w:p {ns} {attribute}/>")}), DOCX)
+    assert erg.quelle == "LEER" and any("Attribute" in w for w in erg.warnungen), erg.warnungen
+    # üblich: wenige Attribute je Element, lange Texte, auch mit „=“
+    normal = " ".join(f'a:x{i}="1"' for i in range(30))
+    dok = _w_dok(f'<w:p {ns} {normal}><w:r><w:t>Bestellung 4711</w:t></w:r></w:p>' + _w_p('a="b" ' * 300))
+    assert beleg_text(_docx_roh({"word/document.xml": dok}), DOCX).text.startswith("Bestellung 4711")
+
+
+def test_office_dtd_ohne_entity_abgelehnt():
+    # über <!ATTLIST> ließen sich Namensräume und Attribute unsichtbar einschleusen
+    uri = "urn:" + "A" * 10_000
+    dok = (f'<?xml version="1.0"?><!DOCTYPE w:document [<!ATTLIST w:p xmlns:a CDATA "{uri}" a:x CDATA "1">]>'
+           + _w_dok(_w_p("Bestellung 4711")))
+    erg = beleg_text(_docx_roh({"word/document.xml": dok}), DOCX)
+    assert erg.quelle == "LEER"
+    assert any("DTD" in w for w in erg.warnungen), erg.warnungen
+
+
+# ------------------------------------------------------------------ XLSX: große Blätter
+
+def _mappe(blaetter: dict[str, list[list]]) -> bytes:
+    from openpyxl import Workbook
+
+    mappe = Workbook()
+    mappe.remove(mappe.active)
+    for titel, zeilen in blaetter.items():
+        blatt = mappe.create_sheet(titel)
+        for zeile in zeilen:
+            blatt.append(zeile)
+    puffer = BytesIO()
+    mappe.save(puffer)
+    return puffer.getvalue()
+
+
+def test_xlsx_grosses_blatt_liest_erste_zeilen(monkeypatch):
+    # Blätter zählen nur je Blatt: openpyxl liest sie zeilenweise, hier bis XLSX_MAX_ZEILEN
+    monkeypatch.setattr(bt, "ZIP_MAX_ELEMENTE", 20_000)
+    zeilen = [["Bestellung 4711", "Holz Meier GmbH"]] + [[i, f"Artikel {i}", 1.5 * i, *range(7)]
+                                                         for i in range(3000)]
+    erg = beleg_text(_mappe({"Bestellung": zeilen}), XLSX)
+    assert erg.quelle == "TEXT", erg.warnungen
+    assert "Bestellung 4711 | Holz Meier GmbH" in erg.text
+    assert "| Artikel 998 |" in erg.text and "Artikel 999" not in erg.text   # 1000 Zeilen
+
+
+def test_xlsx_grosses_zweites_blatt(monkeypatch):
+    monkeypatch.setattr(bt, "ZIP_MAX_ELEMENTE", 20_000)
+    stamm = [[f"ART-{i:06d}", f"Artikel {i} Beschreibung", "Stück", 1.5 + i, "19%", f"EAN{i:013d}"]
+             for i in range(2000)]
+    erg = beleg_text(_mappe({"Bestellung": [["Lieferant", "Müller Bürobedarf GmbH"], ["Summe netto", 1000]],
+                             "Artikelstamm": stamm}), XLSX)
+    assert erg.quelle == "TEXT", erg.warnungen
+    assert "Lieferant | Müller Bürobedarf GmbH" in erg.text
+    assert "Tabellenblatt „Artikelstamm“" in erg.text
+
+
+def test_xlsx_blatt_zaehlt_was_openpyxl_nicht_leert(monkeypatch):
+    # openpyxl leert nur Zeilen; Elemente außerhalb, in fremden „Zeilen“ und die größte Zeile bleiben
+    monkeypatch.setattr(bt, "ZIP_MAX_ELEMENTE", 1000)
+    erste = '<row r="1"><c r="A1" t="s"><v>0</v></c></row>'
+    viele_zeilen = "".join(f'<row r="{z}">' + "<c><v>1</v></c>" * 5 + "</row>" for z in range(2, 600))
+    assert beleg_text(_xlsx_roh(erste + viele_zeilen, ["Holz Meier"]), XLSX).quelle == "TEXT"
+    for blatt in (erste + "<x/>" * 1200 + viele_zeilen,
+                  erste + '<f:row xmlns:f="urn:fremd">' + "<c/>" * 1200 + "</f:row>",
+                  erste + '<row r="2">' + "<c><v>1</v></c>" * 600 + "</row>"):
+        erg = beleg_text(_xlsx_roh(blatt, ["Holz Meier"]), XLSX)
+        assert erg.quelle == "LEER", blatt[:120]
+        assert any("XML-Elemente" in w for w in erg.warnungen), erg.warnungen
+
+
+def _zip_roh(teile: dict[str, str]) -> bytes:
+    puffer = BytesIO()
+    with zipfile.ZipFile(puffer, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, inhalt in teile.items():
+            z.writestr(name, inhalt)
+    return puffer.getvalue()
+
+
+def test_xlsx_nur_echte_arbeitsblaetter_ausgenommen(monkeypatch):
+    # die Datei bestimmt, was ein Teil ist: was openpyxl ganz einliest, zählt in die Summe,
+    # auch unter einem Blatt-Pfad
+    r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    p = "http://schemas.openxmlformats.org/package/2006/relationships"
+    ct = "application/vnd.openxmlformats-officedocument.spreadsheetml"
+
+    def rel(nr, typ, ziel):
+        return f'<Relationship Id="rId{nr}" Type="{r}/{typ}" Target="{ziel}"/>'
+
+    teile = {
+        "[Content_Types].xml": ('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                                f'<Override PartName="/xl/workbook.xml" ContentType="{ct}.sheet.main+xml"/>'
+                                f'<Override PartName="/xl/worksheets/sheet1.xml" ContentType="{ct}.worksheet+xml"/>'
+                                f'<Override PartName="/xl/worksheets/sheet3.xml" ContentType="{ct}.sharedStrings+xml"/>'
+                                "</Types>"),
+        "xl/_rels/workbook.xml.rels": (f'<Relationships xmlns="{p}">' + rel(1, "worksheet", "worksheets/sheet1.xml")
+                                       + rel(2, "chartsheet", "worksheets/sheet2.xml")
+                                       + rel(3, "worksheet", "worksheets/sheet3.xml")
+                                       + rel(4, "worksheet", "/xl/worksheets/sheet4.xml")
+                                       + rel(5, "worksheet", "worksheets/sheet5.xml") + "</Relationships>"),
+        # Zeichnung bindet ein „Blatt“ als Diagramm ein; Beziehungen in fremdem Namensraum zählen auch
+        "xl/drawings/_rels/drawing1.xml.rels": (f'<Relationships xmlns="{p}">'
+                                                + rel(1, "chart", "../worksheets/sheet4.xml") + "</Relationships>"),
+        "xl/charts/_rels/chart1.xml.rels": ('<R xmlns="urn:fremd"><Relationship Id="rId1" Type="x/worksheet" '
+                                            'Target="../worksheets/sheet5.xml"/></R>'),
+    }
+    zeilen = "".join(f'<row r="{z}"><c><v>1</v></c></row>' for z in range(1, 600))
+    for nr in range(1, 6):
+        teile[f"xl/worksheets/sheet{nr}.xml"] = f"<worksheet {_XNS}><sheetData>{zeilen}</sheetData></worksheet>"
+    with zipfile.ZipFile(BytesIO(_zip_roh(teile))) as z:
+        assert bt._xlsx_blaetter(z) == {"xl/worksheets/sheet1.xml"}
+    monkeypatch.setattr(bt, "ZIP_MAX_ELEMENTE", 1000)
+    with zipfile.ZipFile(BytesIO(_zip_roh(teile))) as z, pytest.raises(ValueError, match="XML-Elemente"):
+        bt._xlsx_pruefen(z)   # sheet2 bis sheet5 je rund 1800 Elemente in der Summe
+    for nr in range(2, 6):
+        teile[f"xl/worksheets/sheet{nr}.xml"] = "<chartsheet/>"
+    with zipfile.ZipFile(BytesIO(_zip_roh(teile))) as z:
+        bt._xlsx_pruefen(z)   # sheet1 allein: 600 Elemente außerhalb von Zeilen, Zeile 2

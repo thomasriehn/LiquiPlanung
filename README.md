@@ -128,13 +128,21 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
     bzw. optional als Seitenbild). Ausgelesene Felder sind markiert und zu prüfen.
     Das Konto wird bevorzugt aus der letzten Bestellung desselben Kreditors
     übernommen. Ohne Zahlungsziel gilt das Liefer- bzw. Bestelldatum plus 30 Tage
-    (nächster Bankarbeitstag).
+    (nächster Bankarbeitstag). Bei E-Mails werden neben den Anhängen auch
+    eingebettete Fotos oder Screenshots der Bestellung gelesen, Logos und
+    Signaturen nicht. Große oder manipulierte Dateien sind begrenzt (u. a. höchstens
+    10 Anhänge je E-Mail, Office-Dateien bis 50 MB entpackt, Excel: die ersten
+    1.000 Zeilen je Blatt); was darüber hinausgeht, wird mit Warnung übersprungen.
   - **Ablage**: Hochgeladene Dateien landen im gewählten Ordner des Mandanten, lokal
-    auf dem Server oder in einer SharePoint-Dokumentbibliothek. Die Datei ist über
+    auf dem Server (Standard: Unterordner `<Kurzname>-<ID>`) oder in einer
+    SharePoint-Dokumentbibliothek. Ordner zweier Mandanten dürfen weder gleich sein
+    noch ineinander liegen. Die Datei ist über
     📄 im Browser anzeigbar; SharePoint-Dateien laufen über einen Proxy der
     Anwendung, damit kein SharePoint-Zugang im Browser nötig ist.
-  - **Freigabe je KW**: Für die gewählte Kalenderwoche wird die Bestellung (brutto)
-    dem verfügbaren Rahmen gegenübergestellt. Der Rahmen ist der Plan der KW ab
+  - **Freigabe je KW**: Für die gewählte Kalenderwoche (laufende KW bis 13 Wochen
+    voraus) wird der offene Rest der Bestellung – brutto abzüglich bereits gezahlter
+    Teilbeträge, beides wird mit angezeigt – dem verfügbaren Rahmen
+    gegenübergestellt. Der Rahmen ist der Plan der KW ab
     heute laut Soll-Referenz, abzüglich der bereits gebundenen Zahlungen der KW
     (freigegebene Bestellungen, offene Rechnungen, Dauerschuldverhältnisse,
     Steuer-/SV-Termine) und abzüglich der bisherigen Abweichung Ist gegen Plan bis
@@ -143,7 +151,10 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
     alle Auszahlungen, dazu die Liquidität zum Ende der KW vor und nach Freigabe.
     Basis wählbar: Soll-Referenz bzw. automatisch, ein bestimmter Planstand oder der
     aktuelle Plan. Freigabe oder Ablehnung (mit Pflichtbegründung) erfolgt durch
-    Benutzer mit Freigaberecht.
+    Benutzer mit Freigaberecht. Ändern sich bei einer freigegebenen Bestellung
+    Kreditor, Betrag, USt-Satz, Konto, die KW des Zahldatums oder wird die Datei
+    ersetzt, ist sie erneut freizugeben; reine Korrekturen (z. B. Schreibweise,
+    Bestellnummer, Zahldatum in derselben KW) behalten die Freigabe.
   - **Journal**: Erfassung, Änderungen, Freigabe, Ablehnung, Rücknahme, Ablösung
     und Storno werden mit Benutzer, Zeitpunkt, Begründung und den bei der
     Entscheidung gezeigten Kennzahlen protokolliert. Das Journal ist
@@ -152,12 +163,19 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
     in die Liquiditätsplanung ein und verbrauchen dabei das Restbudget des Kontos,
     statt es zu verdoppeln. Überfällige Bestellungen rollen wie offene Posten nach
     vorn. Noch nicht freigegebene Bestellungen fließen ebenfalls ein (vorsichtige
-    Planung, je Mandant abschaltbar), abgelehnte und stornierte nie.
+    Planung, je Mandant abschaltbar), abgelehnte und stornierte nie. Eingefrorene
+    Planstände enthalten sie wie angezeigt; für die Freigabeprüfung wird ihr Anteil
+    herausgerechnet, damit sich eine Bestellung keinen eigenen Rahmen schafft.
+    Abgelöste Bestellungen bleiben mit dem vollen Betrag am erwarteten Zahldatum im
+    Plan (Plan − Ist zeigt eine Minderlieferung).
   - **Ablösung**: Eine Bestellung wird durch die tatsächliche Ausgangszahlung
     (Ist-Buchung oder Bankumsatz), durch die Eingangsrechnung (offener Posten
     übernimmt die Planung) oder manuell abgelöst. Der Zahlbetrag darf abweichen,
     z. B. bei einer Minderlieferung; die Abweichung wird ausgewiesen. Teilzahlungen
-    lassen den Rest geplant. Der Zahlungsabgleich schlägt passende Zahlungen vor
+    lassen den Rest geplant; abgelöst ist die Bestellung, wenn eine Zahlung
+    ausdrücklich als abschließend markiert ist oder die Zahlungen zusammen den
+    Bruttobetrag decken. Jede Zahlung löst höchstens eine Bestellung ab und steht
+    nicht zugleich im OP-Ausgleich. Der Zahlungsabgleich schlägt passende Zahlungen vor
     (Kreditor, Bestellnummer, Konto, Betrag, Datum). Wird die zugeordnete Buchung
     gelöscht, lebt die Bestellung im Plan wieder auf.
 - **Systemeinstellungen** (Administratoren, Menüpunkt „System“): SharePoint-Anbindung
@@ -165,11 +183,15 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   KI-Zugang mit OpenAI-kompatibler Schnittstelle (API-URL, Modell, API-Key,
   optional Vision), jeweils mit Verbindungstest. Geheimnisse werden verschlüsselt
   gespeichert (Schlüssel aus `GEHEIMNIS_SCHLUESSEL` bzw. `SECRET_KEY`) und nie
-  angezeigt; alternativ kommen sie aus der Umgebung (`GRAPH_CLIENT_SECRET`,
-  `LLM_API_KEY`). Je Mandant wählt der Administrator die Belegablage in den
+  angezeigt; alternativ kommen sie aus der Umgebung: `GRAPH_CLIENT_SECRET` bzw. für
+  den KI-Zugang `LLM_URL` zusammen mit `LLM_API_KEY` (der Key aus der Umgebung gilt
+  nur zusammen mit `LLM_URL`; die API-URL ist dann in der Oberfläche schreibgeschützt).
+  Ein gespeicherter API-Key wird verworfen, wenn die API-URL auf einen anderen Server
+  geändert wird, und nie per http:// an Adressen außerhalb des eigenen Netzes gesendet. Je
+  Mandant wählt der Administrator die Belegablage in den
   Einstellungen: einen lokalen Ordner oder einen SharePoint-Ordner über einen
-  Auswahldialog (Website → Dokumentbibliothek → Ordner, auch per Website-URL oder
-  manueller Drive-/Ordner-ID).
+  Auswahldialog (Website → Dokumentbibliothek → Ordner, auch per Website-URL bzw.
+  Freigabelink oder manueller Drive-/Ordner-ID).
 - **Zahlungskalender**: SV-Beiträge (drittletzter Bankarbeitstag, Feiertage je
   Bundesland), USt-VA (Monat/Quartal, Dauerfrist), LSt, GewSt, KSt – Beträge fest,
   aus Historie geschätzt oder (USt-VA) als Zahllast-Vorschau aus dem Budget;
@@ -220,7 +242,8 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
   Stammdaten über Bankverbindung (IBAN) und Anfangssalden bis zu den Importen
   (OP-Liste, Dauerschuldverhältnisse, optional Bankdaten, Buchungsstapel, BWA).
   Admins löschen Mandanten samt aller Daten endgültig
-  (Bestätigung über den Kurznamen; Audit-Log bleibt erhalten).
+  (Bestätigung über den Kurznamen; Audit-Log bleibt erhalten); lokale Belegordner
+  werden dabei nach `.geloescht/` im Ablageverzeichnis verschoben, nicht gelöscht.
 - **Mehrbenutzerbetrieb**: Rollen Admin/Bearbeiter/Leser, Mandantenzuordnung, Audit-Log.
   In der Benutzerverwaltung öffnet „bearbeiten“ einen Dialog für Name, **Rolle** und
   Mandanten sowie zum **Zurücksetzen des Passworts** (Generator für ein Zufallspasswort,
@@ -268,6 +291,20 @@ tesseract-ocr-deu`; im Docker-Image enthalten) – ohne tesseract laufen alle
 
 Ohne `DATABASE_URL` erwartet die Anwendung PostgreSQL unter
 `postgresql+psycopg://liqui:liqui@localhost:5432/liqui`. API-Dokumentation: `/api/docs`.
+
+**Tests** laufen standardmäßig gegen SQLite (im Speicher). Weil der Betrieb auf
+PostgreSQL läuft (Zeilensperren und Fremdschlüsselprüfung wirken nur dort), lässt sich
+die Suite auch dagegen ausführen – mit einer eigenen, leeren Testdatenbank, denn ihr
+Schema `public` wird für jeden Test gelöscht und neu angelegt; auch der Abgleich
+Modelle/Migrationen läuft dann dort:
+
+```bash
+cd backend
+TEST_DATABASE_URL=postgresql+psycopg://liqui_test:liqui_test@localhost:5432/liqui_test pytest
+```
+
+Die Oberflächentests (`tests/test_oberflaeche_bestellungen.py`) führen die
+Skripte in Node.js aus und werden ohne Node übersprungen.
 
 **Schemaänderungen** laufen über Alembic (`backend/migrations`): Beim Anwendungsstart
 wird automatisch `alembic upgrade head` ausgeführt (Bestandsdatenbanken aus der Zeit
