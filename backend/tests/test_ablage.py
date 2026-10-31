@@ -104,12 +104,12 @@ def test_sicherer_dateiname():
 
 def test_standard_lokal_pfad_und_mandant_ablage(db):
     m = _mandant(db)
-    assert ablage.standard_lokal_pfad(m) == "nordlicht"
+    assert ablage.standard_lokal_pfad(m) == f"nordlicht-{m.id}"
     ab = ablage.mandant_ablage(m)
-    assert ab["typ"] == "LOKAL" and ab["lokal_pfad"] == "nordlicht" and ab["konfiguriert"] is False
-    assert ab["beschreibung"] == "lokal: nordlicht"
+    assert ab["typ"] == "LOKAL" and ab["lokal_pfad"] == f"nordlicht-{m.id}" and ab["konfiguriert"] is False
+    assert ab["beschreibung"] == f"lokal: nordlicht-{m.id}"
     m2 = _mandant(db, "../böse:x")
-    assert ablage.standard_lokal_pfad(m2) == "böse_x"
+    assert ablage.standard_lokal_pfad(m2) == f"böse_x-{m2.id}"
     m3 = _mandant(db, "..")
     assert ablage.standard_lokal_pfad(m3) == f"mandant-{m3.id}"
 
@@ -167,19 +167,20 @@ def test_lokal_ordner_anlegen(stammordner):
 
 def test_speichern_lokal_ohne_ueberschreiben(db, stammordner):
     m = _mandant(db)
+    w = ablage.standard_lokal_pfad(m)
     r1 = ablage.speichern(db, m, "2026-10-30_Müller_Angebot.pdf", PDF, "application/pdf")
     assert r1 == DateiRef(ablage="LOKAL", name="2026-10-30_Müller_Angebot.pdf", mime="application/pdf",
-                          groesse=len(PDF), pfad="nordlicht/2026-10-30_Müller_Angebot.pdf")
+                          groesse=len(PDF), pfad=f"{w}/2026-10-30_Müller_Angebot.pdf")
     r2 = ablage.speichern(db, m, "2026-10-30_Müller_Angebot.pdf", b"%PDF-zwei", "application/pdf")
     r3 = ablage.speichern(db, m, "2026-10-30_Müller_Angebot.pdf", b"%PDF-drei", "application/pdf")
     assert r2.name == "2026-10-30_Müller_Angebot (1).pdf"
-    assert r3.pfad == "nordlicht/2026-10-30_Müller_Angebot (2).pdf"
+    assert r3.pfad == f"{w}/2026-10-30_Müller_Angebot (2).pdf"
     assert ablage.lesen(db, r1) == PDF
     assert ablage.lesen(db, r2) == b"%PDF-zwei"
-    assert ablage.lokal_dateipfad(r3) == stammordner / "nordlicht" / "2026-10-30_Müller_Angebot (2).pdf"
+    assert ablage.lokal_dateipfad(r3) == stammordner / w / "2026-10-30_Müller_Angebot (2).pdf"
     # unsicherer Name wird bereinigt und landet im Mandantenordner
     r4 = ablage.speichern(db, m, "../../../etc/passwd", b"x", "text/plain")
-    assert r4.pfad == "nordlicht/passwd"
+    assert r4.pfad == f"{w}/passwd"
 
 
 def test_speichern_lokal_gewaehlter_ordner(db, stammordner):
@@ -191,10 +192,10 @@ def test_speichern_lokal_gewaehlter_ordner(db, stammordner):
 
 def test_speichern_lokal_symlink_als_ziel_wird_nicht_ueberschrieben(db, stammordner, tmp_path):
     m = _mandant(db)
-    (stammordner / "nordlicht").mkdir()
+    (stammordner / ablage.standard_lokal_pfad(m)).mkdir()
     opfer = tmp_path / "opfer.txt"
     opfer.write_text("unverändert")
-    os.symlink(opfer, stammordner / "nordlicht" / "a.pdf")
+    os.symlink(opfer, stammordner / ablage.standard_lokal_pfad(m) / "a.pdf")
     ref = ablage.speichern(db, m, "a.pdf", PDF, "application/pdf")
     assert ref.name == "a (1).pdf"
     assert opfer.read_text() == "unverändert"
@@ -221,22 +222,23 @@ def test_ref_aus_bestellung():
 def test_mandant_durchsuchen_lokal(db, stammordner, tmp_path):
     m = _mandant(db)
     andere = _mandant(db, "andere")
-    (stammordner / "andere").mkdir()
-    (stammordner / "andere" / "fremd.pdf").write_bytes(PDF)
+    w, wa = ablage.standard_lokal_pfad(m), ablage.standard_lokal_pfad(andere)
+    (stammordner / wa).mkdir()
+    (stammordner / wa / "fremd.pdf").write_bytes(PDF)
     erg = ablage.mandant_durchsuchen(db, m)  # legt den Standardordner an
-    assert erg == {"typ": "LOKAL", "wurzel_name": "nordlicht", "element": "",
-                   "pfad_teile": [{"element": "", "name": "nordlicht"}], "unterordner": [], "dateien": []}
-    (stammordner / "nordlicht" / "2026" / "Q4").mkdir(parents=True)
-    (stammordner / "nordlicht" / "2026" / "Q4" / "b.pdf").write_bytes(PDF)
-    os.symlink(stammordner / "andere", stammordner / "nordlicht" / "zu_andere")
-    os.symlink(stammordner / "andere" / "fremd.pdf", stammordner / "nordlicht" / "fremd.pdf")
+    assert erg == {"typ": "LOKAL", "wurzel_name": w, "element": "",
+                   "pfad_teile": [{"element": "", "name": w}], "unterordner": [], "dateien": []}
+    (stammordner / w / "2026" / "Q4").mkdir(parents=True)
+    (stammordner / w / "2026" / "Q4" / "b.pdf").write_bytes(PDF)
+    os.symlink(stammordner / wa, stammordner / w / "zu_andere")
+    os.symlink(stammordner / wa / "fremd.pdf", stammordner / w / "fremd.pdf")
 
     erg = ablage.mandant_durchsuchen(db, m, "")
     assert [o["element"] for o in erg["unterordner"]] == ["2026"]  # Symlinks nicht gelistet
     assert erg["dateien"] == []
     erg = ablage.mandant_durchsuchen(db, m, "2026/Q4")
     assert erg["element"] == "2026/Q4"
-    assert erg["pfad_teile"] == [{"element": "", "name": "nordlicht"}, {"element": "2026", "name": "2026"},
+    assert erg["pfad_teile"] == [{"element": "", "name": w}, {"element": "2026", "name": "2026"},
                                  {"element": "2026/Q4", "name": "Q4"}]
     assert erg["dateien"][0]["element"] == "2026/Q4/b.pdf"
     assert erg["dateien"][0]["mime"] == "application/pdf"
@@ -248,7 +250,7 @@ def test_mandant_durchsuchen_lokal(db, stammordner, tmp_path):
 
     ref, daten = ablage.mandant_datei(db, m, "2026/Q4/b.pdf")
     assert daten == PDF
-    assert ref == DateiRef("LOKAL", "b.pdf", "application/pdf", len(PDF), "nordlicht/2026/Q4/b.pdf")
+    assert ref == DateiRef("LOKAL", "b.pdf", "application/pdf", len(PDF), f"{w}/2026/Q4/b.pdf")
     _fehler(403, ablage.mandant_datei, db, m, "fremd.pdf")  # Symlink in fremden Mandantenordner
     _fehler(422, ablage.mandant_datei, db, m, "../andere/fremd.pdf")
     _fehler(404, ablage.mandant_datei, db, m, "2026")
@@ -258,13 +260,87 @@ def test_mandant_durchsuchen_lokal(db, stammordner, tmp_path):
 
 def test_mandant_datei_lokal_typ_und_groesse(db, stammordner, monkeypatch):
     m = _mandant(db)
-    ordner = stammordner / "nordlicht"
+    ordner = stammordner / ablage.standard_lokal_pfad(m)
     ordner.mkdir()
     (ordner / "seite.html").write_bytes(b"<html><script>alert(1)</script></html>")
     _fehler(422, ablage.mandant_datei, db, m, "seite.html")
     monkeypatch.setattr(get_settings(), "ablage_max_mb", 1)
     (ordner / "gross.pdf").write_bytes(b"%PDF-" + b"0" * (1024 * 1024))
     _fehler(413, ablage.mandant_datei, db, m, "gross.pdf")
+
+
+# --- Mandantentrennung lokal ----------------------------------------------------------------
+
+
+def test_lokal_ueberschneidung(db, stammordner):
+    m = _mandant(db)
+    anderer = _mandant(db, "andere", ablage_typ="LOKAL", ablage_pfad="Kanzlei/Nord")
+    for rel in ("Kanzlei/Nord", "kanzlei", "KANZLEI/nord/2026", ablage.standard_lokal_pfad(anderer)):
+        e = _fehler(409, ablage.lokal_ueberschneidung, db, m, rel)
+        assert "andere GmbH" in e.nachricht
+    ablage.lokal_ueberschneidung(db, m, "Kanzlei/Nordlicht")   # nur gleicher Namensanfang
+    ablage.lokal_ueberschneidung(db, m, ablage.standard_lokal_pfad(m))
+    # ohne Details (Benutzer): kein fremder Name
+    e = _fehler(409, ablage.lokal_ueberschneidung, db, m, "Kanzlei", details=False)
+    assert "andere GmbH" not in e.nachricht and "Kanzlei/Nord" not in e.nachricht
+    # Symlink auf den fremden Ordner zählt wie der Ordner selbst
+    (stammordner / "Kanzlei" / "Nord").mkdir(parents=True)
+    os.symlink(stammordner / "Kanzlei" / "Nord", stammordner / "kurz")
+    _fehler(409, ablage.lokal_ueberschneidung, db, m, "kurz")
+
+
+def test_lokal_wurzel_ueberschneidung_vor_zugriff(db, stammordner):
+    _mandant(db, "tochter", ablage_typ="LOKAL", ablage_pfad="holding/tochter")
+    m = _mandant(db, "holding", ablage_typ="LOKAL", ablage_pfad="holding")
+    (stammordner / "holding" / "tochter").mkdir(parents=True)
+    (stammordner / "holding" / "tochter" / "a.pdf").write_bytes(PDF)
+    _fehler(409, ablage.mandant_durchsuchen, db, m, "tochter")
+    _fehler(409, ablage.mandant_datei, db, m, "tochter/a.pdf")
+    _fehler(409, ablage.speichern, db, m, "b.pdf", PDF, "application/pdf")
+    assert not (stammordner / "holding" / "b.pdf").exists()
+
+
+def test_mandant_ordner_archivieren(db, stammordner, monkeypatch):
+    monkeypatch.setattr(ablage, "_jetzt", lambda: datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc))
+    m = _mandant(db, ablage_typ="LOKAL", ablage_pfad="Kanzlei/Nord")
+    _mandant(db, "andere", ablage_typ="LOKAL", ablage_pfad="Kanzlei/Andere")
+    standard = stammordner / ablage.standard_lokal_pfad(m)
+    standard.mkdir()
+    (standard / "alt.pdf").write_bytes(PDF)
+    (stammordner / "Kanzlei" / "Nord").mkdir(parents=True)
+    (stammordner / "Kanzlei" / "Nord" / "a.pdf").write_bytes(PDF)
+    (stammordner / "Kanzlei" / "Andere").mkdir()
+
+    plan = ablage.mandant_ordner_plan(db, m)
+    assert plan == (f"nordlicht-{m.id}", [standard, stammordner / "Kanzlei" / "Nord"])
+    verschoben = ablage.mandant_ordner_archivieren(plan)
+    archiv = stammordner / ".geloescht"
+    assert [neu for _, neu in verschoben] == [archiv / f"nordlicht-{m.id}-20261031T120000Z",
+                                             archiv / f"nordlicht-{m.id}-20261031T120000Z-2"]
+    assert (archiv / f"nordlicht-{m.id}-20261031T120000Z" / "alt.pdf").read_bytes() == PDF
+    assert not standard.exists() and not (stammordner / "Kanzlei" / "Nord").exists()
+    assert (stammordner / "Kanzlei" / "Andere").is_dir()        # fremder Ordner bleibt
+    # Löschen fehlgeschlagen → zurück
+    ablage.archivierung_zuruecknehmen(verschoben)
+    assert (standard / "alt.pdf").exists() and (stammordner / "Kanzlei" / "Nord" / "a.pdf").exists()
+
+
+def test_mandant_ordner_plan_ueberspringt_fremde_ordner(db, stammordner):
+    # Altbestand: Ordner überschneidet sich mit einem anderen Mandanten → bleibt stehen
+    _mandant(db, "tochter", ablage_typ="LOKAL", ablage_pfad="holding/tochter")
+    m = _mandant(db, "holding", ablage_typ="LOKAL", ablage_pfad="holding")
+    (stammordner / "holding" / "tochter").mkdir(parents=True)
+    assert ablage.mandant_ordner_plan(db, m) == (f"holding-{m.id}", [])
+    assert ablage.mandant_ordner_archivieren(ablage.mandant_ordner_plan(db, m)) == []
+
+
+def test_standardordner_pruefen(db, stammordner):
+    m = _mandant(db)
+    ablage.standardordner_pruefen(db, m)
+    (stammordner / ablage.standard_lokal_pfad(m)).mkdir()
+    ablage.standardordner_pruefen(db, m)                      # leer ist in Ordnung
+    (stammordner / ablage.standard_lokal_pfad(m) / "x.pdf").write_bytes(PDF)
+    _fehler(409, ablage.standardordner_pruefen, db, m)
 
 
 # --- SharePoint (gemockt) -----------------------------------------------------------------
@@ -363,6 +439,35 @@ def sp(db, monkeypatch):
 def _sp_mandant(db, ordner_id="O_M"):
     return _mandant(db, ablage_typ="SHAREPOINT", ablage_pfad="Akte › Dokumente › /Mandanten/Nordlicht",
                     ablage_site_id="h,1,2", ablage_drive_id="b!d", ablage_ordner_id=ordner_id)
+
+
+def test_sharepoint_ueberschneidung(db, sp):
+    _sp_mandant(db, "O_M")                                   # /Mandanten/Nordlicht
+    neu = _mandant(db, "neu")
+    gc = sharepoint.GraphClient(systemeinstellungen.graph_zugang(db))
+
+    def pruefen(item_id, drive="b!d"):
+        e = gc.element(drive, item_id)
+        ablage.sharepoint_ueberschneidung(db, gc, neu, drive, e)
+
+    for item_id in ("O_M", "O_26", "O_MAND", None):          # gleich, darunter, darüber, Wurzel
+        with pytest.raises(AblageFehler) as e:
+            pruefen(item_id)
+        assert e.value.status == 409 and "nordlicht GmbH" in e.value.nachricht
+    pruefen("O_ALT")                                          # „Nordlicht Alt“ liegt daneben
+    pruefen("O_X")
+    # Pfad nicht ermittelbar → vorsichtshalber ablehnen
+    sp.items["O_OHNE"] = {"id": "O_OHNE", "name": "ohne", "folder": {},
+                          "parentReference": {"driveId": "b!d", "id": "ROOT"}}
+    with pytest.raises(AblageFehler):
+        pruefen("O_OHNE")
+    # Ordner des anderen gibt es nicht mehr → kein Konflikt
+    _mandant(db, "weg", ablage_typ="SHAREPOINT", ablage_drive_id="b!d", ablage_ordner_id="WEG")
+    pruefen("O_X")
+    # anderer Mandant nutzt die Bibliothekswurzel → alles in der Bibliothek überschneidet sich
+    _mandant(db, "wurzel", ablage_typ="SHAREPOINT", ablage_drive_id="b!d", ablage_ordner_id=None)
+    with pytest.raises(AblageFehler):
+        pruefen("O_X")
 
 
 def test_speichern_sharepoint_ohne_graph(db):

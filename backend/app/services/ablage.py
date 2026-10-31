@@ -4,7 +4,10 @@
   über `sicherer_pfad` aufgelöst (keine absoluten Pfade, kein „..“, kein NUL,
   keine versteckten Ordner, kein Ausbruch über Symlinks).
 - Mandantenordner: Durchsuchen und Lesen nur innerhalb des Ordners des Mandanten
-  (SharePoint: Nachfahren-Prüfung über den Pfad der Elemente).
+  (SharePoint: Nachfahren-Prüfung über den Pfad der Elemente). Ordner zweier
+  Mandanten dürfen weder gleich sein noch ineinander liegen (lokal vor jedem
+  Zugriff geprüft, SharePoint beim Festlegen); Standardordner „<Kurzname>-<id>“.
+  Ordner gelöschter Mandanten wandern nach `.geloescht` (nie gelöscht).
 - Zwischenablage: Uploads liegen bis zum Speichern unter `.zwischenablage`
   (Token = uuid4-hex, an den Mandanten gebunden, 24 h gültig).
 - Upload-Prüfung nach Inhalt (Magic Bytes), nie nach Client-Content-Type.
@@ -13,6 +16,7 @@
 
 import io
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -23,12 +27,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
+from sqlalchemy import select
+
+from .. import models
 from ..config import get_settings
 from ..models import AblageTyp
 from . import sharepoint, systemeinstellungen
 from .zugaenge import DateiRef
 
+log = logging.getLogger(__name__)
+
 ZWISCHEN_ORDNER = ".zwischenablage"
+GELOESCHT_ORDNER = ".geloescht"     # Ordner gelöschter Mandanten (versteckt, nie gelöscht)
 ZWISCHEN_MAX_STUNDEN = 24
 MAX_TIEFE = 32
 NAME_MAX = 120
@@ -145,9 +155,10 @@ def sicherer_dateiname(name: str, endung: str | None = None) -> str:
 
 
 def standard_lokal_pfad(mandant) -> str:
-    """Standardordner eines Mandanten (sicherer Name aus dem Kurznamen)."""
-    name = _sicherer_name(getattr(mandant, "kurzname", None), 64)
-    return name or f"mandant-{getattr(mandant, 'id', 0)}"
+    """Standardordner eines Mandanten: „<sicherer Kurzname>-<id>“ – durch die ID
+    eindeutig, auch wenn verschiedene Kurznamen denselben sicheren Namen ergeben."""
+    name = _sicherer_name(getattr(mandant, "kurzname", None), 64) or "mandant"
+    return f"{name}-{getattr(mandant, 'id', None) or 0}"
 
 
 def mandant_ablage(mandant) -> dict:
@@ -178,6 +189,195 @@ def mandant_ablage(mandant) -> dict:
         "konfiguriert": mandant.ablage_typ is not None,
         "beschreibung": f"lokal: {lokal}",
     }
+
+
+# --- Mandantentrennung: Ordner dürfen sich nicht überschneiden ----------------
+
+
+def _vergleichsform(rel: str | None) -> str:
+    """Relativer Pfad für Vergleiche: Symlinks soweit möglich aufgelöst, NFC und
+    ohne Groß/Klein (Windows/macOS unterscheiden das nicht)."""
+    text = str(rel or "").replace("\\", "/").strip().strip("/")
+    try:
+        teile = _relative_teile(text)
+        basis = Path(get_settings().ablage_verzeichnis).resolve()
+        ziel = basis.joinpath(*teile).resolve() if teile else basis
+        if ziel.is_relative_to(basis):
+            text = _rel(ziel, basis)
+    except (AblageFehler, OSError, ValueError):
+        pass
+    return unicodedata.normalize("NFC", text).casefold().strip("/")
+
+
+def _ueberschneiden(a: str, b: str) -> bool:
+    """Gleich oder ineinander (Vergleichsform); leer = Stammverzeichnis = alles."""
+    if not a or not b:
+        return True
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def lokal_wurzeln_anderer(db, mandant) -> list[tuple["models.Mandant", str]]:
+    """Lokale Ordner aller anderen Mandanten: der Standardordner (immer
+    reserviert – auch bei SharePoint, ein früher genutzter Ordner bleibt so
+    geschützt) und ein festgelegter lokaler Ordner."""
+    erg = []
+    for anderer in db.scalars(select(models.Mandant).where(models.Mandant.id != mandant.id)):
+        erg.append((anderer, standard_lokal_pfad(anderer)))
+        eigen = (anderer.ablage_pfad or "").strip().strip("/")
+        if anderer.ablage_typ == AblageTyp.LOKAL.value and eigen:
+            erg.append((anderer, eigen))
+    return erg
+
+
+def lokal_ueberschneidung(db, mandant, rel: str, *, details: bool = True, belege: bool = False) -> None:
+    """Lokale Ordner zweier Mandanten dürfen weder gleich sein noch ineinander
+    liegen – sonst sähen Benutzer beim Durchsuchen fremde Belege (→ 409).
+    `details`: anderen Mandanten und Ordner nennen (nur für Administratoren);
+    `belege`: auch Belege von Bestellungen anderer Mandanten unter `rel` prüfen
+    (z. B. ein früherer Ordner eines anderen Mandanten)."""
+    eigen = _vergleichsform(rel)
+    for anderer, fremd in lokal_wurzeln_anderer(db, mandant):
+        if _ueberschneiden(eigen, _vergleichsform(fremd)):
+            if details:
+                raise AblageFehler(
+                    409, f"Der Ordner überschneidet sich mit der Ablage des Mandanten „{anderer.name}“ "
+                         f"({fremd}) – bitte einen eigenen Ordner wählen")
+            raise AblageFehler(
+                409, "Der Ablageordner des Mandanten überschneidet sich mit der Ablage eines anderen "
+                     "Mandanten – bitte (Administrator) unter „Ablage“ einen eigenen Ordner festlegen")
+    if not belege:
+        return
+    q = (
+        select(models.Bestellung.datei_pfad, models.Mandant.name)
+        .join(models.Mandant, models.Mandant.id == models.Bestellung.mandant_id)
+        .where(models.Bestellung.mandant_id != mandant.id,
+               models.Bestellung.datei_ablage == AblageTyp.LOKAL.value,
+               models.Bestellung.datei_pfad.is_not(None))
+    )
+    for pfad, name in db.execute(q):
+        p = unicodedata.normalize("NFC", str(pfad)).casefold().strip("/")
+        if p == eigen or p.startswith(eigen + "/"):
+            raise AblageFehler(
+                409, f"Im Ordner liegen Belege von Bestellungen des Mandanten „{name}“ – bitte einen "
+                     "eigenen Ordner wählen")
+
+
+def sharepoint_ueberschneidung(db, gc: "sharepoint.GraphClient", mandant, drive: str, ordner: dict) -> None:
+    """SharePoint-Ordner zweier Mandanten in derselben Bibliothek dürfen weder
+    gleich sein noch ineinander liegen; die Bibliothekswurzel überschneidet sich
+    mit allem (→ 409). `ordner` = Element des neuen Ordners (gc.element)."""
+    eigen_pfad = ordner.get("pfad")
+    andere = db.scalars(select(models.Mandant).where(
+        models.Mandant.id != mandant.id,
+        models.Mandant.ablage_typ == AblageTyp.SHAREPOINT.value,
+        models.Mandant.ablage_drive_id == drive,
+    ))
+    for anderer in andere:
+        fremd_id = anderer.ablage_ordner_id
+        konflikt = bool(ordner.get("ist_wurzel")) or not fremd_id or fremd_id == ordner.get("id")
+        if not konflikt:
+            try:
+                fremd = gc.element(drive, fremd_id)
+            except sharepoint.GraphFehler as e:
+                if e.status == 404:
+                    continue  # Ordner des anderen gibt es nicht mehr
+                raise
+            fremd_pfad = fremd.get("pfad")
+            konflikt = (
+                not eigen_pfad or not fremd_pfad or bool(fremd.get("ist_wurzel"))  # nicht prüfbar → ablehnen
+                or sharepoint.pfad_unter(eigen_pfad, fremd_pfad)
+                or sharepoint.pfad_unter(fremd_pfad, eigen_pfad)
+            )
+        if konflikt:
+            raise AblageFehler(
+                409, f"Der SharePoint-Ordner überschneidet sich mit der Ablage des Mandanten "
+                     f"„{anderer.name}“ ({anderer.ablage_pfad or 'Bibliothek'}) – bitte einen eigenen "
+                     "Ordner wählen")
+
+
+def mandant_ordner_plan(db, mandant) -> tuple[str, list[Path]]:
+    """Vor dem Löschen eines Mandanten: (Archivname „<name>-<id>“, vorhandene
+    lokale Ordner) – Standardordner und festgelegter Ordner. Ordner, die sich
+    mit der Ablage eines anderen Mandanten überschneiden, bleiben, wo sie sind."""
+    name = f"{_sicherer_name(getattr(mandant, 'kurzname', None), 64) or 'mandant'}-{mandant.id}"
+    basis = Path(get_settings().ablage_verzeichnis).resolve()
+    if not basis.is_dir():
+        return name, []
+    kandidaten = [standard_lokal_pfad(mandant)]
+    eigen = (mandant.ablage_pfad or "").strip().strip("/")
+    if mandant.ablage_typ == AblageTyp.LOKAL.value and eigen:
+        kandidaten.append(eigen)
+    fremde = [_vergleichsform(f) for _, f in lokal_wurzeln_anderer(db, mandant)]
+    ordner: list[Path] = []
+    for rel in kandidaten:
+        try:
+            pfad = sicherer_pfad(rel)
+        except AblageFehler:
+            continue
+        if pfad == basis or pfad in ordner or not pfad.is_dir():
+            continue
+        if any(_ueberschneiden(_vergleichsform(_rel(pfad, basis)), f) for f in fremde):
+            log.warning("Ablageordner %s überschneidet sich mit einem anderen Mandanten – nicht verschoben", pfad)
+            continue
+        ordner.append(pfad)
+    return name, ordner
+
+
+def mandant_ordner_archivieren(plan: tuple[str, list[Path]]) -> list[tuple[Path, Path]]:
+    """Ordner aus `mandant_ordner_plan` nach „.geloescht/<name>-<id>-<zeitstempel>“
+    verschieben – nie löschen; ein später angelegter Mandant erbt so keine
+    Belege. Liefert (alt, neu) für `archivierung_zuruecknehmen`."""
+    name, ordner = plan
+    if not ordner:
+        return []
+    archiv = stamm() / GELOESCHT_ORDNER
+    try:
+        archiv.mkdir(mode=0o700, exist_ok=True)
+    except OSError as e:
+        raise AblageFehler(502, f"Ordner {GELOESCHT_ORDNER} nicht verfügbar: {e.strerror or e}") from e
+    if archiv.is_symlink() or not archiv.is_dir():
+        raise AblageFehler(502, f"Ordner {GELOESCHT_ORDNER} nicht verfügbar")
+    stempel = _jetzt().strftime("%Y%m%dT%H%M%SZ")
+    verschoben: list[tuple[Path, Path]] = []
+    # äußere Ordner zuerst; ein darin liegender wandert mit
+    for pfad in sorted(ordner, key=lambda p: len(p.parts)):
+        if any(pfad.is_relative_to(alt) for alt, _ in verschoben):
+            continue
+        ziel = archiv / f"{name}-{stempel}"
+        n = 1
+        while ziel.exists() or ziel.is_symlink():
+            n += 1
+            ziel = archiv / f"{name}-{stempel}-{n}"
+        try:
+            os.rename(pfad, ziel)
+        except OSError as e:
+            archivierung_zuruecknehmen(verschoben)
+            raise AblageFehler(
+                502, f"Der Ablageordner des Mandanten konnte nicht verschoben werden: {e.strerror or e}") from e
+        verschoben.append((pfad, ziel))
+    return verschoben
+
+
+def standardordner_pruefen(db, mandant) -> None:
+    """Neuer Mandant: der Standardordner darf sich mit keiner anderen Ablage
+    überschneiden und noch keine Dateien enthalten (→ 409)."""
+    rel = standard_lokal_pfad(mandant)
+    lokal_ueberschneidung(db, mandant, rel)
+    ziel = Path(get_settings().ablage_verzeichnis).resolve() / rel
+    if ziel.is_dir() and _anzahl(str(ziel)) > 0:
+        raise AblageFehler(
+            409, f"Der Ablageordner „{rel}“ für den neuen Mandanten existiert bereits und ist nicht "
+                 "leer – bitte einen anderen Kurznamen wählen oder den Ordner verschieben")
+
+
+def archivierung_zuruecknehmen(verschoben: list[tuple[Path, Path]]) -> None:
+    """Verschobene Ordner zurückholen (Löschen des Mandanten fehlgeschlagen)."""
+    for alt, neu in reversed(verschoben):
+        try:
+            if not alt.exists():
+                os.rename(neu, alt)
+        except OSError:
+            log.exception("Ablageordner %s konnte nicht nach %s zurückverschoben werden", neu, alt)
 
 
 # --- lokaler Ordnerdialog (Administrator) ------------------------------------
@@ -291,12 +491,14 @@ def _sp_drive(mandant) -> str:
     return mandant.ablage_drive_id
 
 
-def _lokal_wurzel(mandant, anlegen: bool = True) -> tuple[str, Path]:
-    """(relativer Pfad, absoluter Pfad) des Mandantenordners."""
+def _lokal_wurzel(db, mandant, anlegen: bool = True) -> tuple[str, Path]:
+    """(relativer Pfad, absoluter Pfad) des Mandantenordners – überschneidet er
+    sich mit der Ablage eines anderen Mandanten → 409 (vor jedem Zugriff)."""
     rel = mandant_ablage(mandant)["lokal_pfad"]
     pfad = sicherer_pfad(rel)
     if pfad == stamm():
         raise AblageFehler(409, "Der Ablageordner des Mandanten ist ungültig")
+    lokal_ueberschneidung(db, mandant, rel, details=False)
     if anlegen and not pfad.is_dir():
         try:
             pfad.mkdir(parents=True, exist_ok=True)
@@ -306,9 +508,9 @@ def _lokal_wurzel(mandant, anlegen: bool = True) -> tuple[str, Path]:
     return rel, pfad
 
 
-def _lokal_innen(mandant, element: str | None, anlegen: bool = True) -> tuple[Path, Path, str]:
+def _lokal_innen(db, mandant, element: str | None, anlegen: bool = True) -> tuple[Path, Path, str]:
     """Element (relativ zum Mandantenordner) → (wurzel, pfad, relativ zur Wurzel)."""
-    wurzel_rel, wurzel = _lokal_wurzel(mandant, anlegen=anlegen)
+    wurzel_rel, wurzel = _lokal_wurzel(db, mandant, anlegen=anlegen)
     teile = _relative_teile(element or "")
     if not teile:
         return wurzel, wurzel, ""
@@ -340,7 +542,7 @@ def speichern(db, mandant, dateiname: str, daten: bytes, mime: str) -> DateiRef:
             web_url=erg.get("web_url"),
         )
 
-    _, ordner = _lokal_wurzel(mandant)
+    _, ordner = _lokal_wurzel(db, mandant)
     basis = stamm()
     punkt = name.rfind(".")
     stamm_, endung = (name[:punkt], name[punkt:]) if punkt > 0 else (name, "")
@@ -524,7 +726,7 @@ def mandant_durchsuchen(db, mandant, element: str | None = None) -> dict:
             ],
         }
 
-    wurzel, pfad, rel = _lokal_innen(mandant, element)
+    wurzel, pfad, rel = _lokal_innen(db, mandant, element)
     if not pfad.is_dir():
         raise AblageFehler(404, "Ordner nicht gefunden")
     ordner_, dateien = _eintraege(pfad)
@@ -590,7 +792,7 @@ def mandant_datei(db, mandant, element: str) -> tuple[DateiRef, bytes]:
             web_url=e.get("web_url"),
         ), daten
 
-    _, pfad, rel = _lokal_innen(mandant, str(element), anlegen=False)
+    _, pfad, rel = _lokal_innen(db, mandant, str(element), anlegen=False)
     if not rel or not pfad.is_file():
         raise AblageFehler(404, "Datei nicht gefunden")
     if pfad.stat().st_size > grenze:

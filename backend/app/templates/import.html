@@ -233,6 +233,16 @@ async function zeigeSaetze(knopf) {
   detail.appendChild(zelle);
   zeile.after(detail);
   if (LESER) zelle.querySelectorAll("input,select").forEach(el => el.disabled = true);
+  // Zahlung zu einer Bestellung (Ablösung): Datum, Konten, Betrag und S/H gesperrt
+  (erg.buchungen || []).filter(s => s.bestellung_id).forEach(s => {
+    const tr = zelle.querySelector(`tr[data-bid="${s.id}"]`);
+    if (!tr) return;
+    tr.querySelectorAll(`[data-bfeld="datum"],[data-bfeld="konto_nr"],[data-bfeld="gegenkonto_nr"],
+      [data-bfeld="betrag"],[data-bfeld="sh"]`).forEach(el => {
+      el.disabled = true;
+      el.title = `Zahlung zu Bestellung #${s.bestellung_id} – dort Ablösung aufheben und neu zuordnen`;
+    });
+  });
 
   zelle.addEventListener("change", async (e) => {
     const feld = e.target.dataset.bfeld;

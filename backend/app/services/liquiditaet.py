@@ -515,15 +515,16 @@ def _explizite_fluesse(
                 continue
             key = b.konto_id if b.konto_id is not None else BESTELL_KEY
             if b.status == abgeloest:
-                # wie ein bezahlter Posten: voller Betrag (Plan − Ist zeigt die
-                # Minderlieferung), nie in der Projektion; durch eine Rechnung
-                # abgelöst trägt der offene Posten die Zahlung
+                # wie ein bezahlter Posten: voller Betrag am Zahldatum (Plan − Ist zeigt
+                # die Minderlieferung; früh gezahlt verbraucht sie weiter das Budget der
+                # Zahlwoche), nie in der Projektion; durch eine Rechnung abgelöst trägt
+                # der offene Posten die Zahlung
                 if (b.abgeloest_durch == models.AbloeseArt.RECHNUNG.value
-                        or b.abgeloest_am is None or b.abgeloest_am < start
+                        or b.abgeloest_am is None
+                        or (b.abgeloest_am < start and b.zahldatum < start)
                         or (nur_offen and ausgelassen is None)):
                     continue
-                tag = min(b.zahldatum, b.abgeloest_am)
-                d = tag if tag >= start else naechster_bankarbeitstag(start, bl)
+                d = b.zahldatum if b.zahldatum >= start else naechster_bankarbeitstag(start, bl)
                 if d > ende:
                     continue
                 (ausgelassen if nur_offen else plan)[key][d] -= _brutto(b.betrag_netto, b.ust_satz)
@@ -594,14 +595,17 @@ def plan_verschiebungen(db: Session, mandant_id: int, quelle: str,
     return list(db.scalars(q.order_by(models.PlanVerschiebung.id)))
 
 
-def _extern_plan(db: Session, mandant: models.Mandant, heute: date):
+def _extern_plan(db: Session, mandant: models.Mandant, heute: date,
+                 bestellungen: str | None = None, ohne_bestellung_id: int | None = None):
     """Planbetrag eines Tages außerhalb des Fensters (wochenweise gecacht)."""
     cache: dict[date, dict] = {}
 
     def verfuegbar(key: Key, tag: date) -> Decimal:
         w = wochen_start(tag)
         if w not in cache:
-            cache[w] = plan_fluesse(db, mandant, w, w + timedelta(days=6), heute=heute)
+            cache[w] = plan_fluesse(db, mandant, w, w + timedelta(days=6), heute=heute,
+                                    bestellungen=bestellungen,
+                                    ohne_bestellung_id=ohne_bestellung_id)
         return cache[w].get(key, {}).get(tag, Decimal("0"))
 
     return verfuegbar
@@ -1695,12 +1699,15 @@ def erstelle_snapshot(
     start = wochen_start(start or heute)
     ende = start + timedelta(days=wochen * 7 - 1)
     gerollt: dict[Key, Decimal] = {}
-    plan = plan_fluesse(db, mandant, start, ende, heute=start, gerollt=gerollt)
+    # nur entschiedene Bestellungen (freigegebene, abgelöste) – noch nicht entschiedene
+    # schüfen sich als Soll-Referenz der Freigabe ihren eigenen Rahmen
+    plan = plan_fluesse(db, mandant, start, ende, heute=start, gerollt=gerollt,
+                        bestellungen="FREIGEGEBEN")
     # manuelle Verschiebungen gehören zum Plan (Sicht zum Stichtag)
     verschiebungen_anwenden(
         plan, plan_verschiebungen(db, mandant.id, "PLAN"), start, ende, start,
         naechster_bankarbeitstag(start, mandant.bundesland), gerollt,
-        _extern_plan(db, mandant, start),
+        _extern_plan(db, mandant, start, bestellungen="FREIGEGEBEN"),
     )
     snap = models.PlanSnapshot(
         mandant_id=mandant.id, stichtag=start, wochen=wochen, kommentar=kommentar

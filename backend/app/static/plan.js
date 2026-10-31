@@ -422,19 +422,28 @@ async function bestellAbschnitt(zeile, sp) {
   if (!liste || !liste.length) return box;
   const STATUS = { OFFEN: ["offen", "zur Freigabe"], FREIGEGEBEN: ["freigegeben", "freigegeben"],
                    ABGELOEST: ["abgeloest", "abgelöst"] };
-  const summe = liste.reduce((s, b) => s + Math.abs(b.betrag ?? b.rest_geplant ?? b.betrag_brutto ?? 0), 0);
+  // Betrag wie im Plan (plan_betrag); abgelöste stehen mit vollem Brutto im Plan, rest_geplant ist dort 0
+  const planBetrag = (b) => Math.abs(b.plan_betrag
+    ?? (b.status === "ABGELOEST" ? b.betrag_brutto : b.rest_geplant) ?? b.betrag_brutto ?? 0);
+  const summe = liste.reduce((s, b) => s + planBetrag(b), 0);
   box.innerHTML = `<h4>Bestellungen <span class="hinweis">(brutto, ${eur(summe)} €)</span></h4><ul class="zd-liste"></ul>`;
   const ul = box.querySelector("ul");
   for (const b of liste) {
     const [klasse, text] = STATUS[b.status] || ["neutral", b.status_text || b.status || ""];
-    const tag = b.plan_tag || b.tag || b.zahldatum;
-    const betrag = Math.abs(b.betrag ?? b.rest_geplant ?? b.betrag_brutto ?? 0);
+    const tag = b.plan_tag || b.zahldatum;
+    let zusatz = "";
+    if (b.gerollt && b.zahldatum) {
+      zusatz = `fällig ${datumVoll(b.zahldatum)} (überfällig, vorgetragen)`;
+    } else if (b.status === "ABGELOEST" && b.abgeloest_am) {
+      zusatz = `abgelöst am ${datumVoll(b.abgeloest_am)}` +
+        (b.abgeloest_betrag !== null && b.abgeloest_betrag !== undefined ? `, gezahlt ${eur(b.abgeloest_betrag)} €` : "");
+    }
     const li = document.createElement("li");
     li.innerHTML = `<span>${tag ? datumVoll(tag) : ""}</span>
       <span><strong>${esc(b.kreditor || "")}</strong>${b.bestellnummer ? ` <span class="klein">Nr. ${esc(b.bestellnummer)}</span>` : ""}</span>
-      <span class="zahl">${eur(betrag)} €</span>
+      <span class="zahl">${eur(planBetrag(b))} €</span>
       <span class="status-badge ${klasse}">${esc(b.status_text || text)}</span>
-      ${tag && b.zahldatum && tag !== b.zahldatum ? `<span class="hinweis">fällig ${datumVoll(b.zahldatum)} (überfällig, vorgetragen)</span>` : ""}
+      ${zusatz ? `<span class="hinweis">${zusatz}</span>` : ""}
       <a href="/mandanten/${MANDANT_ID}/bestellungen?bestellung=${encodeURIComponent(b.id)}" style="margin-left:auto">öffnen</a>`;
     ul.appendChild(li);
   }

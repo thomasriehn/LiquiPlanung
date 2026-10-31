@@ -151,14 +151,43 @@ def test_abloesung_durch_zahlung_minderlieferung_ohne_wiederaufblaehen(db):
 
     plan = _plan(db, m)
     zeile = _zeile(plan)
-    # Plan: voller Bestellbetrag am Zahltag (min(Zahldatum, Ablösung)); Ist: 5.000
-    assert zeile["plan"]["2026-08-04"] == -5950.0 - 1190.0
+    # Plan: voller Bestellbetrag am Zahldatum (wie ein bezahlter Posten); Ist: 5.000
+    assert zeile["plan"]["2026-08-04"] == -1190.0
     assert zeile["ist"]["2026-08-04"] == -5000.0
-    assert zeile["plan"]["2026-08-07"] == -1190.0
+    assert zeile["plan"]["2026-08-07"] == -5950.0 - 1190.0
     # Projektion: nur das Restbudget (5.950 / 5 Tage) der Folgetage, nicht das volle Budget
     liq = plan["bestaende"]["liquiditaet"]
     assert liq["2026-08-04"] == 95000.0
     assert liq["2026-08-07"] == 95000.0 - 2 * 1190.0
+
+
+def test_fruehe_abloesung_verbraucht_budget_der_zahlwoche(db):
+    """Vor der Zahlwoche gezahlt: die Bestellung verbraucht weiter das Budget ihrer
+    Zahlwoche (wie ein bezahlter Posten) – auch wenn die Zahlung vor dem Fenster liegt."""
+    m = _mandant(db)
+    u = _benutzer(db)
+    _bank(db, m)
+    _budget_woche(db, m, "4920", 34, "10000")      # KW 34: 11.900 brutto
+    b = _bestellung(db, m, u, status="FREIGEGEBEN", zahldatum=date(2026, 8, 19))
+
+    def liq(start=START, heute=HEUTE):
+        return _plan(db, m, start=start, wochen=4, heute=heute)["bestaende"]["liquiditaet"]["2026-08-23"]
+
+    assert liq() == 88100.0
+    svc.abloesen(db, b, u, art="ZAHLUNG", buchung_id=_zahlung(db, m, date(2026, 8, 4), "5950").id)
+    assert b.status == "ABGELOEST"
+    assert liq() == 88100.0                                   # nicht 82.150 (doppelt)
+    kw33 = date(2026, 8, 10)
+    assert liq(start=kw33, heute=kw33) == 88100.0             # Zahlung vor dem Fenster
+    zeile = _zeile(_plan(db, m, start=kw33, wochen=2, heute=kw33))
+    assert zeile["plan"]["2026-08-19"] == -5950.0 - 1190.0    # Bestellung + Restbudget
+    eintrag = svc.plan_bestellungen(db, m, konto_id=b.konto_id, von=date(2026, 8, 17),
+                                    bis=date(2026, 8, 23), heute=HEUTE)
+    assert [(x["id"], x["plan_tag"], x["plan_betrag"]) for x in eintrag] == [
+        (b.id, "2026-08-19", 5950.0)]
+    # Zahldatum und Ablösung vor dem Fenster: nicht mehr im Plan
+    assert date(2026, 8, 4) not in plan_fluesse(db, m, kw33, kw33 + timedelta(days=13),
+                                                heute=kw33).get(b.konto_id, {})
 
 
 def test_abloesung_durch_rechnung_nie_geplant(db):
@@ -200,8 +229,8 @@ def test_manuelle_abloesung(db):
                  notiz="bar bezahlt")
     assert b.status == "ABGELOEST" and b.abgeloest_durch == "MANUELL"
     zeile = _zeile(_plan(db, m))
-    assert zeile["plan"]["2026-08-04"] == -5950.0
-    assert "2026-08-12" not in zeile["plan"]
+    assert zeile["plan"]["2026-08-12"] == -5950.0         # am Zahldatum, nicht am Ablösetag
+    assert "2026-08-04" not in zeile["plan"]
 
 
 def test_teilzahlung_mindert_geplanten_rest(db):
@@ -216,10 +245,11 @@ def test_teilzahlung_mindert_geplanten_rest(db):
     assert letzter.aktion == "TEILZAHLUNG" and "3.950,00 €" in letzter.begruendung
     zeile = _zeile(_plan(db, m))
     assert zeile["plan"]["2026-08-12"] == -3950.0
-    # zweite Teilzahlung deckt den Rest → abgelöst, Ablösung wird abschließend
+    # zweite Teilzahlung deckt den Rest → abgelöst; gespeichert bleibt die Wahl des
+    # Nutzers (nicht abschließend), damit ein späteres Aufheben neu bewerten kann
     bu2 = _zahlung(db, m, date(2026, 8, 5), "3950")
     a2 = svc.abloesen(db, b, u, art="ZAHLUNG", buchung_id=bu2.id, abschliessend=False)
-    assert a2.abschliessend is True and b.status == "ABGELOEST"
+    assert a2.abschliessend is False and b.status == "ABGELOEST"
     assert svc.als_dict(db, b)["abweichung"] == 0.0
 
 
@@ -284,6 +314,23 @@ def test_snapshot_friert_bestellung_ein(db):
     assert date(2026, 8, 12) not in live.get(b.konto_id, {})
     db.refresh(snap)
     assert snapshot_fluesse(snap)[b.konto_id][date(2026, 8, 12)] == Decimal("-5950.00")
+
+
+def test_planstand_friert_nur_entschiedene_bestellungen_ein(db):
+    """Noch nicht entschiedene Bestellungen gehören nicht in den Planstand – auch
+    wenn der Mandant sie im aktuellen Plan mitführt."""
+    m = _mandant(db)
+    u = _benutzer(db)
+    assert m.bestellungen_offen_einplanen is not False
+    offen = _bestellung(db, m, u, zahldatum=date(2026, 8, 12))
+    _bestellung(db, m, u, status="FREIGEGEBEN", netto="1000", zahldatum=date(2026, 8, 13))
+    ueberfaellig = _bestellung(db, m, u, netto="2000", zahldatum=date(2026, 7, 31))
+    db.commit()
+    live = plan_fluesse(db, m, START, START + timedelta(days=13), heute=START)
+    assert live[offen.konto_id][date(2026, 8, 12)] == Decimal("-5950.00")
+    assert live[offen.konto_id][START] == Decimal("-2380.00")          # gerollt
+    werte = snapshot_fluesse(erstelle_snapshot(db, m, start=START, heute=START))[offen.konto_id]
+    assert {d: v for d, v in werte.items() if v} == {date(2026, 8, 13): Decimal("-1190.00")}
 
 
 def test_mandantenschalter_und_bestellfilter(db):
@@ -416,7 +463,8 @@ def test_aendern_regeln(db):
     u = _benutzer(db)
     b = _bestellung(db, m, u, status="FREIGEGEBEN")
     assert svc.aendern(db, b, u, {"kreditor": "Telko GmbH"}) == []      # unverändert
-    assert svc.aendern(db, b, u, {"kreditor": "Telko AG", "zahldatum": "2026-08-13"}) == [
+    # Schreibkorrektur des Kreditors und Zahldatum in derselben KW: Freigabe bleibt
+    assert svc.aendern(db, b, u, {"kreditor": "TELKO GmbH", "zahldatum": "2026-08-13"}) == [
         "kreditor", "zahldatum"]
     assert b.status == "FREIGEGEBEN"
     assert svc.aendern(db, b, u, {"betrag_netto": 5200}) == ["betrag_netto"]
@@ -532,7 +580,11 @@ def test_abloesung_zahlung_pruefungen(db):
     eingang = models.Buchung(mandant_id=m.id, datum=HEUTE, konto_nr="1200", gegenkonto_nr="8400",
                              betrag=Decimal("100"), sh="S")
     op_zahlung = _zahlung(db, m, HEUTE, "50")
-    op_zahlung.posten_id = 999
+    op_posten = models.OffenerPosten(mandant_id=m.id, art="KREDITOR", partner="Y",
+                                     faellig_am=HEUTE, betrag_brutto=Decimal("50"))
+    db.add(op_posten)
+    db.flush()   # echter Posten: PostgreSQL prüft den Fremdschlüssel
+    op_zahlung.posten_id = op_posten.id
     db.add(eingang)
     db.flush()
     bank = _konto(db, m, "1200")

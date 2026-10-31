@@ -336,3 +336,380 @@ def test_vision_eml_anhang_und_sonstige_typen():
     assert vision_bilder(_docx(), DOCX) == []
     assert vision_bilder(b"%PDF-1.4 kaputt", PDF) == []
     assert vision_bilder(b"", PDF) == []
+
+
+# ------------------------------------------------------------------ Schutz vor Bomben
+
+from app.services import beleg_text as bt   # noqa: E402
+
+_XNS = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+_WNS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+
+def _xlsx_roh(blatt: str, geteilt=None) -> bytes:
+    """Minimale XLSX von Hand: `blatt` = Inhalt von <sheetData>, `geteilt` = Liste
+    von Zeichenketten oder Funktion, die sharedStrings.xml in eine Datei schreibt."""
+    r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    ct = "application/vnd.openxmlformats-officedocument.spreadsheetml"
+    puffer = BytesIO()
+    with zipfile.ZipFile(puffer, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml",
+                   '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="xml" ContentType="application/xml"/>'
+                   '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                   f'<Override PartName="/xl/workbook.xml" ContentType="{ct}.sheet.main+xml"/>'
+                   f'<Override PartName="/xl/worksheets/sheet1.xml" ContentType="{ct}.worksheet+xml"/>'
+                   f'<Override PartName="/xl/sharedStrings.xml" ContentType="{ct}.sharedStrings+xml"/>'
+                   '</Types>')
+        z.writestr("_rels/.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   f'<Relationship Id="rId1" Type="{r}/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        z.writestr("xl/workbook.xml", f'<workbook {_XNS} xmlns:r="{r}"><sheets>'
+                   '<sheet name="AB" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        z.writestr("xl/_rels/workbook.xml.rels",
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   f'<Relationship Id="rId1" Type="{r}/worksheet" Target="worksheets/sheet1.xml"/>'
+                   f'<Relationship Id="rId2" Type="{r}/sharedStrings" Target="sharedStrings.xml"/>'
+                   '</Relationships>')
+        z.writestr("xl/worksheets/sheet1.xml", f"<worksheet {_XNS}><sheetData>{blatt}</sheetData></worksheet>")
+        if callable(geteilt):
+            with z.open("xl/sharedStrings.xml", "w", force_zip64=True) as f:
+                geteilt(f)
+        else:
+            z.writestr("xl/sharedStrings.xml", f"<sst {_XNS}>"
+                       + "".join(f"<si><t>{s}</t></si>" for s in geteilt or []) + "</sst>")
+    return puffer.getvalue()
+
+
+def _docx_roh(teile: dict[str, str]) -> bytes:
+    puffer = BytesIO()
+    with zipfile.ZipFile(puffer, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        for name, inhalt in teile.items():
+            z.writestr(name, inhalt)
+    return puffer.getvalue()
+
+
+def _w_dok(inhalt: str) -> str:
+    return f"<w:document {_WNS}><w:body>{inhalt}</w:body></w:document>"
+
+
+def _w_p(text: str) -> str:
+    return f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"
+
+
+def test_xlsx_archivbombe_wird_abgelehnt():
+    def bombe(f):   # rund 30 MB entpackt, wenige KB gepackt
+        f.write(f"<sst {_XNS}>".encode())
+        block = b"<si><t>x</t></si>" * 10_000
+        for _ in range(180):
+            f.write(block)
+        f.write(b"</sst>")
+
+    daten = _xlsx_roh('<row r="1"><c r="A1" t="s"><v>0</v></c></row>', bombe)
+    assert len(daten) < 200_000
+    assert mime_bestimmen(daten, None) == XLSX
+    erg = beleg_text(daten, XLSX)
+    assert erg.quelle == "LEER"
+    assert any("entpackt zu groß" in w for w in erg.warnungen), erg.warnungen
+
+
+def test_xlsx_zu_viele_xml_elemente(monkeypatch):
+    monkeypatch.setattr(bt, "ZIP_MAX_ELEMENTE", 1000)
+    klein = _xlsx_roh('<row r="1"><c r="A1" t="s"><v>0</v></c></row>', ["Holz Meier"])
+    assert beleg_text(klein, XLSX).text.endswith("Holz Meier")
+    zeile = "<c><v>1</v></c>" * 2000   # eine Zeile mit vielen Zellen
+    erg = beleg_text(_xlsx_roh(f'<row r="1">{zeile}</row>'), XLSX)
+    assert erg.quelle == "LEER"
+    assert any("XML-Elemente" in w for w in erg.warnungen), erg.warnungen
+
+
+def test_xlsx_grenzen_je_teil_und_gesamt(monkeypatch):
+    monkeypatch.setattr(bt, "XML_MAX_BYTES", 64 * 1024)
+    daten = _xlsx_roh('<row r="1"><c r="A1" t="s"><v>0</v></c></row>', ["Stahl " * 20_000])
+    erg = beleg_text(daten, XLSX)
+    assert erg.quelle == "LEER" and any("entpackt zu groß" in w for w in erg.warnungen)
+    monkeypatch.setattr(bt, "XML_MAX_BYTES", 20 * 1024 * 1024)
+    monkeypatch.setattr(bt, "ZIP_SUMME_MAX", 64 * 1024)
+    assert beleg_text(daten, XLSX).quelle == "LEER"
+    monkeypatch.setattr(bt, "ZIP_SUMME_MAX", 50 * 1024 * 1024)
+    assert beleg_text(daten, XLSX).quelle == "TEXT"
+
+
+def test_xlsx_geteilte_zeichenkette_in_allen_zellen(monkeypatch):
+    # eine lange geteilte Zeichenkette in 20 × 50 Zellen: nicht Zelle für Zelle vervielfachen
+    zeilen = "".join(f'<row r="{z}">' + '<c t="s"><v>0</v></c>' * 50 + "</row>" for z in range(1, 21))
+    daten = _xlsx_roh(zeilen, ["A" * 50_000])
+    aufrufe = []
+    original = bt._zellwert
+    monkeypatch.setattr(bt, "_zellwert", lambda w: aufrufe.append(1) or original(w))
+    erg = beleg_text(daten, XLSX)
+    assert erg.quelle == "TEXT"
+    assert len(erg.text) == bt.TEXT_MAX
+    assert any("abgeschnitten" in w for w in erg.warnungen)
+    assert len(aufrufe) <= 100   # nach der ersten Zeile ist TEXT_MAX erreicht
+
+
+def test_office_entity_deklaration_abgelehnt():
+    dok = ('<?xml version="1.0"?><!DOCTYPE w:document [<!ENTITY a "Bestellung Bestellung">]>'
+           + _w_dok(_w_p("&a;&a;&a;")))
+    erg = beleg_text(_docx_roh({"word/document.xml": dok}), DOCX)
+    assert erg.quelle == "LEER"
+    assert "Bestellung" not in erg.text
+    assert any("Entity" in w for w in erg.warnungen), erg.warnungen
+
+
+def test_docx_archivbombe_kopfzeilen():
+    puffer = BytesIO()
+    with zipfile.ZipFile(puffer, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("word/document.xml", _w_dok(_w_p("Bestellung")))
+        for nr in range(1, 3):   # je rund 25 MB entpackt
+            with z.open(f"word/header{nr}.xml", "w", force_zip64=True) as f:
+                f.write(f"<w:hdr {_WNS}><w:p><w:r><w:t>".encode())
+                block = b"y" * 1_000_000
+                for _ in range(25):
+                    f.write(block)
+                f.write(b"</w:t></w:r></w:p></w:hdr>")
+    daten = puffer.getvalue()
+    assert len(daten) < 200_000
+    erg = beleg_text(daten, DOCX)
+    assert erg.quelle == "LEER"
+    assert any("entpackt zu groß" in w for w in erg.warnungen), erg.warnungen
+
+
+def test_docx_kopf_und_fusszeilen_begrenzt():
+    teile = {"word/document.xml": _w_dok(_w_p("Haupttext"))}
+    for nr in range(1, 16):
+        teile[f"word/header{nr}.xml"] = f"<w:hdr {_WNS}>{_w_p(f'Kopf {nr} Ende')}</w:hdr>"
+        teile[f"word/footer{nr}.xml"] = f"<w:ftr {_WNS}>{_w_p(f'Fuss {nr} Ende')}</w:ftr>"
+    erg = beleg_text(_docx_roh(teile), DOCX)
+    assert erg.quelle == "TEXT"
+    for nr in range(1, 11):   # natürliche Reihenfolge: header2 vor header10
+        assert f"Kopf {nr} Ende" in erg.text and f"Fuss {nr} Ende" in erg.text
+    for nr in range(11, 16):
+        assert f"Kopf {nr} Ende" not in erg.text and f"Fuss {nr} Ende" not in erg.text
+    assert "Haupttext" in erg.text
+
+
+def test_docx_bricht_bei_text_max_ab(monkeypatch):
+    monkeypatch.setattr(bt, "TEXT_MAX", 50)
+    teile = {
+        "word/header1.xml": f"<w:hdr {_WNS}>{_w_p('Briefkopf ' * 10)}</w:hdr>",
+        "word/document.xml": _w_dok(_w_p("Haupttext")),
+        "word/footer1.xml": "<kaputt",   # wird nach Erreichen von TEXT_MAX nicht mehr gelesen
+    }
+    erg = beleg_text(_docx_roh(teile), DOCX)
+    assert erg.quelle == "TEXT", erg.warnungen
+    assert erg.text.startswith("Briefkopf") and len(erg.text) == 50
+
+
+def test_docx_verschachtelte_tabellen_linear(monkeypatch):
+    tief = 60
+    xml = _w_p("innen")
+    for nr in range(tief):
+        xml = f"<w:tbl><w:tr><w:tc>{_w_p(f'z{nr}x')}{xml}</w:tc></w:tr></w:tbl>"
+    aufrufe = []
+    original = bt._w_absatz
+    monkeypatch.setattr(bt, "_w_absatz", lambda p: aufrufe.append(1) or original(p))
+    erg = beleg_text(_docx_roh({"word/document.xml": _w_dok(xml)}), DOCX)
+    assert erg.quelle == "TEXT"
+    assert len(aufrufe) == tief + 1          # jeder Absatz genau einmal (bisher quadratisch)
+    for nr in range(tief):
+        assert erg.text.count(f"z{nr}x") == 1
+    assert erg.text.splitlines()[0] == f"z{tief - 1}x"
+
+
+def _roh_pdf(seiten: list[tuple[float, float]]) -> bytes:
+    """PDF ohne Inhalt mit beliebiger MediaBox je Seite."""
+    objekte = ["<< /Type /Catalog /Pages 2 0 R >>",
+               "<< /Type /Pages /Kids [" + " ".join(f"{3 + i} 0 R" for i in range(len(seiten)))
+               + f"] /Count {len(seiten)} >>"]
+    objekte += [f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {b} {h}] >>" for b, h in seiten]
+    aus = b"%PDF-1.4\n"
+    versatz = []
+    for nr, obj in enumerate(objekte, 1):
+        versatz.append(len(aus))
+        aus += f"{nr} 0 obj\n{obj}\nendobj\n".encode()
+    xref = len(aus)
+    aus += f"xref\n0 {len(objekte) + 1}\n0000000000 65535 f \n".encode()
+    aus += b"".join(f"{v:010d} 00000 n \n".encode() for v in versatz)
+    aus += f"trailer\n<< /Size {len(objekte) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    return aus
+
+
+def _render_beobachten(monkeypatch) -> list[tuple[float, bool]]:
+    """PdfPage.render mitschreiben: (Maßstab, pdfium-Sperre gehalten)."""
+    import pypdfium2 as pdfium
+
+    aufrufe = []
+    original = pdfium.PdfPage.render
+
+    def render(self, *args, **kwargs):
+        aufrufe.append((kwargs.get("scale"), pdf_kontoauszug._PDFIUM_SPERRE.locked()))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(pdfium.PdfPage, "render", render)
+    return aufrufe
+
+
+def test_vision_uebergrosse_pdf_seite_begrenzt(monkeypatch):
+    aufrufe = _render_beobachten(monkeypatch)
+    bilder = bt.pdf_seiten_bilder(_roh_pdf([(3000, 2000), (595.28, 841.89)]))
+    assert max(bilder[0].size) <= bt.VISION_MAX_KANTE
+    assert abs(bilder[0].size[0] - 2000) <= 1 and abs(bilder[0].size[1] - 1333) <= 1
+    assert abs(bilder[1].size[0] - 1240) <= 2 and abs(bilder[1].size[1] - 1754) <= 2   # A4: 150 dpi
+    assert all(gesperrt for _, gesperrt in aufrufe) and len(aufrufe) == 2
+    urls = vision_bilder(_roh_pdf([(14400, 14400)]), PDF)   # größte zulässige MediaBox
+    assert len(urls) == 1 and _bild_aus_data_url(urls[0]).size == (2000, 2000)
+
+
+def test_ocr_uebergrosse_seite_begrenzt_a4_unveraendert(monkeypatch):
+    from PIL import Image
+
+    groessen = []
+
+    def tesseract(png, sprache):
+        groessen.append(Image.open(BytesIO(png)).size)
+        return "level\tpage_num\n"
+
+    monkeypatch.setattr(pdf_kontoauszug, "_tesseract_tsv", tesseract)
+    monkeypatch.setattr(pdf_kontoauszug, "_ocr_sprache", lambda: "deu")
+    aufrufe = _render_beobachten(monkeypatch)
+    seiten = pdf_kontoauszug._ocr_zeilen(_roh_pdf([(595.28, 841.89), (2000, 2000), (842, 595)]))
+    assert len(seiten) == 3
+    assert abs(groessen[0][0] - 2481) <= 1 and abs(groessen[0][1] - 3508) <= 1   # A4 weiter 300 dpi
+    assert abs(groessen[2][0] - 3508) <= 1 and abs(groessen[2][1] - 2481) <= 1   # A4 quer
+    breite, hoehe = groessen[1]
+    assert breite * hoehe <= pdf_kontoauszug.OCR_MAX_PIXEL * 1.001
+    assert breite >= 5990                                # nicht unnötig klein
+    assert all(gesperrt for _, gesperrt in aufrufe) and len(aufrufe) == 3
+
+
+def test_ocr_sperre_auch_bei_fehlern_frei(monkeypatch):
+    def kaputt(png, sprache):
+        raise RuntimeError("tesseract weg")
+
+    monkeypatch.setattr(pdf_kontoauszug, "_tesseract_tsv", kaputt)
+    monkeypatch.setattr(pdf_kontoauszug, "_ocr_sprache", lambda: "deu")
+    with pytest.raises(RuntimeError):
+        pdf_kontoauszug._ocr_zeilen(_roh_pdf([(595.28, 841.89)]))
+    with pytest.raises(Exception):
+        pdf_kontoauszug._ocr_zeilen(b"%PDF-1.4 kaputt")
+    assert not pdf_kontoauszug._PDFIUM_SPERRE.locked()
+
+
+def _tiff(seiten: list, **optionen) -> bytes:
+    puffer = BytesIO()
+    seiten[0].save(puffer, "TIFF", save_all=True, append_images=seiten[1:], **optionen)
+    return puffer.getvalue()
+
+
+def test_bild_dekompressionsbombe_abgelehnt(monkeypatch):
+    from PIL import Image
+
+    monkeypatch.setattr(bt, "BILD_MAX_PIXEL", 1_000_000)
+    tesseract = []
+    monkeypatch.setattr(pdf_kontoauszug, "ocr_verfuegbar", lambda: True)
+    monkeypatch.setattr(pdf_kontoauszug, "_tesseract_tsv", lambda png, s: tesseract.append(1) or "")
+    seite = Image.new("1", (1500, 1500), 1)   # Fax-TIFF: stark komprimiert, groß dekodiert
+    daten = _tiff([seite, seite], compression="group4")
+    assert len(daten) < 5000
+    erg = beleg_text(daten, "image/tiff")
+    assert erg.quelle == "LEER"
+    assert any("zu groß" in w for w in erg.warnungen), erg.warnungen
+    assert tesseract == []
+    assert vision_bilder(daten, "image/tiff") == []
+
+
+def test_bild_frames_einzeln_dekodiert_und_verkleinert():
+    from PIL import Image
+
+    seiten = [Image.new("1", (3000, 1000), 1), Image.new("RGB", (500, 400), "red")]
+    frames = bt._bild_frames(_tiff(seiten, compression="tiff_deflate"), 5, max_kante=2000)
+    erstes = next(frames)
+    assert erstes.size == (2000, 667) and erstes.mode == "L"   # Modus 1 nicht über RGB
+    zweites = next(frames)
+    assert zweites.size == (500, 400) and zweites.mode == "RGB"
+    assert next(frames, None) is None
+
+
+def test_grosses_jpeg_wird_verkleinert_dekodiert(monkeypatch):
+    from PIL import Image
+
+    puffer = BytesIO()
+    Image.new("RGB", (4000, 3000), (200, 220, 240)).save(puffer, "JPEG", quality=80)
+    monkeypatch.setattr(bt, "BILD_MAX_PIXEL", 5_000_000)   # 12 MP passen nur per JPEG-Draft
+    urls = vision_bilder(puffer.getvalue(), "image/jpeg")
+    assert len(urls) == 1
+    assert _bild_aus_data_url(urls[0]).size == (2000, 1500)
+
+
+def test_mpo_nur_hauptbild():
+    from PIL import Image
+
+    puffer = BytesIO()
+    Image.new("RGB", (4000, 3000), "white").save(
+        puffer, "MPO", save_all=True, append_images=[Image.new("RGB", (1000, 750), "black")])
+    urls = vision_bilder(puffer.getvalue(), "image/jpeg")
+    assert len(urls) == 1   # Folgebild ist Tiefen-/HDR-Karte, keine Seite
+    assert _bild_aus_data_url(urls[0]).getpixel((5, 5)) == (255, 255, 255)
+
+
+# ------------------------------------------------------------------ E-Mail: eingebettete Bilder
+
+def _png_bild(groesse, farbe="white") -> bytes:
+    from PIL import Image
+
+    return _png(Image.new("RGB", groesse, farbe))
+
+
+def _eml_mit_signatur(anhaenge: list[tuple[bytes, str, str, str]], logos: int = 3,
+                      bild: bytes | None = None) -> bytes:
+    """HTML-Mail mit eingebetteten Signaturbildern (multipart/related, cid) und Anhängen."""
+    nachricht = EmailMessage()
+    nachricht["Subject"] = "Auftragsbestätigung 4711"
+    nachricht["From"] = "vertrieb@lieferant.example"
+    nachricht["To"] = "einkauf@kunde.example"
+    nachricht.set_content("Sehr geehrte Damen und Herren,\nanbei die AB.\n")
+    verweise = "".join(f"<img src='cid:logo{i}'>" for i in range(1, logos + 1))
+    nachricht.add_alternative(f"<p>anbei die AB.</p>{verweise}", subtype="html")
+    html_teil = nachricht.get_payload()[1]
+    for i in range(1, logos + 1):
+        html_teil.add_related(_png_bild((120, 40), "red"), maintype="image", subtype="png",
+                              cid=f"<logo{i}>", filename=f"image00{i}.png", disposition="inline")
+    if bild is not None:
+        html_teil.add_related(bild, maintype="image", subtype="png", cid="<foto>",
+                              filename="foto.png", disposition="inline")
+    for inhalt, haupt, unter, name in anhaenge:
+        nachricht.add_attachment(inhalt, maintype=haupt, subtype=unter, filename=name)
+    return bytes(nachricht)
+
+
+def test_eml_signaturbilder_verdraengen_pdf_anhang_nicht():
+    daten = _eml_mit_signatur([(_text_pdf(ZEILEN, seiten=2), "application", "pdf", "AB_4711.pdf")])
+    assert [name for name, _, _ in bt.eml_anhaenge(daten)] == ["AB_4711.pdf"]
+    urls = vision_bilder(daten, EML)
+    assert len(urls) == 2
+    assert all(abs(_bild_aus_data_url(u).size[0] - 1240) <= 2 for u in urls)   # PDF-Seiten
+    erg = beleg_text(daten, EML)
+    assert "AB-4711" in erg.text
+    assert "image001" not in erg.text and not any("image001" in w for w in erg.warnungen)
+
+
+def test_eml_eingebettetes_bild_ohne_anhang_bleibt():
+    foto = _png_bild((900, 700))
+    daten = _eml_mit_signatur([], logos=1, bild=foto)
+    assert [name for name, _, _ in bt.eml_anhaenge(daten)] == ["foto.png"]   # Logo zu klein
+    assert len(vision_bilder(daten, EML)) == 1
+
+
+def test_vision_eml_pdf_vor_bildern_und_ohne_kleinstbilder():
+    daten = _eml_mit_signatur([
+        (_png_bild((100, 100)), "image", "png", "symbol.png"),
+        (_png_bild((900, 700), "blue"), "image", "png", "foto.png"),
+        (_text_pdf(ZEILEN, seiten=2), "application", "pdf", "AB.pdf"),
+    ], logos=0)
+    urls = vision_bilder(daten, EML)
+    groessen = [_bild_aus_data_url(u).size for u in urls]
+    assert len(groessen) == 3
+    assert all(abs(b - 1240) <= 2 for b, _ in groessen[:2])   # erst die PDF-Seiten
+    assert groessen[2] == (900, 700)                           # dann das Foto, kein Symbol

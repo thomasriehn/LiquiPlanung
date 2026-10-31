@@ -35,7 +35,14 @@ VISION_MAX_KANTE = 2000       # px (OpenAI-kompatible Dienste skalieren größer
 OCR_MIN_KANTE = 1600          # kleinere Bilder vor der Texterkennung vergrößern
 OCR_MAX_KANTE = 4000
 TEXT_MAX = 200_000            # Schutz vor riesigen Tabellen/Mails (KI kürzt weiter)
-XML_MAX_BYTES = 50 * 1024 * 1024
+BILD_MAX_PIXEL = 40_000_000   # je Einzelbild nach dem Dekodieren (A4 mit 600 dpi ≈ 35 MP)
+BILD_MIN_KANTE = 300          # kleinere Bilder in Mails (Logos, Symbole) auslassen
+# Office-Dateien sind ZIP-Archive: Grenzen gegen Archivbomben (entpackt)
+XML_MAX_BYTES = 20 * 1024 * 1024      # je ausgewertetem Teil
+ZIP_SUMME_MAX = 50 * 1024 * 1024      # alle ausgewerteten Teile zusammen
+ZIP_MAX_EINTRAEGE = 2000
+ZIP_MAX_ELEMENTE = 500_000            # XML-Elemente aller ausgewerteten Teile
+DOCX_MAX_KOPF_FUSS = 10               # je Kopf- bzw. Fußzeilenteile
 XLSX_MAX_BLAETTER = 10
 XLSX_MAX_ZEILEN = 1000
 XLSX_MAX_SPALTEN = 50
@@ -223,49 +230,79 @@ def _pdf(daten: bytes, max_seiten: int) -> BelegText:
 
 def pdf_seiten_bilder(daten: bytes, max_seiten: int = VISION_MAX_SEITEN,
                       dpi: int = VISION_DPI, graustufen: bool = False) -> list:
-    """PDF-Seiten als PIL-Bilder (pypdfium2, unter der gemeinsamen pdfium-Sperre)."""
+    """PDF-Seiten als PIL-Bilder (pypdfium2, unter der gemeinsamen pdfium-Sperre).
+    Übergroße Seiten werden gleich mit höchstens VISION_MAX_KANTE Pixeln gerendert."""
     import pypdfium2 as pdfium
 
     with _pk._PDFIUM_SPERRE:
         dokument = pdfium.PdfDocument(daten)
         try:
-            return [
-                dokument[nr].render(scale=dpi / 72, grayscale=graustufen).to_pil()
-                for nr in range(min(max_seiten, len(dokument)))
-            ]
+            bilder = []
+            for nr in range(min(max_seiten, len(dokument))):
+                seite = dokument[nr]
+                try:
+                    skala = _pk._render_skala(seite, dpi, max_kante=VISION_MAX_KANTE)
+                    bilder.append(seite.render(scale=skala, grayscale=graustufen).to_pil())
+                finally:
+                    seite.close()
+            return bilder
         finally:
             dokument.close()
 
 
 # ------------------------------------------------------------------ Bilder
 
-def _bild_frames(daten: bytes, max_seiten: int) -> list:
-    """Einzelbilder (mehrseitige TIFFs: je Seite eines), ausgerichtet nach EXIF,
-    als RGB bzw. Graustufen ohne Transparenz."""
+def _zielgroesse(groesse: tuple[int, int], max_kante: int) -> tuple[int, int]:
+    breite, hoehe = groesse
+    faktor = min(1.0, max_kante / max(breite, hoehe, 1))
+    return max(1, round(breite * faktor)), max(1, round(hoehe * faktor))
+
+
+def _bild_frames(daten: bytes, max_seiten: int, max_kante: int = VISION_MAX_KANTE):
+    """Einzelbilder (mehrseitige TIFFs: je Seite eines) nacheinander, auf höchstens
+    `max_kante` Pixel verkleinert, ausgerichtet nach EXIF, als RGB bzw. Graustufen
+    ohne Transparenz. Jeder Frame wird einzeln dekodiert und sofort verkleinert;
+    Frames über BILD_MAX_PIXEL (Dekompressionsbomben, z. B. Fax-TIFFs) → ValueError."""
     from PIL import Image, ImageOps, ImageSequence
 
     bild = Image.open(BytesIO(daten))
-    ergebnis = []
+    grenze = 1 if bild.format == "MPO" else max_seiten   # MPO: nur das Hauptbild
     for nr, frame in enumerate(ImageSequence.Iterator(bild)):
-        if nr >= max_seiten:
+        if nr >= grenze:
             break
-        einzel = ImageOps.exif_transpose(frame.copy())
+        if bild.format in ("JPEG", "MPO"):
+            frame.draft(None, _zielgroesse(frame.size, max_kante))   # verkleinert dekodieren
+        breite, hoehe = frame.size
+        if breite * hoehe > BILD_MAX_PIXEL:
+            raise ValueError(f"Bild zu groß ({breite} × {hoehe} Pixel)")
+        einzel = frame
+        if einzel.mode == "1":
+            einzel = einzel.convert("L")
         if einzel.mode in ("RGBA", "LA", "P", "PA") or "transparency" in einzel.info:
-            rgba = einzel.convert("RGBA")
-            hintergrund = Image.new("RGB", rgba.size, "white")
-            hintergrund.paste(rgba, mask=rgba.split()[-1])
-            einzel = hintergrund
+            einzel = einzel.convert("RGBA")
         elif einzel.mode not in ("RGB", "L"):
             einzel = einzel.convert("RGB")
-        ergebnis.append(einzel)
-    return ergebnis
+        if max(einzel.size) > max_kante:
+            einzel = einzel.resize(_zielgroesse(einzel.size, max_kante),
+                                   Image.Resampling.BICUBIC, reducing_gap=2.0)
+        if einzel is frame:
+            einzel = frame.copy()   # der Iterator verwendet ein Objekt für alle Frames
+        ImageOps.exif_transpose(einzel, in_place=True)
+        if einzel.mode == "RGBA":
+            hintergrund = Image.new("RGB", einzel.size, "white")
+            hintergrund.paste(einzel, mask=einzel.getchannel("A"))
+            einzel = hintergrund
+        yield einzel
 
 
 def _bild_anzahl(daten: bytes) -> int:
     try:
         from PIL import Image
 
-        return max(1, getattr(Image.open(BytesIO(daten)), "n_frames", 1))
+        bild = Image.open(BytesIO(daten))
+        if bild.format == "MPO":   # Handyfotos: Folgebilder sind Tiefen-/HDR-Karten, keine Seiten
+            return 1
+        return max(1, getattr(bild, "n_frames", 1))
     except Exception:  # noqa: BLE001
         return 1
 
@@ -274,6 +311,16 @@ def _png(bild) -> bytes:
     puffer = BytesIO()
     bild.save(puffer, "PNG")
     return puffer.getvalue()
+
+
+def _kleines_bild(daten: bytes) -> bool:
+    """Längste Kante unter BILD_MIN_KANTE (Logo, Symbol) oder nicht lesbar."""
+    try:
+        from PIL import Image
+
+        return max(Image.open(BytesIO(daten)).size) < BILD_MIN_KANTE
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def bild_normalisieren(bild, max_kante: int = VISION_MAX_KANTE):
@@ -305,8 +352,7 @@ def _bild(daten: bytes, max_seiten: int) -> BelegText:
         warnungen.append(_ohne_ocr_warnung())
         return BelegText("", "LEER", anzahl, warnungen)
     try:
-        frames = _bild_frames(daten, max_seiten)
-        texte = [_ocr_bild(f) for f in frames]
+        texte = [_ocr_bild(f) for f in _bild_frames(daten, max_seiten, OCR_MAX_KANTE)]
     except Exception as e:  # noqa: BLE001 – defekte Bilder, Dekompressionsbomben, Zeitüberschreitung
         warnungen.append(f"Bild nicht lesbar: {e}")
         return BelegText("", "LEER", anzahl, warnungen)
@@ -323,6 +369,36 @@ def _bild(daten: bytes, max_seiten: int) -> BelegText:
 # ------------------------------------------------------------------ Office
 
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_ENTITY = tuple("<!ENTITY".encode(k) for k in ("utf-8", "utf-16-le", "utf-16-be"))
+
+
+def _mb(n: int) -> str:
+    return f"{n // (1024 * 1024)} MB"
+
+
+def _zip_pruefen(z: zipfile.ZipFile, namen: list[str] | None = None) -> None:
+    """Schutz vor Archivbomben vor dem Parsen der Teile `namen` (sonst aller Einträge):
+    Zahl der Einträge, entpackte Größe je Teil und gesamt, Zahl der XML-Elemente.
+    Entity-Deklarationen (Entity-Expansion) sind in Office-Dateien nicht vorgesehen."""
+    eintraege = z.infolist()
+    if len(eintraege) > ZIP_MAX_EINTRAEGE:
+        raise ValueError(f"zu viele Teile im Archiv ({len(eintraege)}, höchstens {ZIP_MAX_EINTRAEGE})")
+    infos = eintraege if namen is None else [z.getinfo(n) for n in namen]
+    if (any(i.file_size > XML_MAX_BYTES for i in infos)
+            or sum(i.file_size for i in infos) > ZIP_SUMME_MAX):
+        raise ValueError(f"Inhalt entpackt zu groß zum Auslesen (höchstens {_mb(ZIP_SUMME_MAX)}, "
+                         f"je Teil {_mb(XML_MAX_BYTES)})")
+    elemente = 0
+    for info in infos:
+        if info.is_dir():
+            continue
+        roh = z.read(info)   # liefert höchstens file_size Bytes
+        if any(muster in roh for muster in _ENTITY):
+            raise ValueError(f"{info.filename}: Entity-Deklaration nicht zulässig")
+        elemente += roh.count(b"<") - roh.count(b"</")   # Schätzung, eher zu hoch
+        if elemente > ZIP_MAX_ELEMENTE:
+            raise ValueError(f"zu umfangreich zum Auslesen (über {ZIP_MAX_ELEMENTE:,} XML-Elemente)"
+                             .replace(",", "."))
 
 
 def _zip_xml(z: zipfile.ZipFile, name: str):
@@ -344,38 +420,80 @@ def _w_absatz(p) -> str:
     return "".join(teile)
 
 
+_W_STRUKTUR = {_W + "p", _W + "tbl", _W + "tr", _W + "tc"}
+
+
 def _w_bloecke(element, zeilen: list[str]) -> None:
     """Absätze und Tabellen (Zeile: Zellen mit „ | “ getrennt) in Dokumentreihenfolge."""
     for kind in element:
         if kind.tag == _W + "p":
             zeilen.append(_w_absatz(kind))
         elif kind.tag == _W + "tbl":
-            for tr in kind.iter(_W + "tr"):
-                zellen = [
-                    " ".join(t for t in (_w_absatz(p).strip() for p in tc.iter(_W + "p")) if t)
-                    for tc in tr.findall(_W + "tc")
-                ]
-                if any(zellen):
-                    zeilen.append(" | ".join(zellen))
+            _w_tabelle(kind, zeilen)
         else:  # Inhaltssteuerelemente, Abschnittsgruppen …
             _w_bloecke(kind, zeilen)
+
+
+def _w_kinder(element, tag: str):
+    """Kindelemente `tag`, auch innerhalb von Inhaltssteuerelementen (w:sdt …)."""
+    for kind in element:
+        if kind.tag == tag:
+            yield kind
+        elif kind.tag not in _W_STRUKTUR:
+            yield from _w_kinder(kind, tag)
+
+
+def _w_zelle(element, absaetze: list[str], innen: list) -> None:
+    for kind in element:
+        if kind.tag == _W + "p":
+            absaetze.append(_w_absatz(kind).strip())
+        elif kind.tag == _W + "tbl":
+            innen.append(kind)
+        else:
+            _w_zelle(kind, absaetze, innen)
+
+
+def _w_tabelle(tbl, zeilen: list[str]) -> None:
+    """Zeilen einer Tabelle; verschachtelte Tabellen folgen als eigene Zeilen. Jedes
+    Element wird nur einmal besucht (sonst quadratischer Aufwand bei tiefer Schachtelung)."""
+    for tr in _w_kinder(tbl, _W + "tr"):
+        zellen, innen = [], []
+        for tc in _w_kinder(tr, _W + "tc"):
+            absaetze: list[str] = []
+            _w_zelle(tc, absaetze, innen)
+            zellen.append(" ".join(a for a in absaetze if a))
+        if any(zellen):
+            zeilen.append(" | ".join(zellen))
+        for tabelle in innen:
+            _w_tabelle(tabelle, zeilen)
+
+
+def _teil_nr(name: str) -> int:
+    treffer = re.search(r"(\d+)\.xml$", name)
+    return int(treffer.group(1)) if treffer else 0
 
 
 def docx_text(daten: bytes) -> str:
     """Text eines Word-Dokuments: Kopfzeilen (Briefkopf!), Haupttext, Fußzeilen."""
     with zipfile.ZipFile(BytesIO(daten)) as z:
-        namen = z.namelist()
-        kopf = sorted(n for n in namen if re.fullmatch(r"word/header\d*\.xml", n))
-        fuss = sorted(n for n in namen if re.fullmatch(r"word/footer\d*\.xml", n))
-        teile = []
-        for name in [*kopf, "word/document.xml", *fuss]:
-            if name not in namen:
-                continue
+        namen = list(dict.fromkeys(z.namelist()))
+        kopf = sorted((n for n in namen if re.fullmatch(r"word/header\d*\.xml", n)), key=_teil_nr)
+        fuss = sorted((n for n in namen if re.fullmatch(r"word/footer\d*\.xml", n)), key=_teil_nr)
+        vorhanden = set(namen)
+        auswahl = [n for n in (*kopf[:DOCX_MAX_KOPF_FUSS], "word/document.xml",
+                               *fuss[:DOCX_MAX_KOPF_FUSS]) if n in vorhanden]
+        _zip_pruefen(z, auswahl)
+        teile: list[str] = []
+        laenge = 0
+        for name in auswahl:
             zeilen: list[str] = []
             _w_bloecke(_zip_xml(z, name), zeilen)
             stueck = "\n".join(zeilen).strip()
             if stueck and stueck not in teile:   # gleiche Kopfzeile je Abschnitt nur einmal
                 teile.append(stueck)
+                laenge += len(stueck)
+                if laenge > TEXT_MAX:   # der Rest würde ohnehin abgeschnitten
+                    break
     return "\n\n".join(teile)
 
 
@@ -397,21 +515,32 @@ def xlsx_text(daten: bytes) -> tuple[str, int]:
     """Zellwerte je Blatt (Zeilen, Zellen mit „ | “ getrennt) und Anzahl der Blätter."""
     from openpyxl import load_workbook
 
-    mappe = load_workbook(BytesIO(daten), read_only=True, data_only=True)
+    # openpyxl liest u. a. sharedStrings.xml vollständig ein, welche Teile es liest,
+    # bestimmt die Datei selbst: daher alle Einträge prüfen
+    with zipfile.ZipFile(BytesIO(daten)) as z:
+        _zip_pruefen(z)
+    mappe = load_workbook(BytesIO(daten), read_only=True, data_only=True, keep_links=False)
     try:
         blaetter = mappe.worksheets
         teile = []
+        laenge = 0
         for blatt in blaetter[:XLSX_MAX_BLAETTER]:
             zeilen = []
             for zeile in blatt.iter_rows(max_row=XLSX_MAX_ZEILEN, max_col=XLSX_MAX_SPALTEN,
                                          values_only=True):
-                werte = [_zellwert(w) for w in zeile]
+                # eine geteilte Zeichenkette kann in jeder Zelle stehen: Länge begrenzen
+                werte = [_zellwert(w)[:TEXT_MAX] for w in zeile]
                 while werte and not werte[-1]:
                     werte.pop()
                 if any(werte):
                     zeilen.append(" | ".join(werte))
+                    laenge += len(zeilen[-1]) + 1
+                    if laenge > TEXT_MAX:   # der Rest würde ohnehin abgeschnitten
+                        break
             if zeilen:
                 teile.append(f"Tabellenblatt „{blatt.title}“:\n" + "\n".join(zeilen))
+            if laenge > TEXT_MAX:
+                break
         return "\n\n".join(teile), len(blaetter)
     finally:
         mappe.close()
@@ -449,19 +578,31 @@ def _eml_zerlegen(daten: bytes) -> tuple[list[str], list[str], list[tuple[str, s
     klartext: list[str] = []
     html_teile: list[str] = []
     anhaenge: list[tuple[str, str, bytes]] = []
+    eingebettet: list[tuple[str, str, bytes]] = []   # im HTML-Text gezeigte Bilder (cid:)
     for teil in nachricht.walk():
         if teil.is_multipart():
             continue
         typ = teil.get_content_type()
         name = teil.get_filename()
-        if teil.get_content_disposition() == "attachment" or (name and not typ.startswith("text/")):
+        art = teil.get_content_disposition()
+        if art == "attachment" or (name and not typ.startswith("text/")):
             nutzlast = teil.get_payload(decode=True) or b""
-            if nutzlast:
-                anhaenge.append((name or "Anhang", typ, nutzlast))
+            if not nutzlast:
+                continue
+            eintrag = (name or "Anhang", typ, nutzlast)
+            if (art != "attachment" and teil.get("Content-ID")
+                    and ist_bild(mime_bestimmen(nutzlast, typ, name))):
+                eingebettet.append(eintrag)
+            else:
+                anhaenge.append(eintrag)
         elif typ == "text/plain":
             klartext.append(_teil_text(teil))
         elif typ == "text/html":
             html_teile.append(_html_text(_teil_text(teil)))
+    # Signatur- und Logobilder nicht als Beleg werten: eingebettete Bilder nur ohne
+    # echte Anhänge und nur in brauchbarer Größe
+    if not anhaenge:
+        anhaenge = [e for e in eingebettet if not _kleines_bild(e[2])]
     return kopf, (klartext or html_teile), anhaenge
 
 
@@ -560,12 +701,15 @@ def vision_bilder(daten: bytes, mime: str, max_seiten: int = VISION_MAX_SEITEN,
         if typ == PDF:
             bilder = pdf_seiten_bilder(daten, max_seiten, dpi)
         elif typ in BILD_MIME:
-            bilder = _bild_frames(daten, max_seiten)
+            bilder = _bild_frames(daten, max_seiten, VISION_MAX_KANTE)
         elif typ == EML:
+            # PDF-Anhänge vor Bildern, Kleinstbilder (Logos, Symbole) auslassen
+            anhaenge = [(t, inhalt) for _, t, inhalt in eml_anhaenge(daten)
+                        if t == PDF or (t in BILD_MIME and not _kleines_bild(inhalt))]
+            anhaenge.sort(key=lambda a: a[0] != PDF)
             urls: list[str] = []
-            for name, anhang_typ, inhalt in eml_anhaenge(daten):
-                if anhang_typ == PDF or anhang_typ in BILD_MIME:
-                    urls += vision_bilder(inhalt, anhang_typ, max_seiten - len(urls), dpi)
+            for anhang_typ, inhalt in anhaenge:
+                urls += vision_bilder(inhalt, anhang_typ, max_seiten - len(urls), dpi)
                 if len(urls) >= max_seiten:
                     break
             return urls[:max_seiten]

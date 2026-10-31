@@ -15,7 +15,9 @@ from sqlalchemy import (
     Table,
     Text,
     Column,
+    Index,
     UniqueConstraint,
+    text as sql_text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -754,6 +756,16 @@ class BestellAbloesung(Base):
     """
 
     __tablename__ = "bestell_abloesungen"
+    # eine Zahlung löst höchstens eine Bestellung ab – auch bei gleichzeitigen
+    # Anfragen (partielle eindeutige Indizes, ersetzen die einfachen)
+    __table_args__ = (
+        Index("uq_bestell_abloesungen_buchung_id", "buchung_id", unique=True,
+              sqlite_where=sql_text("buchung_id IS NOT NULL"),
+              postgresql_where=sql_text("buchung_id IS NOT NULL")),
+        Index("uq_bestell_abloesungen_transaktion_id", "transaktion_id", unique=True,
+              sqlite_where=sql_text("transaktion_id IS NOT NULL"),
+              postgresql_where=sql_text("transaktion_id IS NOT NULL")),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     mandant_id: Mapped[int] = mapped_column(ForeignKey("mandanten.id", ondelete="CASCADE"), index=True)
@@ -762,10 +774,10 @@ class BestellAbloesung(Base):
     )
     art: Mapped[str] = mapped_column(String(10), default=AbloeseArt.ZAHLUNG.value)
     buchung_id: Mapped[int | None] = mapped_column(
-        ForeignKey("buchungen.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("buchungen.id", ondelete="SET NULL"), nullable=True
     )
     transaktion_id: Mapped[int | None] = mapped_column(
-        ForeignKey("bank_transaktionen.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("bank_transaktionen.id", ondelete="SET NULL"), nullable=True
     )
     posten_id: Mapped[int | None] = mapped_column(
         ForeignKey("offene_posten.id", ondelete="SET NULL"), nullable=True, index=True

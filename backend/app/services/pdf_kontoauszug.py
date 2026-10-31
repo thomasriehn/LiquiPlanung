@@ -29,6 +29,7 @@ Bank die Posten bereits einzeln, werden die Auszugszeilen den Posten
 zugeordnet und mit deren Empfänger/Verwendungszweck ergänzt.
 """
 
+import math
 import os
 import re
 import shutil
@@ -416,6 +417,7 @@ def parse_datei(daten: bytes) -> PdfErgebnis:
 
 OCR_AUFLOESUNG = 300        # dpi beim Rendern
 OCR_MAX_SEITEN = 30
+OCR_MAX_PIXEL = 36_000_000  # je Seite; bis A2 bleibt es bei 300 dpi, größere Seiten gröber
 
 
 @dataclass
@@ -457,34 +459,60 @@ def _tesseract_tsv(png: bytes, sprache: str) -> str:
     ).stdout.decode("utf-8", "replace")
 
 
+def _render_skala(seite, dpi: float, *, max_pixel: int | None = None,
+                  max_kante: int | None = None) -> float:
+    """Render-Maßstab für `dpi`; übergroße Seiten (MediaBox bis 14.400 pt) werden auf
+    höchstens `max_pixel` Bildpunkte bzw. `max_kante` Pixel Kantenlänge begrenzt."""
+    breite, hoehe = (max(float(x), 1.0) for x in seite.get_size())
+    skala = dpi / 72
+    if max_kante:
+        skala = min(skala, max_kante / max(breite, hoehe))
+    if max_pixel:
+        skala = min(skala, math.sqrt(max_pixel / (breite * hoehe)))
+    return skala
+
+
 def _ocr_zeilen(daten: bytes, ab: int = 0, bis: int = OCR_MAX_SEITEN) -> list[list[list[OcrWort]]]:
     """Seiten → Zeilen → Wörter (links→rechts) mit relativen x-Positionen."""
     import pypdfium2 as pdfium
 
+    # Seiten einzeln rendern und gleich als PNG ablegen, statt alle Bitmaps zu halten;
+    # pdfium nur unter der Sperre, die PNG-Kodierung außerhalb
     with _PDFIUM_SPERRE:
         dokument = pdfium.PdfDocument(daten)
         try:
-            bilder = [
-                dokument[nr].render(scale=OCR_AUFLOESUNG / 72, grayscale=True).to_pil()
-                for nr in range(ab, min(bis, len(dokument)))
-            ]
-        finally:
+            seitenzahl = len(dokument)
+        except BaseException:
+            dokument.close()
+            raise
+    pngs: list[bytes] = []
+    breiten: list[int] = []
+    try:
+        for nr in range(ab, min(bis, seitenzahl)):
+            with _PDFIUM_SPERRE:
+                seite = dokument[nr]
+                try:
+                    skala = _render_skala(seite, OCR_AUFLOESUNG, max_pixel=OCR_MAX_PIXEL)
+                    bild = seite.render(scale=skala, grayscale=True).to_pil()
+                finally:
+                    seite.close()
+            png = BytesIO()
+            bild.save(png, "PNG")
+            pngs.append(png.getvalue())
+            breiten.append(bild.size[0] or 1)
+            del bild
+    finally:
+        with _PDFIUM_SPERRE:
             dokument.close()
 
     sprache = _ocr_sprache()
-    pngs = []
-    for bild in bilder:
-        png = BytesIO()
-        bild.save(png, "PNG")
-        pngs.append(png.getvalue())
     # Seiten parallel erkennen, je Prozess ein Thread: tesseracts eigenes
     # OpenMP-Threading überbucht sich bei parallelen Prozessen massiv
     with ThreadPoolExecutor(max_workers=max(1, min(OCR_PARALLEL, len(pngs)))) as pool:
         tsvs = list(pool.map(lambda png: _tesseract_tsv(png, sprache), pngs))
 
     seiten = []
-    for bild, tsv in zip(bilder, tsvs):
-        breite = bild.size[0] or 1
+    for breite, tsv in zip(breiten, tsvs):
         zeilen: dict[tuple, list[OcrWort]] = {}
         for roh in tsv.splitlines()[1:]:
             t = roh.split("\t")

@@ -18,34 +18,52 @@ function sysStatusHtml(konfiguriert, textJa, textNein) {
     : `<span class="status-badge offen">${esc(textNein)}</span>`;
 }
 
-function sysZeigen(s) {
-  const gf = document.getElementById("sys-graph-form");
+// Status eines Abschnitts (Badge, Secret-Hinweis, Platzhalter) – Eingaben bleiben unberührt
+function sysGraphStatus(s) {
   const g = s.graph || {};
   const sec = g.client_secret || {};
-  gf.graph_tenant_id.value = g.tenant_id || "";
-  gf.graph_client_id.value = g.client_id || "";
-  gf.graph_client_secret.value = "";
-  gf.graph_client_secret.placeholder = sec.gesetzt || sec.aus_umgebung
+  document.getElementById("sys-graph-form").graph_client_secret.placeholder = sec.gesetzt || sec.aus_umgebung
     ? "gespeichert – leer lassen = unverändert" : "Wert des geheimen Clientschlüssels";
   document.getElementById("sys-graph-secret-status").textContent = sysGeheimText(sec, "GRAPH_CLIENT_SECRET");
   document.getElementById("sys-graph-secret-entfernen").style.display = sec.gesetzt ? "" : "none";
   document.getElementById("sys-graph-status").innerHTML =
     sysStatusHtml(g.konfiguriert, "eingerichtet", "nicht vollständig eingerichtet");
+}
 
-  const kf = document.getElementById("sys-ki-form");
+function sysKiStatus(s) {
   const k = s.llm || {};
   const key = k.api_key || {};
-  kf.llm_url.value = k.url || "";
-  kf.llm_modell.value = k.modell || "";
-  kf.llm_vision.checked = !!k.vision;
-  kf.llm_api_key.value = "";
-  kf.llm_api_key.placeholder = key.gesetzt || key.aus_umgebung
+  document.getElementById("sys-ki-form").llm_api_key.placeholder = key.gesetzt || key.aus_umgebung
     ? "gespeichert – leer lassen = unverändert" : "leer = ohne Schlüssel (z. B. lokaler Server)";
   document.getElementById("sys-ki-key-status").textContent = sysGeheimText(key, "LLM_API_KEY");
   document.getElementById("sys-ki-key-entfernen").style.display = key.gesetzt ? "" : "none";
   document.getElementById("sys-ki-status").innerHTML =
     sysStatusHtml(k.konfiguriert, "eingerichtet", "nicht eingerichtet (API-URL und Modell fehlen)");
+}
 
+// Formular eines Abschnitts mit den Serverwerten neu belegen
+function sysGraphZeigen(s) {
+  const gf = document.getElementById("sys-graph-form");
+  const g = s.graph || {};
+  gf.graph_tenant_id.value = g.tenant_id || "";
+  gf.graph_client_id.value = g.client_id || "";
+  gf.graph_client_secret.value = "";
+  sysGraphStatus(s);
+  sysGeaendert.graph = false;
+}
+
+function sysKiZeigen(s) {
+  const kf = document.getElementById("sys-ki-form");
+  const k = s.llm || {};
+  kf.llm_url.value = k.url || "";
+  kf.llm_modell.value = k.modell || "";
+  kf.llm_vision.checked = !!k.vision;
+  kf.llm_api_key.value = "";
+  sysKiStatus(s);
+  sysGeaendert.ki = false;
+}
+
+function sysAllgemeinZeigen(s) {
   const a = s.ablage || {};
   document.getElementById("sys-ablage-verzeichnis").textContent = a.verzeichnis || "–";
   document.getElementById("sys-ablage-max").textContent = a.max_mb ? `${a.max_mb} MB je Datei` : "–";
@@ -55,8 +73,12 @@ function sysZeigen(s) {
        Gespeicherte Geheimnisse sind damit nur schwach geschützt. Bitte <code>SECRET_KEY</code> bzw.
        <code>GEHEIMNIS_SCHLUESSEL</code> in der Umgebung setzen und die Geheimnisse danach neu eingeben.</div>`
     : "";
-  sysGeaendert.graph = false;
-  sysGeaendert.ki = false;
+}
+
+function sysZeigen(s) {
+  sysGraphZeigen(s);
+  sysKiZeigen(s);
+  sysAllgemeinZeigen(s);
 }
 
 async function sysLaden() {
@@ -64,8 +86,13 @@ async function sysLaden() {
   catch (e) { toast(e.message); }
 }
 
-async function sysSpeichern(daten) {
-  sysZeigen(await api("PUT", "/api/system/einstellungen", daten));
+// Speichert und belegt nur den gespeicherten Abschnitt („graph“ | „ki“) neu; der
+// andere (bzw. ohne Abschnitt: beide) bekommt nur den Status – ungespeicherte Eingaben bleiben
+async function sysSpeichern(daten, art = null) {
+  const s = await api("PUT", "/api/system/einstellungen", daten);
+  if (art === "graph") sysGraphZeigen(s); else sysGraphStatus(s);
+  if (art === "ki") sysKiZeigen(s); else sysKiStatus(s);
+  sysAllgemeinZeigen(s);
 }
 
 function sysGraphDaten() {
@@ -101,7 +128,7 @@ async function sysTesten(art) {
   try {
     // ungespeicherte Eingaben zuerst speichern – getestet wird der gespeicherte Stand
     if (sysGeaendert[art]) {
-      await sysSpeichern(art === "graph" ? sysGraphDaten() : sysKiDaten());
+      await sysSpeichern(art === "graph" ? sysGraphDaten() : sysKiDaten(), art);
       toast("Einstellungen gespeichert.", false);
     }
     sysErgebnis(ergebnisId, `<p class="hinweis">Verbindung wird geprüft …</p>`);
@@ -127,12 +154,12 @@ async function sysTesten(art) {
 
 document.getElementById("sys-graph-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  try { await sysSpeichern(sysGraphDaten()); toast("Microsoft-Graph-Zugang gespeichert.", false); sysErgebnis("sys-graph-ergebnis", ""); }
+  try { await sysSpeichern(sysGraphDaten(), "graph"); toast("Microsoft-Graph-Zugang gespeichert.", false); sysErgebnis("sys-graph-ergebnis", ""); }
   catch (err) { toast(err.message); }
 });
 document.getElementById("sys-ki-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  try { await sysSpeichern(sysKiDaten()); toast("KI-Zugang gespeichert.", false); sysErgebnis("sys-ki-ergebnis", ""); }
+  try { await sysSpeichern(sysKiDaten(), "ki"); toast("KI-Zugang gespeichert.", false); sysErgebnis("sys-ki-ergebnis", ""); }
   catch (err) { toast(err.message); }
 });
 for (const art of ["graph", "ki"]) {

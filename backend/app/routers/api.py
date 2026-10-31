@@ -27,6 +27,7 @@ from ..security import (
 from ..config import get_settings
 from ..services import ausgleich, backup, bank, datev, export, insolvenzgeld
 from ..services import bestellungen as bestell_dienst
+from ..services import ablage
 from ..services.feiertage import BUNDESLAENDER
 from ..services.kontenrahmen import (
     eingebaute_definition,
@@ -136,6 +137,12 @@ def mandant_anlegen(
     )
     db.add(mandant)
     db.flush()
+    try:
+        # Standardordner „<Kurzname>-<id>“: frei und ohne fremde Belege?
+        ablage.standardordner_pruefen(db, mandant)
+    except ablage.AblageFehler as e:
+        db.rollback()
+        raise HTTPException(e.status, e.nachricht) from e
     lege_kontenrahmen_an(db, mandant)
     lege_standard_szenarien_an(db, mandant)
     audit(db, benutzer, mandant.id, "MANDANT_ANGELEGT", mandant.name)
@@ -201,6 +208,8 @@ def mandant_loeschen(
         )
     mid = mandant.id
     name = f"{mandant.name} ({mandant.kurzname})"
+    # lokale Ablageordner später nach .geloescht verschieben (nie löschen)
+    ordner_plan = ablage.mandant_ordner_plan(db, mandant)
 
     # Kinder in Fremdschlüssel-Reihenfolge löschen – bewusst ohne DB-Kaskaden,
     # damit es auf PostgreSQL und SQLite gleichermaßen funktioniert.
@@ -243,8 +252,21 @@ def mandant_loeschen(
     db.execute(update(models.AuditLog).where(models.AuditLog.mandant_id == mid)
                .values(mandant_id=None))
     db.execute(delete(models.Mandant).where(models.Mandant.id == mid))
+    try:
+        verschoben = ablage.mandant_ordner_archivieren(ordner_plan)
+    except ablage.AblageFehler as e:
+        db.rollback()
+        raise HTTPException(e.status, e.nachricht) from e
+    if verschoben:
+        name += "; Ablage verschoben nach " + ", ".join(
+            neu.relative_to(ablage.stamm()).as_posix() for _, neu in verschoben)
     audit(db, benutzer, None, "MANDANT_GELOESCHT", name)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        ablage.archivierung_zuruecknehmen(verschoben)
+        raise
     return {"ok": True}
 
 
@@ -901,6 +923,11 @@ def import_saetze(
         .order_by(models.Buchung.datum, models.Buchung.id)
         .limit(limit + 1)
     ))
+    # Zahlungen, die eine Bestellung abgelöst haben: Datum/Konten/Betrag/S/H gesperrt
+    bestellung_je_buchung = dict(db.execute(
+        select(models.BestellAbloesung.buchung_id, models.BestellAbloesung.bestellung_id)
+        .where(models.BestellAbloesung.buchung_id.in_([b.id for b in buchungen[:limit]]))
+    ).all()) if buchungen else {}
     return {
         "format": batch.format,
         "mehr": len(buchungen) > limit,
@@ -916,6 +943,7 @@ def import_saetze(
                 "text": b.text,
                 # Zahlungsbuchung zu einem offenen Posten: Betrag nicht änderbar
                 "posten_id": b.posten_id,
+                "bestellung_id": bestellung_je_buchung.get(b.id),
             }
             for b in buchungen[:limit]
         ],
@@ -1037,15 +1065,31 @@ def buchung_aendern(
 ):
     """Einzelnen importierten Buchungssatz korrigieren (Datum, Konten, Betrag,
     S/H, Belegfeld, Text). Bei Zahlungsbuchungen zu einem offenen Posten ist
-    der Betrag gesperrt – dort Zuordnung aufheben und neu erfassen."""
+    der Betrag gesperrt – dort Zuordnung aufheben und neu erfassen. Hat die
+    Buchung eine Bestellung abgelöst, sind Datum, Konten, Betrag und S/H gesperrt
+    (die Ablösung prüft genau diese Werte)."""
     nur_schreibend(benutzer)
     buchung = db.get(models.Buchung, buchung_id)
     if buchung is None:
         raise HTTPException(404, "Buchung nicht gefunden")
     mandant_oder_403(db, benutzer, buchung.mandant_id)
+    bestellung_id = db.scalar(
+        select(models.BestellAbloesung.bestellung_id)
+        .where(models.BestellAbloesung.buchung_id == buchung.id).limit(1)
+    )
+
+    def zahlung_gesperrt(feld: str, neu) -> None:
+        if bestellung_id is not None and neu != getattr(buchung, feld):
+            raise HTTPException(
+                422, f"Die Buchung ist der Bestellung #{bestellung_id} zugeordnet – Datum, "
+                "Konten, Betrag und S/H sind gesperrt; dort Ablösung aufheben und neu zuordnen",
+            )
+
     for feld, wert in daten.items():
         if feld == "datum":
-            buchung.datum = _datum(wert, feld)
+            datum = _datum(wert, feld)
+            zahlung_gesperrt(feld, datum)
+            buchung.datum = datum
         elif feld == "betrag":
             if buchung.posten_id is not None:
                 raise HTTPException(
@@ -1055,15 +1099,19 @@ def buchung_aendern(
             betrag = _dec(wert)
             if betrag <= 0:
                 raise HTTPException(422, "Betrag muss größer 0 sein")
+            zahlung_gesperrt(feld, betrag)
             buchung.betrag = betrag
         elif feld == "sh":
             if wert not in ("S", "H"):
                 raise HTTPException(422, "S/H muss S oder H sein")
+            zahlung_gesperrt(feld, wert)
             buchung.sh = wert
         elif feld in BUCHUNG_FELDER:
             wert = (str(wert).strip() if wert is not None else "")
             if feld in ("konto_nr", "gegenkonto_nr") and not wert:
                 raise HTTPException(422, "Konto/Gegenkonto darf nicht leer sein")
+            if feld in ("konto_nr", "gegenkonto_nr"):
+                zahlung_gesperrt(feld, wert)
             setattr(buchung, feld, wert or None)
     audit(db, benutzer, buchung.mandant_id, "BUCHUNG_GEAENDERT",
           f"Buchung {buchung.id}: {sorted(daten.keys())}")
@@ -1999,6 +2047,8 @@ def posten_aendern(
             if feld == "forderungsklasse" and wert is not None:
                 _enum_pruefen(wert, models.Forderungsklasse, feld)
             setattr(posten, feld, wert)
+    # storniert, umklassifiziert oder gesperrt: Ablösungen durch die Rechnung lösen
+    bestell_dienst.posten_geaendert(db, posten, benutzer)
     db.commit()
     return {"ok": True}
 

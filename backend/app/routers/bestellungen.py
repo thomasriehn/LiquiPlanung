@@ -146,10 +146,10 @@ def _kw(jahr, kw, standard: date | None = None) -> tuple[int, int]:
 
 def _kennzahlen(db: Session, m: models.Mandant, b: models.Bestellung, jahr: int, kw: int,
                 basis) -> dict:
-    """Freigabe-Kennzahlen der Bestellung – immer serverseitig berechnet."""
-    return bestellungen.freigabe_kennzahlen(
-        db, m, konto_id=b.konto_id, betrag_brutto=bestellungen.brutto(b), jahr=jahr, kw=kw,
-        basis=basis if basis not in ("", None) else None, ohne_bestellung_id=b.id,
+    """Freigabe-Kennzahlen der Bestellung – immer serverseitig berechnet; geprüft wird
+    der offene Rest (Teilzahlungen bis gestern stehen schon im Ist)."""
+    return bestellungen.bestellung_kennzahlen(
+        db, m, b, jahr=jahr, kw=kw, basis=basis if basis not in ("", None) else None,
     )
 
 
@@ -171,9 +171,11 @@ def _originalname(dateiname: str | None) -> str:
 
 def _ablage_name(b: models.Bestellung, originalname: str, mime: str) -> str:
     """Dateiname in der Ablage: „{bestelldatum}_{kreditor}_{originalname}“ –
-    Endung aus dem erkannten Dateityp, nie aus dem Client."""
+    Endung aus dem erkannten Dateityp, nie aus dem Client. Kreditor einzeln
+    bereinigt: „/“ bzw. „\\“ (z. B. „Hansen A/S“) gilt sonst als Pfadtrenner."""
+    kreditor = ablage._sicherer_name(b.kreditor, 60) or "Kreditor"
     return ablage.sicherer_dateiname(
-        f"{b.bestelldatum.isoformat()}_{b.kreditor}_{originalname}",
+        f"{b.bestelldatum.isoformat()}_{kreditor}_{_originalname(originalname)}",
         ablage.ERLAUBTE_ENDUNGEN.get(mime),
     )
 
@@ -317,8 +319,14 @@ def system_ki_test(admin=Depends(nur_admin), db: Session = Depends(get_db)):
     if zugang is None:
         raise HTTPException(
             409, "Der KI-Zugang ist nicht eingerichtet – bitte API-URL und Modell hinterlegen")
+    hinweis = systemeinstellungen.ki_key_hinweis(db)
     with _fehler(db):
-        return ki.verbindung_testen(zugang)
+        try:
+            return ki.verbindung_testen(zugang)
+        except ki.KiFehler as e:
+            if hinweis:  # z. B. Key wegen http:// bzw. geänderter URL nicht gesendet
+                raise ki.KiFehler(f"{e} – {hinweis}", status=e.status) from e
+            raise
 
 
 # ---------------------------------------------------------------- SharePoint-Auswahl (Admin)
@@ -376,18 +384,6 @@ def _ablage_antwort(db: Session, m: models.Mandant) -> dict:
     }
 
 
-def _ueberschneidung(db: Session, m: models.Mandant, rel: str) -> None:
-    """Lokale Ordner zweier Mandanten dürfen weder gleich sein noch ineinander
-    liegen – sonst sähen Benutzer beim Durchsuchen fremde Belege."""
-    for anderer in db.scalars(select(models.Mandant).where(models.Mandant.id != m.id)):
-        ab = ablage.mandant_ablage(anderer)
-        fremd = (ab.get("lokal_pfad") or "").strip("/") if ab["typ"] == AblageTyp.LOKAL.value else ""
-        if fremd and (rel == fremd or rel.startswith(fremd + "/") or fremd.startswith(rel + "/")):
-            raise ablage.AblageFehler(
-                409, f"Der Ordner überschneidet sich mit der Ablage des Mandanten „{anderer.name}“ "
-                     f"({fremd}) – bitte einen eigenen Ordner wählen")
-
-
 def _ablage_lokal_setzen(db: Session, m: models.Mandant, roh) -> None:
     """LOKAL: Pfad relativ zum Ablageverzeichnis prüfen und anlegen (leer = Standard)."""
     text = str(roh or "").strip()
@@ -402,7 +398,8 @@ def _ablage_lokal_setzen(db: Session, m: models.Mandant, roh) -> None:
         rel = ziel.relative_to(basis).as_posix()
         if len(rel) > 512:
             raise ablage.AblageFehler(422, "Der Pfad ist zu lang")
-        _ueberschneidung(db, m, rel)
+        # Ordner anderer Mandanten (auch deren Standardordner) und ihre Belege
+        ablage.lokal_ueberschneidung(db, m, rel, belege=True)
         try:
             ziel.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -411,7 +408,7 @@ def _ablage_lokal_setzen(db: Session, m: models.Mandant, roh) -> None:
         if neu != rel:
             raise ablage.AblageFehler(409, "Der Ordner hat sich beim Anlegen verändert – bitte erneut wählen")
     else:
-        _ueberschneidung(db, m, ablage.standard_lokal_pfad(m))
+        ablage.lokal_ueberschneidung(db, m, ablage.standard_lokal_pfad(m), belege=True)
     m.ablage_typ = AblageTyp.LOKAL.value
     m.ablage_pfad = rel
     m.ablage_site_id = m.ablage_drive_id = m.ablage_ordner_id = m.ablage_web_url = None
@@ -444,6 +441,8 @@ def _ablage_sharepoint_setzen(db: Session, m: models.Mandant, daten: dict) -> No
         e = gc.element(drive, ordner)
         if not e.get("ist_ordner"):
             raise ablage.AblageFehler(422, "Das gewählte Element ist kein Ordner")
+        # Ordner anderer Mandanten derselben Bibliothek: gleich/darüber/darunter → 409
+        ablage.sharepoint_ueberschneidung(db, gc, m, drive, e)
         bib = gc.bibliothek(drive)
         site_name = _website_name(gc, site) if site else None
     pfad = e.get("pfad") or "/"
@@ -673,6 +672,17 @@ def bestellung_loeschen(bestellung_id: int, benutzer=Depends(aktueller_benutzer)
 
 # ---------------------------------------------------------------- Freigabe
 
+def _bestellung_gesperrt(db: Session, benutzer: models.Benutzer,
+                         bestellung_id: int) -> tuple[models.Bestellung, models.Mandant]:
+    """Wie `_bestellung`, aber mit Zeilensperre (SELECT … FOR UPDATE) für Statuswechsel:
+    eine gleichzeitige zweite Anfrage wartet und sieht danach den neuen Status. Unter
+    SQLite wirkungslos – dort schützt der bedingte Statuswechsel im Dienst."""
+    b = db.get(models.Bestellung, bestellung_id, with_for_update=True, populate_existing=True)
+    if b is None:
+        raise HTTPException(404, "Bestellung nicht gefunden")
+    return b, mandant_oder_403(db, benutzer, b.mandant_id)
+
+
 @router.get("/bestellungen/{bestellung_id}/freigabe")
 def bestellung_freigabe(bestellung_id: int, jahr: int | None = None, kw: int | None = None,
                         basis: str | None = None, benutzer=Depends(aktueller_benutzer),
@@ -691,7 +701,7 @@ def bestellung_entscheidung(bestellung_id: int, daten: dict,
     """Freigeben/Ablehnen. Die Kennzahlen werden serverseitig neu berechnet und als
     Momentaufnahme im Journal gespeichert – Werte des Clients zählen nicht."""
     nur_freigabe(benutzer)
-    b, m = _bestellung(db, benutzer, bestellung_id)
+    b, m = _bestellung_gesperrt(db, benutzer, bestellung_id)
     entscheidung = str(daten.get("entscheidung") or "").strip().upper()
     if entscheidung not in ("FREIGEBEN", "ABLEHNEN"):
         raise HTTPException(422, "Unbekannte Entscheidung (FREIGEBEN oder ABLEHNEN)")
@@ -719,7 +729,7 @@ def bestellung_zuruecksetzen(bestellung_id: int, daten: dict,
                              benutzer=Depends(aktueller_benutzer),
                              db: Session = Depends(get_db)):
     nur_freigabe(benutzer)
-    b, m = _bestellung(db, benutzer, bestellung_id)
+    b, m = _bestellung_gesperrt(db, benutzer, bestellung_id)
     with _fehler(db):
         bestellungen.zuruecksetzen(db, b, benutzer, daten.get("begruendung"))
         audit(db, benutzer, m.id, "BESTELLUNG_ZURUECKGESETZT",
@@ -732,7 +742,7 @@ def bestellung_zuruecksetzen(bestellung_id: int, daten: dict,
 def bestellung_stornieren(bestellung_id: int, daten: dict | None = Body(None),
                           benutzer=Depends(aktueller_benutzer), db: Session = Depends(get_db)):
     nur_schreibend(benutzer)
-    b, m = _bestellung(db, benutzer, bestellung_id)
+    b, m = _bestellung_gesperrt(db, benutzer, bestellung_id)
     with _fehler(db):
         bestellungen.stornieren(db, b, benutzer, (daten or {}).get("begruendung"))
         audit(db, benutzer, m.id, "BESTELLUNG_STORNIERT",
@@ -753,28 +763,37 @@ def bestellung_abloese_kandidaten(bestellung_id: int, benutzer=Depends(aktueller
 @router.post("/bestellungen/{bestellung_id}/abloesung")
 def bestellung_abloesen(bestellung_id: int, daten: dict, benutzer=Depends(aktueller_benutzer),
                         db: Session = Depends(get_db)):
+    from sqlalchemy.exc import IntegrityError
+
     nur_schreibend(benutzer)
-    b, m = _bestellung(db, benutzer, bestellung_id)
+    b, m = _bestellung_gesperrt(db, benutzer, bestellung_id)
     betrag = daten.get("betrag")
     if isinstance(betrag, float):
         betrag = Decimal(str(betrag))
-    with _fehler(db):
-        a = bestellungen.abloesen(
-            db, b, benutzer,
-            art=str(daten.get("art") or ""),
-            betrag=betrag,
-            datum=daten.get("datum") or None,
-            abschliessend=_wahr(daten.get("abschliessend"), True),
-            buchung_id=_ganzzahl(daten.get("buchung_id"), "buchung_id"),
-            transaktion_id=_ganzzahl(daten.get("transaktion_id"), "transaktion_id"),
-            posten_id=_ganzzahl(daten.get("posten_id"), "posten_id"),
-            notiz=daten.get("notiz"),
-        )
-        aktion = ("BESTELLUNG_ABGELOEST" if b.status == BestellStatus.ABGELOEST.value
-                  else "BESTELLUNG_TEILZAHLUNG")
-        audit(db, benutzer, m.id, aktion,
-              f"#{b.id} {bestellungen.bestellung_text(b)}: {a.art} {_eur(a.betrag)} € am {a.datum}")
-        db.commit()
+    try:
+        with _fehler(db):
+            a = bestellungen.abloesen(
+                db, b, benutzer,
+                art=str(daten.get("art") or ""),
+                betrag=betrag,
+                datum=daten.get("datum") or None,
+                abschliessend=_wahr(daten.get("abschliessend"), True),
+                buchung_id=_ganzzahl(daten.get("buchung_id"), "buchung_id"),
+                transaktion_id=_ganzzahl(daten.get("transaktion_id"), "transaktion_id"),
+                posten_id=_ganzzahl(daten.get("posten_id"), "posten_id"),
+                notiz=daten.get("notiz"),
+            )
+            aktion = ("BESTELLUNG_ABGELOEST" if b.status == BestellStatus.ABGELOEST.value
+                      else "BESTELLUNG_TEILZAHLUNG")
+            audit(db, benutzer, m.id, aktion,
+                  f"#{b.id} {bestellungen.bestellung_text(b)}: {a.art} {_eur(a.betrag)} € am {a.datum}")
+            db.commit()
+    except IntegrityError:
+        # eindeutiger Index: dieselbe Zahlung wurde gleichzeitig einer anderen
+        # Bestellung zugeordnet
+        db.rollback()
+        raise HTTPException(
+            409, "Die Zahlung ist bereits einer Bestellung zugeordnet – bitte neu laden") from None
     return bestellungen.als_dict(db, b)
 
 

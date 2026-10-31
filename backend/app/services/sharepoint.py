@@ -27,6 +27,7 @@ LOGIN_BASIS = "https://login.microsoftonline.com"
 SCOPE = "https://graph.microsoft.com/.default"
 
 TOKEN_VORLAUF_SEKUNDEN = 300          # Token 5 Minuten vor Ablauf erneuern
+TOKEN_403_ALTER_SEKUNDEN = 300        # 403 mit älterem Token: einmal neu anmelden (Rollen geändert?)
 EINFACHER_UPLOAD_MAX = 4 * 1024 * 1024  # darüber Upload-Session
 UPLOAD_STUECK = 16 * 320 * 1024       # 5 MiB; Vielfaches von 320 KiB (Graph-Vorgabe)
 MAX_ELEMENTE = 2000                   # Paging-Grenze je Ordner
@@ -72,8 +73,9 @@ def _standard_client() -> httpx.Client:
 # Tests ersetzen die Fabrik (z. B. lambda: httpx.Client(transport=httpx.MockTransport(h)))
 http_client_fabrik: Callable[[], httpx.Client] = _standard_client
 
-# (tenant, client_id, sha256(secret)) → (access_token, gültig_bis)
-_token_cache: dict[tuple[str, str, str], tuple[str, float]] = {}
+# (tenant, client_id, sha256(secret)) → (access_token, gültig_bis, ausgestellt)
+# App-only-Tokens enthalten die Rollen zum Ausstellungszeitpunkt.
+_token_cache: dict[tuple[str, str, str], tuple[str, float, float]] = {}
 _uhr: Callable[[], float] = time.monotonic
 
 
@@ -116,6 +118,30 @@ def pfad_unter(pfad: str | None, wurzel: str | None) -> bool:
     if not w:  # Bibliothekswurzel
         return p.startswith("/")
     return p == w or p.startswith(w + "/")
+
+
+# Freigabelinks: /:f:/s/NAME = /sites/NAME, /:f:/t/NAME = /teams/NAME,
+# /:f:/p/NAME = /personal/NAME; bei /:f:/r/… und /:f:/g/… folgt der volle Pfad
+_LINK_KURZ = {"s": "sites", "t": "teams", "p": "personal"}
+_LINK_PRAEFIX = re.compile(r"^/:[a-z]:/([a-z])(?=/|$)", re.IGNORECASE)
+_SITE_PFAD = re.compile(r"^/(?:sites|teams|personal)/[^/]+", re.IGNORECASE)
+
+
+def website_pfad(pfad: str | None) -> str | None:
+    """Server-relativer Pfad der Website aus dem Pfad einer SharePoint-Adresse
+    („/sites/X“, auch aus Freigabelinks); "" = Stammwebsite (reine Host-Adresse),
+    None = keine Website erkennbar."""
+    p = unquote(pfad or "").rstrip("/")
+    if not p:
+        return ""
+    link = _LINK_PRAEFIX.match(p)
+    if link:
+        art, p = link.group(1).lower(), p[link.end():]
+        if art in _LINK_KURZ:
+            name = p.strip("/").split("/", 1)[0]
+            return f"/{_LINK_KURZ[art]}/{name}" if name else None
+    treffer = _SITE_PFAD.match(p)
+    return treffer.group(0) if treffer else None
 
 
 def _site(d: dict) -> dict:
@@ -222,11 +248,16 @@ class GraphClient:
             dauer = float(daten.get("expires_in") or 3600)
         except (TypeError, ValueError):
             dauer = 3600.0
-        _token_cache[schluessel] = (daten["access_token"], jetzt + dauer)
+        _token_cache[schluessel] = (daten["access_token"], jetzt + dauer, jetzt)
         return daten["access_token"]
 
     def _token_verwerfen(self) -> None:
         _token_cache.pop(self._cache_schluessel(), None)
+
+    def _token_alt(self) -> bool:
+        """Zwischengespeichertes Token älter als TOKEN_403_ALTER_SEKUNDEN?"""
+        eintrag = _token_cache.get(self._cache_schluessel())
+        return bool(eintrag) and _uhr() - eintrag[2] > TOKEN_403_ALTER_SEKUNDEN
 
     def _fehler(self, r: httpx.Response, was: str = "Element") -> GraphFehler:
         meldung = ""
@@ -250,7 +281,8 @@ class GraphClient:
         return GraphFehler(text, status=s)
 
     def _anfrage(self, methode: str, pfad: str, *, was: str = "Element", erwartet=(200,), **kw) -> httpx.Response:
-        """Anfrage an Graph mit Bearer-Token; einmal neu anmelden bei 401."""
+        """Anfrage an Graph mit Bearer-Token; einmal neu anmelden bei 401 – und bei
+        403 mit einem älteren Token (Berechtigungen seit der Ausstellung geändert)."""
         url = pfad if pfad.startswith("https://") else GRAPH_BASIS + pfad
         if not url.startswith(GRAPH_BASIS + "/"):
             raise GraphFehler("Unerwartete Adresse von Microsoft Graph – Anfrage abgebrochen")
@@ -261,7 +293,7 @@ class GraphClient:
                 r = self._http.request(methode, url, headers=kopf, follow_redirects=False, **kw)
             except httpx.HTTPError as e:
                 raise GraphFehler(f"Microsoft Graph nicht erreichbar: {e}") from e
-            if r.status_code == 401 and versuch == 1:
+            if versuch == 1 and (r.status_code == 401 or (r.status_code == 403 and self._token_alt())):
                 self._token_verwerfen()
                 continue
             break
@@ -295,7 +327,10 @@ class GraphClient:
     # --- Abfragen -----------------------------------------------------------
 
     def verbindung_testen(self) -> dict:
-        """Anmeldung + Lesetest auf Websites; Anmeldefehler werfen GraphFehler."""
+        """Anmeldung + Lesetest auf Websites; Anmeldefehler werfen GraphFehler.
+        Immer mit frischem Token – sonst zeigte der Test nach einer Änderung der
+        Berechtigungen bis zum Ablauf (~1 h) noch die alten Rollen."""
+        self._token_verwerfen()
         self.token()
         try:
             daten = self._json("GET", "/sites", params={"search": "*", "$select": "id,displayName"}, was="Website")
@@ -304,9 +339,10 @@ class GraphClient:
                 return {
                     "ok": True,
                     "sites_lesbar": False,
-                    "hinweis": "Anmeldung erfolgreich. Websites können nicht durchsucht werden "
-                               "(z. B. bei Sites.Selected) – im Auswahldialog die Adresse der "
-                               "Website eingeben (https://…/sites/…).",
+                    "hinweis": "Anmeldung erfolgreich. Websites können nicht durchsucht werden – "
+                               "entweder fehlt Sites.Read.All bzw. Sites.ReadWrite.All (samt "
+                               "Administratorzustimmung) oder es ist nur Sites.Selected erteilt; dann "
+                               "im Auswahldialog die Adresse der Website eingeben (https://…/sites/…).",
                 }
             raise
         if not daten.get("value"):
@@ -320,16 +356,21 @@ class GraphClient:
 
     def websites(self, suche: str = "") -> list[dict]:
         """Websites suchen (leer = alle sichtbaren); eine SharePoint-URL wird direkt
-        aufgelöst (funktioniert auch mit Sites.Selected)."""
+        aufgelöst (funktioniert auch mit Sites.Selected) – auch Freigabelinks aus
+        „Link kopieren“ (/:f:/r/sites/X/…, /:f:/s/X/…)."""
         s = (suche or "").strip()
         if re.match(r"^https?://", s, re.IGNORECASE):
             teile = urlsplit(s)
             host = (teile.hostname or "").lower()
             if not re.match(r"^[a-z0-9.-]+$", host):
                 raise GraphFehler("Ungültige SharePoint-Adresse", status=404)
-            pfad = unquote(teile.path or "").rstrip("/")
-            treffer = re.match(r"^(/(?:sites|teams|personal)/[^/]+)", pfad, re.IGNORECASE)
-            site_pfad = treffer.group(1) if treffer else ""
+            site_pfad = website_pfad(teile.path)
+            if site_pfad is None:
+                raise GraphFehler(
+                    "Aus der Adresse geht keine Website hervor – bitte die Adresse der Website "
+                    "angeben (https://…/sites/…; Stammwebsite: nur https://….sharepoint.com)",
+                    status=422,
+                )
             ziel = f"/sites/{host}:{quote(site_pfad)}" if site_pfad else f"/sites/{host}"
             return [_site(self._json("GET", ziel, was="Website"))]
         params = {"search": s or "*", "$select": "id,displayName,name,webUrl,description"}

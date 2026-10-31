@@ -111,7 +111,8 @@ def test_netzwerkfehler(monkeypatch):
     monkeypatch.setattr(sharepoint, "http_client_fabrik", lambda: httpx.Client(transport=httpx.MockTransport(kaputt)))
     with pytest.raises(GraphFehler, match="nicht erreichbar"):
         GraphClient(ZUGANG).token()
-    sharepoint._token_cache[GraphClient(ZUGANG)._cache_schluessel()] = ("t", sharepoint._uhr() + 3600)
+    sharepoint._token_cache[GraphClient(ZUGANG)._cache_schluessel()] = (
+        "t", sharepoint._uhr() + 3600, sharepoint._uhr())
     with pytest.raises(GraphFehler, match="Microsoft Graph nicht erreichbar"):
         GraphClient(ZUGANG).bibliothek("b!x")
 
@@ -128,6 +129,29 @@ def test_401_meldet_neu_an(fake):
     fake.route("GET", "/v1.0/drives/b!x", drive)
     assert GraphClient(ZUGANG).bibliothek("b!x") == {"id": "b!x", "name": "Dokumente", "web_url": "https://w"}
     assert aufrufe == ["Bearer tok1", "Bearer tok2"]
+
+
+def test_403_mit_altem_token_meldet_einmal_neu_an(fake, monkeypatch):
+    """Berechtigung nachträglich erteilt: ein älteres Token trägt noch die alten Rollen."""
+    jetzt = [1000.0]
+    monkeypatch.setattr(sharepoint, "_uhr", lambda: jetzt[0])
+    aufrufe = []
+
+    def drive(req):
+        aufrufe.append(req.headers["authorization"])
+        if req.headers["authorization"] == "Bearer tok1":
+            return httpx.Response(403, json={"error": {"code": "accessDenied"}})
+        return httpx.Response(200, json={"id": "b!x", "name": "Dokumente"})
+
+    fake.route("GET", "/v1.0/drives/b!x", drive)
+    # junges Token: das 403 ist echt – keine neue Anmeldung
+    with pytest.raises(GraphFehler) as e:
+        GraphClient(ZUGANG).bibliothek("b!x")
+    assert e.value.status == 403 and fake.token_nr == 1
+    # älteres Token: einmal neu anmelden
+    jetzt[0] += sharepoint.TOKEN_403_ALTER_SEKUNDEN + 1
+    assert GraphClient(ZUGANG).bibliothek("b!x")["name"] == "Dokumente"
+    assert aufrufe == ["Bearer tok1", "Bearer tok1", "Bearer tok2"]
 
 
 # --- Fehlertexte ------------------------------------------------------------------
@@ -190,6 +214,43 @@ def test_websites_per_url(fake):
     assert GraphClient(ZUGANG).websites("https://contoso.sharepoint.com/")[0]["name"] == "Start"
 
 
+@pytest.mark.parametrize("pfad, erwartet", [
+    ("", ""),
+    ("/", ""),
+    ("/sites/Insolvenz", "/sites/Insolvenz"),
+    ("/sites/Akte%20X/Freigegebene%20Dokumente/Forms/AllItems.aspx", "/sites/Akte X"),
+    ("/teams/Projekt/Shared%20Documents", "/teams/Projekt"),
+    ("/:f:/r/sites/Insolvenz/Freigegebene%20Dokumente/Bestellungen", "/sites/Insolvenz"),
+    ("/:f:/s/Insolvenz/EhXyZ", "/sites/Insolvenz"),
+    ("/:x:/t/Projekt/EabC", "/teams/Projekt"),
+    ("/:f:/g/personal/max_contoso_com/EhXy", "/personal/max_contoso_com"),
+    ("/Freigegebene%20Dokumente/Forms/AllItems.aspx", None),
+    ("/:f:/r/Freigegebene%20Dokumente/x", None),
+    ("/:f:/s/", None),
+])
+def test_website_pfad(pfad, erwartet):
+    assert sharepoint.website_pfad(pfad) == erwartet
+
+
+def test_websites_per_freigabelink(fake):
+    """Links aus „Link kopieren“ lösen die genannte Website auf – nie still die Stammwebsite."""
+    fake.route("GET", "/v1.0/sites/contoso.sharepoint.com:/sites/Insolvenz",
+               httpx.Response(200, json={"id": "contoso.sharepoint.com,1,2", "displayName": "Insolvenz"}))
+    for link in (
+        "https://contoso.sharepoint.com/:f:/r/sites/Insolvenz/Freigegebene%20Dokumente/Bestellungen"
+        "?csf=1&web=1&e=Ab12Cd",
+        "https://contoso.sharepoint.com/:f:/s/Insolvenz/EhXyZ",
+    ):
+        assert GraphClient(ZUGANG).websites(link)[0]["name"] == "Insolvenz"
+    assert [r.url.path for r in fake.graph_anfragen()] == [
+        "/v1.0/sites/contoso.sharepoint.com:/sites/Insolvenz"] * 2
+    # keine Website erkennbar → verständliche Meldung statt Stammwebsite
+    with pytest.raises(GraphFehler, match="keine Website") as e:
+        GraphClient(ZUGANG).websites("https://contoso.sharepoint.com/Freigegebene%20Dokumente/x.pdf")
+    assert e.value.status == 422
+    assert len(fake.graph_anfragen()) == 2
+
+
 def test_bibliotheken(fake):
     fake.route("GET", "/v1.0/sites/h,2,3/drives", httpx.Response(200, json={"value": [
         {"id": "b!2", "name": "Rechnungen", "webUrl": "https://h/r"},
@@ -211,6 +272,25 @@ def test_verbindung_testen(fake):
     sharepoint.token_cache_leeren()
     with pytest.raises(GraphFehler, match="Tenant nicht gefunden"):
         GraphClient(ZUGANG).verbindung_testen()
+
+
+def test_verbindung_testen_holt_frisches_token(fake):
+    """Nach Erteilen der Berechtigung zeigt der Test sofort das neue Ergebnis –
+    App-only-Tokens tragen die Rollen zum Ausstellungszeitpunkt."""
+
+    def sites(req):
+        if req.headers["authorization"] == "Bearer tok1":   # vor der Zustimmung ausgestellt
+            return httpx.Response(403, json={"error": {"code": "accessDenied"}})
+        return httpx.Response(200, json={"value": [{"id": "s", "displayName": "Akte"}]})
+
+    fake.route("GET", "/v1.0/sites", sites)
+    assert GraphClient(ZUGANG).verbindung_testen()["sites_lesbar"] is False
+    # Administrator erteilt Sites.Read.All → der nächste Test meldet sich neu an
+    assert GraphClient(ZUGANG).verbindung_testen() == {"ok": True, "sites_lesbar": True, "hinweis": None}
+    assert fake.token_nr == 2
+    # die Websitesuche nutzt danach das neue Token aus dem Cache
+    assert GraphClient(ZUGANG).websites("")[0]["name"] == "Akte"
+    assert fake.token_nr == 2
 
 
 # --- Ordner / Elemente -----------------------------------------------------------------

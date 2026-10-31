@@ -354,7 +354,7 @@ def test_ablage_lokal_und_pfadausbruch(client, tmp_path):
     r = client.get(f"/api/mandanten/{mid}/ablage")
     assert r.status_code == 200, r.text
     d = r.json()
-    assert d["typ"] == "LOKAL" and d["lokal_pfad"] == "nordlicht" and d["konfiguriert"] is False
+    assert d["typ"] == "LOKAL" and d["lokal_pfad"] == f"nordlicht-{mid}" and d["konfiguriert"] is False
     assert d["bestellungen_offen_einplanen"] is True and d["graph_konfiguriert"] is False
 
     # lokaler Ordnerdialog
@@ -389,7 +389,8 @@ def test_ablage_lokal_und_pfadausbruch(client, tmp_path):
         r = client.put(f"/api/mandanten/{mid_b}/ablage", json={"typ": "LOKAL", "lokal_pfad": konflikt})
         assert r.status_code == 409, (konflikt, r.text)
     assert not (_ablage_stamm() / "Akten" / "Nordlicht" / "unter").exists()
-    r = client.put(f"/api/mandanten/{mid}/ablage", json={"typ": "LOKAL", "lokal_pfad": "suedwind"})
+    # auch der Standardordner eines anderen Mandanten ist reserviert
+    r = client.put(f"/api/mandanten/{mid}/ablage", json={"typ": "LOKAL", "lokal_pfad": f"suedwind-{mid_b}"})
     assert r.status_code == 409 and "Südwind AG" in r.json()["detail"]
     assert client.put(f"/api/mandanten/{mid_b}/ablage",
                       json={"typ": "LOKAL", "lokal_pfad": "Akten/Suedwind"}).status_code == 200
@@ -402,9 +403,9 @@ def test_ablage_lokal_und_pfadausbruch(client, tmp_path):
     assert [x["name"] for x in r.json()["dateien"]] == ["angebot.pdf"]
     assert client.get(f"/api/mandanten/{mid}/ablage/durchsuchen?element=..").status_code == 422
 
-    # leerer Pfad = Standardordner (Kurzname)
+    # leerer Pfad = Standardordner (Kurzname-ID)
     r = client.put(f"/api/mandanten/{mid}/ablage", json={"typ": "LOKAL", "lokal_pfad": ""})
-    assert r.json()["lokal_pfad"] == "nordlicht"
+    assert r.json()["lokal_pfad"] == f"nordlicht-{mid}"
 
     # Bearbeiter: lesen ja, ändern nein
     _benutzer(client, "bea@example.com", "BEARBEITER", [mid])
@@ -489,9 +490,9 @@ def test_upload_auslesen_anlegen_und_proxy(client, monkeypatch):
     assert b["ki"] is True
     datei = b["datei"]
     assert datei["name"] == f"{HEUTE.isoformat()}_Müller Bürobedarf GmbH_Bestellung Müller.pdf"
-    assert datei["ablage"] == "LOKAL" and datei["pfad"] == f"nordlicht/{datei['name']}"
+    assert datei["ablage"] == "LOKAL" and datei["pfad"] == f"nordlicht-{mid}/{datei['name']}"
     assert datei["url"] == f"/mandanten/{mid}/bestellungen/{b['id']}/datei"
-    assert (_ablage_stamm() / "nordlicht" / datei["name"]).read_bytes() == PDF
+    assert (_ablage_stamm() / f"nordlicht-{mid}" / datei["name"]).read_bytes() == PDF
     assert client.get(f"/api/mandanten/{mid}/bestellungen/zwischenablage/{erg['token']}").status_code == 404
     assert any(f"#{b['id']}" in x for x in _audit("BESTELLUNG_ERFASST"))
 
@@ -529,7 +530,7 @@ def test_upload_auslesen_anlegen_und_proxy(client, monkeypatch):
     assert r.status_code == 200, r.text
     neu = r.json()["datei"]
     assert neu["name"].endswith("_korrigiert.pdf") and neu["groesse"] == len(PDF) + 4
-    assert (_ablage_stamm() / "nordlicht" / datei["name"]).exists()
+    assert (_ablage_stamm() / f"nordlicht-{mid}" / datei["name"]).exists()
     assert client.get(neu["url"]).content == PDF + b"%neu"
     j = client.get(f"/api/mandanten/{mid}/bestellungen/journal?bestellung_id={b['id']}").json()
     assert j[0]["aktion"] == "DATEI"
@@ -577,10 +578,10 @@ def test_upload_pruefungen(client, monkeypatch):
     assert client.post(pfad, json={**basis, "token": "0" * 32}).status_code == 404
 
     # Validierungsfehler vor dem Speichern: keine verwaiste Datei in der Ablage
-    vorher = sorted(p.name for p in (_ablage_stamm() / "nordlicht").iterdir())
+    vorher = sorted(p.name for p in (_ablage_stamm() / f"nordlicht-{mid}").iterdir())
     r2 = client.post(pfad, json={**basis, "token": r.json()["token"], "betrag_netto": -5})
     assert r2.status_code == 422
-    assert sorted(p.name for p in (_ablage_stamm() / "nordlicht").iterdir()) == vorher
+    assert sorted(p.name for p in (_ablage_stamm() / f"nordlicht-{mid}").iterdir()) == vorher
 
     # Leser dürfen nicht hochladen oder anlegen
     _benutzer(client, "lea@example.com", "LESER", [mid])
@@ -630,7 +631,7 @@ def test_auslesen_und_anlegen_aus_ablage(client, monkeypatch):
     _ki_fake(monkeypatch)
     _login(client)
     mid, konten = _mandant(client)
-    ordner = _ablage_stamm() / "nordlicht" / "Eingang"
+    ordner = _ablage_stamm() / f"nordlicht-{mid}" / "Eingang"
     ordner.mkdir(parents=True)
     (ordner / "angebot.pdf").write_bytes(PDF)
     (_ablage_stamm() / "fremd.pdf").write_bytes(PDF)
@@ -648,7 +649,7 @@ def test_auslesen_und_anlegen_aus_ablage(client, monkeypatch):
 
     # Verknüpfen ohne Kopie
     b = _neu(client, mid, konten["3400"], ablage_element="Eingang/angebot.pdf")
-    assert b["datei"]["pfad"] == "nordlicht/Eingang/angebot.pdf"
+    assert b["datei"]["pfad"] == f"nordlicht-{mid}/Eingang/angebot.pdf"
     assert sorted(p.name for p in ordner.iterdir()) == ["angebot.pdf"]
     assert client.get(b["datei"]["url"]).content == PDF
     assert client.post(url, json={"element": "Eingang/angebot.pdf"}).json()["duplikat"]["id"] == b["id"]
@@ -705,7 +706,7 @@ def test_sharepoint_ablage_speichern_und_proxy(client, monkeypatch):
     assert datei["pfad"] == f"/Akten/Nordlicht/{datei['name']}"
     hochgeladen = next(x for x in protokoll if x.method == "PUT")
     assert hochgeladen.content == PDF and hochgeladen.headers["content-type"] == "application/pdf"
-    assert not any((_ablage_stamm() / "nordlicht").glob("*.pdf"))    # nichts lokal abgelegt
+    assert not any((_ablage_stamm() / f"nordlicht-{mid}").glob("*.pdf"))    # nichts lokal abgelegt
 
     protokoll.clear()
     r = client.get(datei["url"], follow_redirects=False)
@@ -1095,3 +1096,229 @@ def test_wertfehler_zustand_oder_eingabe(text, code):
     with pytest.raises(HTTPException) as info, _fehler(s):
         raise ValueError(text)
     assert info.value.status_code == code and info.value.detail == text and s.zurueck
+
+
+# ---------------------------------------------------------------- Mandantentrennung der Ablage
+
+def _mit_datei(client, mid: int, konto_id: int, name: str = "geheim.pdf", inhalt: bytes | None = None,
+               kreditor: str = "Lieferant A") -> dict:
+    r = client.post(f"/api/mandanten/{mid}/bestellungen/auslesen",
+                    files={"datei": (name, inhalt or PDF, "application/pdf")})
+    assert r.status_code == 200, r.text
+    return _neu(client, mid, konto_id, kreditor=kreditor, token=r.json()["token"])
+
+
+def test_standardordner_enthaelt_keinen_fremden_ordner(client, monkeypatch):
+    """Konzern: Tochter liegt unter „holding/tochter“, später wird die Mutter
+    „holding“ angelegt – ihr Standardordner ist „holding-<id>“, nicht „holding“."""
+    _ki_fake(monkeypatch)
+    _login(client)
+    mid_a, kn_a = _mandant(client, "tochter", "Tochter GmbH")
+    assert client.put(f"/api/mandanten/{mid_a}/ablage",
+                      json={"typ": "LOKAL", "lokal_pfad": "holding/tochter"}).status_code == 200
+    _mit_datei(client, mid_a, kn_a["3400"], inhalt=PDF + b"% Mandant A vertraulich\n")
+    mid_b, _ = _mandant(client, "holding", "Holding AG")
+    assert client.get(f"/api/mandanten/{mid_b}/ablage").json()["lokal_pfad"] == f"holding-{mid_b}"
+    _benutzer(client, "bob@example.com", "BEARBEITER", [mid_b])
+    _anmelden(client, "bob@example.com")
+    r = client.get(f"/api/mandanten/{mid_b}/ablage/durchsuchen")
+    assert r.status_code == 200 and r.json()["unterordner"] == [] and r.json()["dateien"] == []
+    assert client.get(f"/api/mandanten/{mid_b}/ablage/durchsuchen?element=tochter").status_code == 404
+
+
+def test_aehnliche_kurznamen_getrennte_ordner(client, monkeypatch):
+    _ki_fake(monkeypatch)
+    _login(client)
+    mid_a, kn_a = _mandant(client, "nord", "Nord GmbH")
+    _mit_datei(client, mid_a, kn_a["3400"])
+    mid_b, _ = _mandant(client, "nord.", "Nord Punkt GmbH")
+    assert client.get(f"/api/mandanten/{mid_b}/ablage").json()["lokal_pfad"] == f"nord-{mid_b}"
+    _benutzer(client, "lea@example.com", "LESER", [mid_b])
+    _anmelden(client, "lea@example.com")
+    r = client.get(f"/api/mandanten/{mid_b}/ablage/durchsuchen")
+    assert r.status_code == 200 and r.json()["dateien"] == []
+
+
+def test_ueberschneidung_vor_jedem_zugriff(client, monkeypatch):
+    """Ältere bzw. von außen gesetzte Überschneidung: Durchsuchen, Auslesen,
+    Verknüpfen und Speichern werden mit 409 abgelehnt – ohne fremde Namen."""
+    _ki_fake(monkeypatch)
+    _login(client)
+    mid_a, kn_a = _mandant(client, "tochter", "Tochter GmbH")
+    assert client.put(f"/api/mandanten/{mid_a}/ablage",
+                      json={"typ": "LOKAL", "lokal_pfad": "holding/tochter"}).status_code == 200
+    a = _mit_datei(client, mid_a, kn_a["3400"])
+    mid_b, kn_b = _mandant(client, "holding", "Holding AG")
+    with _sitzung() as s:
+        m = s.get(models.Mandant, mid_b)
+        m.ablage_typ, m.ablage_pfad = "LOKAL", "holding"   # Elternordner von A
+        s.commit()
+    element = "tochter/" + a["datei"]["name"]
+    r = client.get(f"/api/mandanten/{mid_b}/ablage/durchsuchen?element=tochter")
+    assert r.status_code == 409 and "Tochter GmbH" not in r.json()["detail"]
+    assert client.post(f"/api/mandanten/{mid_b}/bestellungen/auslesen-ablage",
+                       json={"element": element}).status_code == 409
+    r = client.post(f"/api/mandanten/{mid_b}/bestellungen", json={
+        "kreditor": "X", "bestelldatum": HEUTE.isoformat(), "zahldatum": ZAHLTAG.isoformat(),
+        "betrag_netto": 1, "konto_id": kn_b["3400"], "ablage_element": element})
+    assert r.status_code == 409
+    token = client.post(f"/api/mandanten/{mid_b}/bestellungen/auslesen",
+                        files={"datei": ("b.pdf", PDF, "application/pdf")}).json()["token"]
+    r = client.post(f"/api/mandanten/{mid_b}/bestellungen", json={
+        "kreditor": "X", "bestelldatum": HEUTE.isoformat(), "zahldatum": ZAHLTAG.isoformat(),
+        "betrag_netto": 1, "konto_id": kn_b["3400"], "token": token})
+    assert r.status_code == 409
+    assert client.get(f"/api/mandanten/{mid_b}/bestellungen").json()["bestellungen"] == []
+    assert not (_ablage_stamm() / "holding" / "b.pdf").exists()
+    # auch der andere Mandant kommt nicht mehr an seine Ablage, bis der Admin es löst
+    assert client.get(f"/api/mandanten/{mid_a}/ablage/durchsuchen").status_code == 409
+    assert client.put(f"/api/mandanten/{mid_b}/ablage",
+                      json={"typ": "LOKAL", "lokal_pfad": ""}).status_code == 200
+    assert client.get(f"/api/mandanten/{mid_a}/ablage/durchsuchen?element=").status_code == 200
+
+
+def test_ordner_mit_fremden_belegen_nicht_waehlbar(client, monkeypatch):
+    _ki_fake(monkeypatch)
+    _login(client)
+    mid_a, kn_a = _mandant(client, "alpha", "Alpha GmbH")
+    assert client.put(f"/api/mandanten/{mid_a}/ablage",
+                      json={"typ": "LOKAL", "lokal_pfad": "Akten/A"}).status_code == 200
+    _mit_datei(client, mid_a, kn_a["3400"])
+    assert client.put(f"/api/mandanten/{mid_a}/ablage",
+                      json={"typ": "LOKAL", "lokal_pfad": "Akten/A2"}).status_code == 200
+    mid_b, _ = _mandant(client, "beta", "Beta GmbH")
+    r = client.put(f"/api/mandanten/{mid_b}/ablage", json={"typ": "LOKAL", "lokal_pfad": "akten/a"})
+    assert r.status_code == 409 and "Belege" in r.json()["detail"] and "Alpha GmbH" in r.json()["detail"]
+    assert client.put(f"/api/mandanten/{mid_a}/ablage",
+                      json={"typ": "LOKAL", "lokal_pfad": "Akten/A"}).status_code == 200
+
+
+def test_mandant_loeschen_verschiebt_ablage(client, monkeypatch):
+    """Ein neuer Mandant mit gleichem Kurznamen (SQLite: auch gleiche ID) erbt
+    keine Belege; der Ordner des gelöschten Mandanten wird verschoben, nie gelöscht."""
+    _ki_fake(monkeypatch)
+    _login(client)
+    mid_a, kn_a = _mandant(client, "alt", "Alt GmbH")
+    a = _mit_datei(client, mid_a, kn_a["3400"], inhalt=PDF + b"% alt\n")
+    r = client.delete(f"/api/mandanten/{mid_a}", params={"bestaetigung": "alt"})
+    assert r.status_code == 200, r.text
+    archiv = list((_ablage_stamm() / ".geloescht").iterdir())
+    assert len(archiv) == 1 and re.fullmatch(rf"alt-{mid_a}-\d{{8}}T\d{{6}}Z", archiv[0].name)
+    assert (archiv[0] / a["datei"]["name"]).read_bytes() == PDF + b"% alt\n"
+    assert not (_ablage_stamm() / f"alt-{mid_a}").exists()
+    assert any(".geloescht/alt-" in x for x in _audit("MANDANT_GELOESCHT"))
+
+    mid_b, _ = _mandant(client, "alt", "Ganz andere GmbH")
+    _benutzer(client, "lea@example.com", "LESER", [mid_b])
+    _anmelden(client, "lea@example.com")
+    r = client.get(f"/api/mandanten/{mid_b}/ablage/durchsuchen")
+    assert r.status_code == 200 and r.json()["dateien"] == []
+    # versteckter Archivordner ist nirgends erreichbar
+    _anmelden(client)
+    assert client.get("/api/ablage/lokal?pfad=.geloescht").status_code == 422
+    assert ".geloescht" not in [o["name"] for o in client.get("/api/ablage/lokal").json()["unterordner"]]
+
+
+def test_mandant_loeschen_ohne_ablageordner(client):
+    _login(client)
+    mid, _ = _mandant(client, "leer", "Leer GmbH")
+    assert client.delete(f"/api/mandanten/{mid}", params={"bestaetigung": "leer"}).status_code == 200
+    assert not (_ablage_stamm() / ".geloescht").exists()
+
+
+def test_mandant_anlegen_standardordner_belegt(client):
+    _login(client)
+    mid, _ = _mandant(client, "erster", "Erster GmbH")
+    belegt = _ablage_stamm() / f"neu-{mid + 1}"
+    belegt.mkdir(parents=True)
+    (belegt / "alt.pdf").write_bytes(PDF)
+    r = client.post("/api/mandanten", json={"name": "Neu GmbH", "kurzname": "neu"})
+    assert r.status_code == 409 and f"neu-{mid + 1}" in r.json()["detail"]
+    assert [m["kurzname"] for m in client.get("/api/mandanten").json()] == ["erster"]
+    (belegt / "alt.pdf").unlink()
+    assert client.post("/api/mandanten", json={"name": "Neu GmbH", "kurzname": "neu"}).status_code == 201
+
+
+SP_ORDNER = {
+    "fA": {"id": "fA", "name": "Akten", "folder": {"childCount": 1},
+           "parentReference": {"driveId": "b!d1", "id": "wurzel1", "path": "/drives/b!d1/root:"}},
+    "fB": {"id": "fB", "name": "Beta", "folder": {"childCount": 1},
+           "parentReference": {"driveId": "b!d1", "id": "fA", "path": "/drives/b!d1/root:/Akten"}},
+    "fC": {"id": "fC", "name": "Akten-Gamma", "folder": {"childCount": 0},
+           "parentReference": {"driveId": "b!d1", "id": "wurzel1", "path": "/drives/b!d1/root:"}},
+}
+
+
+def test_sharepoint_ordner_ueberschneidung(client, monkeypatch):
+    _login(client)
+    mid_a, _ = _mandant(client, "alpha", "Alpha GmbH")
+    mid_b, _ = _mandant(client, "beta", "Beta GmbH")
+    _graph_einrichten(client)
+    routen = {("GET", f"/v1.0/drives/b!d1/items/{k}"): v for k, v in SP_ORDNER.items()}
+    routen.update({
+        ("GET", "/v1.0/drives/b!d1/root"): {"id": "wurzel1", "name": "root", "root": {}, "folder": {}},
+        ("GET", "/v1.0/drives/b!d1"): {"id": "b!d1", "name": "Dokumente"},
+        ("GET", "/v1.0/drives/b!d2/root"): {"id": "wurzel2", "name": "root", "root": {}, "folder": {}},
+        ("GET", "/v1.0/drives/b!d2"): {"id": "b!d2", "name": "Rechnungen"},
+    })
+    _graph_mock(monkeypatch, routen)
+
+    def setzen(mid, drive, ordner=None):
+        return client.put(f"/api/mandanten/{mid}/ablage",
+                          json={"typ": "SHAREPOINT", "drive_id": drive, "ordner_id": ordner or ""})
+
+    assert setzen(mid_a, "b!d1", "fA").status_code == 200
+    # darunter, gleich, Bibliothekswurzel derselben Bibliothek → 409
+    for ordner in ("fB", "fA", None):
+        r = setzen(mid_b, "b!d1", ordner)
+        assert r.status_code == 409 and "Alpha GmbH" in r.json()["detail"], (ordner, r.text)
+    assert client.get(f"/api/mandanten/{mid_b}/ablage").json()["typ"] == "LOKAL"
+    # Nachbarordner mit gleichem Namensanfang und andere Bibliothek sind frei
+    assert setzen(mid_b, "b!d1", "fC").status_code == 200
+    # Alpha darf nun weder die Wurzel noch darüber wählen
+    assert setzen(mid_a, "b!d1", None).status_code == 409
+    assert setzen(mid_a, "b!d2", None).status_code == 200
+    assert setzen(mid_b, "b!d1", None).status_code == 200
+
+
+def test_ablage_name_kreditor_mit_schraegstrich():
+    from app.routers.bestellungen import _ablage_name
+
+    def name(kreditor, original, mime="application/pdf"):
+        return _ablage_name(models.Bestellung(bestelldatum=date(2026, 10, 1), kreditor=kreditor),
+                            original, mime)
+
+    assert name("Hansen A/S", "Bestellung Nr. 5+6 (Kopie).pdf") == \
+        "2026-10-01_Hansen A_S_Bestellung Nr. 5+6 (Kopie).pdf"
+    assert name("Müller GmbH / Co. KG", "angebot.pdf") == "2026-10-01_Müller GmbH _ Co. KG_angebot.pdf"
+    assert name("A\\B Logistik", "auftrag.pdf") == "2026-10-01_A_B Logistik_auftrag.pdf"
+    assert name("Normal GmbH", "C:\\fakepath\\x.exe") == "2026-10-01_Normal GmbH_x.pdf"
+    assert name("../..", "x.pdf") == "2026-10-01_Kreditor_x.pdf"
+
+
+def test_ki_url_wechsel_sendet_key_nicht_weiter(client, monkeypatch):
+    _login(client)
+    r = client.put("/api/system/einstellungen", json={
+        "llm_url": "https://api.openai.com/v1", "llm_modell": "gpt-test", "llm_api_key": GEHEIM_KI})
+    assert r.status_code == 200 and r.json()["llm"]["api_key"]["gesetzt"] is True
+    gesehen: list = []
+
+    def llm(req: httpx.Request) -> httpx.Response:
+        gesehen.append(req)
+        return httpx.Response(200, json={"model": "x", "choices": [{"message": {"content": '{"antwort":"ok"}'}}]})
+
+    monkeypatch.setattr(ki, "http_client_fabrik", lambda: httpx.Client(transport=httpx.MockTransport(llm)))
+    r = client.put("/api/system/einstellungen", json={"llm_url": "http://fremder-host.example:8080/v1"})
+    assert r.status_code == 200, r.text
+    assert r.json()["llm"]["api_key"]["gesetzt"] is False
+    assert any("llm_api_key (verworfen" in x for x in _audit("SYSTEMEINSTELLUNGEN_GEAENDERT"))
+    assert client.post("/api/system/ki/test").status_code == 200
+    assert str(gesehen[-1].url).startswith("http://fremder-host.example:8080/")
+    assert "authorization" not in gesehen[-1].headers
+    # Key über http:// nach außen wird abgelehnt (422), lokal erlaubt
+    r = client.put("/api/system/einstellungen", json={"llm_api_key": "sk-neu"})
+    assert r.status_code == 422 and "https://" in r.json()["detail"]
+    assert client.put("/api/system/einstellungen", json={
+        "llm_url": "http://localhost:11434/v1", "llm_api_key": "sk-lokal"}).status_code == 200
+    client.post("/api/system/ki/test")
+    assert gesehen[-1].headers["authorization"] == "Bearer sk-lokal"

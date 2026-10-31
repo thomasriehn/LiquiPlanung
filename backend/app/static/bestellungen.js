@@ -171,7 +171,8 @@ function bsListeZeichnen() {
         (b.abweichung !== null && b.abweichung !== undefined && Math.abs(b.abweichung) > 0.004
           ? `, Δ ${b.abweichung > 0 ? "+" : ""}${eur(b.abweichung)} €` : "") + `</span>`;
     } else if (bsOffen(b) && b.abgeloest_betrag > 0) {
-      zusatz = `<br><span class="klein">teilbezahlt ${eur(b.abgeloest_betrag)} €, Rest ${eur(b.rest_geplant)} €</span>`;
+      // rest_offen statt rest_geplant: der ist 0, wenn die Bestellung nicht im Plan steht
+      zusatz = `<br><span class="klein">teilbezahlt ${eur(b.abgeloest_betrag)} €, Rest ${eur(b.rest_offen)} €</span>`;
     }
     const aktionen = [];
     if (b.status === "OFFEN" && bs.rechte.freigeben) {
@@ -436,7 +437,8 @@ function efOeffnen({ modus, auslesen = null, bestellung = null }) {
     bs.kontoFeld.setzeWert(b.konto ? b.konto.id : null);
     if (b.status === "FREIGEGEBEN") {
       document.getElementById("ef-meldungen").innerHTML = `<div class="warnung">Die Bestellung ist freigegeben. Änderungen an
-        Betrag, USt-Satz oder Konto setzen sie wieder auf „zur Freigabe“ (erneute Freigabe erforderlich).</div>`;
+        Kreditor, Betrag, USt-Satz oder Konto, ein Zahldatum in einer anderen KW oder eine ersetzte Datei setzen sie
+        wieder auf „zur Freigabe“ (erneute Freigabe erforderlich).</div>`;
     } else if (b.status === "ABGELEHNT") {
       document.getElementById("ef-meldungen").innerHTML = `<div class="warnung">Die Bestellung wurde abgelehnt. Jede Änderung
         legt sie erneut zur Freigabe vor.</div>`;
@@ -525,6 +527,13 @@ function efDateiBereich(b) {
   eingabe.addEventListener("change", async () => {
     const datei = eingabe.files[0];
     if (!datei) return;
+    // Ersetzen der Datei einer freigegebenen Bestellung erfordert eine erneute Freigabe
+    const aktuell = (bs.ef && bs.ef.bestellung) || b;
+    if (aktuell.status === "FREIGEGEBEN" && aktuell.datei
+        && !confirm("Die Bestellung ist freigegeben. Wird die Datei ersetzt, steht sie wieder zur Freigabe (erneute Freigabe erforderlich). Fortfahren?")) {
+      eingabe.value = "";
+      return;
+    }
     try {
       await bsMitBusy(knopf, "Wird hochgeladen …", async () => {
         const fd = new FormData();
@@ -534,7 +543,17 @@ function efDateiBereich(b) {
         bs.byId[neu.id] = neu;
         const d = neu.datei;
         if (d) efVorschau({ url: d.url, name: d.name, mime: d.mime, groesse: d.groesse });
-        toast("Datei gespeichert.", false);
+        if (neu.status !== aktuell.status) {
+          document.getElementById("ef-untertitel").innerHTML =
+            `${bsStatusBadge(neu.status, neu.status_text)} · erfasst ${bsZeit(neu.erstellt_am)}${neu.erstellt_von ? " von " + esc(neu.erstellt_von) : ""}`;
+          document.getElementById("ef-meldungen").innerHTML = `<div class="warnung">Die Datei wurde ersetzt – die Bestellung
+            steht wieder „${esc(neu.status_text || BS_STATUS_TEXT[neu.status])}“ (erneute Freigabe erforderlich).</div>`;
+          document.getElementById("ef-speichern-pruefen").style.display =
+            bs.rechte.freigeben && neu.status === "OFFEN" ? "" : "none";
+          toast(`Datei gespeichert – Status jetzt „${neu.status_text || BS_STATUS_TEXT[neu.status]}“.`, false);
+        } else {
+          toast("Datei gespeichert.", false);
+        }
         bsListeLaden();
       });
     } catch (e) { toast(e.message); }
@@ -580,6 +599,15 @@ function efGleich(a, b) {
   return String(a) === String(b);
 }
 
+// Änderungen, nach denen eine freigegebene Bestellung erneut freigegeben werden muss
+// (wie im Backend: Kreditor, Betrag, USt, Konto, Zahldatum in anderer KW)
+function efFreigabeRelevant(alt, aenderung) {
+  if (["kreditor", "betrag_netto", "ust_satz", "konto_id"].some(k => k in aenderung)) return true;
+  if (!("zahldatum" in aenderung) || !aenderung.zahldatum || !alt.zahldatum) return "zahldatum" in aenderung;
+  const vorher = isoWoche(alt.zahldatum), nachher = isoWoche(aenderung.zahldatum);
+  return vorher.jahr !== nachher.jahr || vorher.kw !== nachher.kw;
+}
+
 async function efSpeichern(pruefen) {
   if (!bs.ef || !efPruefen()) return;
   const daten = efDaten();
@@ -598,8 +626,8 @@ async function efSpeichern(pruefen) {
         const aenderung = {};
         for (const [k, v] of Object.entries(daten)) if (!efGleich(v, vorher[k])) aenderung[k] = v;
         if (!Object.keys(aenderung).length) { toast("Keine Änderungen.", false); efSchliessen(true); if (pruefen) fdOeffnen(alt.id); return; }
-        if (alt.status === "FREIGEGEBEN" && ["betrag_netto", "ust_satz", "konto_id"].some(k => k in aenderung)
-            && !confirm("Die Bestellung ist freigegeben. Die Änderung an Betrag, USt-Satz oder Konto erfordert eine erneute Freigabe. Fortfahren?")) return;
+        if (alt.status === "FREIGEGEBEN" && efFreigabeRelevant(alt, aenderung)
+            && !confirm("Die Bestellung ist freigegeben. Die Änderung an Kreditor, Betrag, USt-Satz, Konto bzw. ein Zahldatum in einer anderen KW erfordert eine erneute Freigabe. Fortfahren?")) return;
         b = await api("PATCH", `/api/bestellungen/${alt.id}`, aenderung);
         toast(b.status !== alt.status ? `Bestellung gespeichert – Status jetzt „${b.status_text || BS_STATUS_TEXT[b.status]}“.` : "Bestellung gespeichert.", false);
       } else {
@@ -718,6 +746,7 @@ async function fgLaden() {
   const kw = bsKwWert(sel);
   const basis = document.getElementById("fg-basis").value;
   const box = document.getElementById("fg-rahmen");
+  fgKnoepfeSetzen();
   if (!kw) return;
   box.innerHTML = `<p class="hinweis">Wird berechnet …</p>`;
   let d;
@@ -759,17 +788,19 @@ async function fgLaden() {
       Abweichung: positiv = bisher mehr ausgegeben als geplant (mindert den Rahmen), negativ = weniger (erhöht ihn).</p>`;
   document.getElementById("fg-info").textContent = d.kw ? `${datumVollDe(d.kw.von)} – ${datumVollDe(d.kw.bis)}` : "";
 
-  // offene Bestellungen mit laufendem Rest (Ebene gesamt)
+  // offene Bestellungen mit laufendem Rest (Ebene gesamt) – geprüft wird der offene Rest
   const tbO = document.getElementById("fg-offen");
   tbO.innerHTML = "";
   let rest = g.verfuegbar || 0;
   for (const b of d.offen || []) {
-    rest -= b.betrag_brutto || 0;
+    const pruef = fgPruefbetrag(b, d.heute || bs.heute);
+    rest = Math.round((rest - pruef) * 100) / 100;
     const tr = document.createElement("tr");
     tr.innerHTML = `<td><strong>${esc(b.kreditor)}</strong>${b.bestellnummer ? ` <span class="klein">Nr. ${esc(b.bestellnummer)}</span>` : ""}</td>
       <td class="klein">${esc(bsKontoText(b.konto))}</td>
       <td>${bsDatum(b.zahldatum)}${b.zahldatum < bs.heute ? ` <span class="badge-gesperrt">überfällig</span>` : ""}</td>
-      <td class="zahl">${eur(b.betrag_brutto)}</td>
+      <td class="zahl">${eur(b.betrag_brutto)}${Math.abs(pruef - (b.betrag_brutto || 0)) > 0.004
+        ? `<br><span class="klein" title="Brutto abzüglich bereits geleisteter Teilzahlungen">offen ${eur(pruef)}</span>` : ""}</td>
       <td class="zahl ${bsNegKlasse(rest)}">${eur(rest)}</td>
       <td><button class="${bs.rechte.freigeben ? "" : "sekundaer "}klein-knopf" data-id="${b.id}">${bs.rechte.freigeben ? "prüfen …" : "ansehen"}</button></td>`;
     tbO.appendChild(tr);
@@ -782,7 +813,7 @@ async function fgLaden() {
     tr.innerHTML = `<td><strong>${esc(b.kreditor)}</strong>${b.bestellnummer ? ` <span class="klein">Nr. ${esc(b.bestellnummer)}</span>` : ""}</td>
       <td class="klein">${esc(bsKontoText(b.konto))}</td>
       <td>${bsDatum(b.zahldatum)}</td>
-      <td class="zahl">${eur(b.betrag_brutto)}</td>
+      <td class="zahl">${eur(b.betrag_brutto)}${b.abgeloest_betrag > 0 ? `<br><span class="klein">offen ${eur(b.rest_offen)}</span>` : ""}</td>
       <td class="klein">${b.entschieden_am ? bsZeit(b.entschieden_am) : ""}${b.entschieden_von ? " · " + esc(b.entschieden_von) : ""}</td>
       <td><button class="sekundaer klein-knopf" data-id="${b.id}">⋯</button></td>`;
     tbF.appendChild(tr);
@@ -797,10 +828,26 @@ for (const id of ["fg-offen", "fg-freigegeben"]) {
   });
 }
 
+// Prüfbetrag einer offenen Bestellung wie im Backend (Summe „offene Bestellungen“):
+// Brutto abzüglich der Teilzahlungen vor heute – heutige stehen noch nicht im Ist bis gestern
+function fgPruefbetrag(b, heute) {
+  if (!Array.isArray(b.abloesungen)) return b.rest_offen ?? b.betrag_brutto ?? 0;
+  const gezahlt = b.abloesungen.filter(a => !a.abschliessend && a.datum && a.datum < heute)
+    .reduce((s, a) => s + (a.betrag || 0), 0);
+  return Math.max(Math.round(((b.betrag_brutto || 0) - gezahlt) * 100) / 100, 0);
+}
+
+// ◀/▶ an den Enden der Auswahl sperren (vergangene KWs gibt es nicht)
+function fgKnoepfeSetzen() {
+  const sel = document.getElementById("fg-kw");
+  document.getElementById("fg-zurueck").disabled = sel.selectedIndex <= 0;
+  document.getElementById("fg-vor").disabled = sel.selectedIndex >= sel.options.length - 1;
+}
+
 function fgKwSchritt(richtung) {
   const sel = document.getElementById("fg-kw");
   const i = sel.selectedIndex + richtung;
-  if (i >= 0 && i < sel.options.length) { sel.selectedIndex = i; fgLaden(); }
+  if (i >= 0 && i < sel.options.length) { sel.selectedIndex = i; fgKnoepfeSetzen(); fgLaden(); }
 }
 
 // ------------------------------------------------------------ Freigabe-/Detaildialog
@@ -942,7 +989,11 @@ function fdRechnungHtml(kz) {
     { text: "− Vorträge", wert: e => (e.abweichung || {}).vortraege, erl: "nicht gebuchte Raten aus Dauerschuldverhältnissen" },
     { text: "− überfällige Posten", wert: e => (e.abweichung || {}).ueberfaellig, erl: "überfällig, auf heute/morgen vorgetragen" },
     { text: "= verfügbar", wert: e => e.verfuegbar, klasse: "bf-summe", rot: true },
-    { text: "− diese Bestellung (brutto)", wert: () => kz.betrag_brutto },
+    // betrag_brutto = Prüfbetrag (offener Rest); Teilzahlungen stecken schon im Ist
+    kz.bereits_gezahlt > 0
+      ? { text: "− diese Bestellung (offener Rest)", wert: () => kz.betrag_brutto,
+          erl: `brutto ${eur(kz.bestellung_brutto)} €, bereits gezahlt ${eur(kz.bereits_gezahlt)} €` }
+      : { text: "− diese Bestellung (brutto)", wert: () => kz.betrag_brutto },
     { text: "= Rest nach Freigabe", wert: e => e.nach_freigabe, klasse: "bf-ergebnis", rot: true },
   ].filter(Boolean);
   const kopf = ebenen.map(e => `<th class="zahl${e.ebene === m ? " bf-massgeblich" : ""}">${BS_EBENE_TEXT[e.ebene] || e.ebene}
@@ -1089,6 +1140,9 @@ function bsKennzahlenKurz(k) {
     teile.push(`${BS_EBENE_TEXT[e.ebene] || e.ebene}: verfügbar ${bsEur(e.verfuegbar)}, nach Freigabe ${bsEur(e.nach_freigabe)}`);
   }
   if (k.ampel) teile.push(k.ampel === "gruen" ? "im Rahmen" : "über Rahmen");
+  if (k.bereits_gezahlt > 0) {
+    teile.push(`geprüft offener Rest ${eur(k.betrag_brutto)} € (brutto ${eur(k.bestellung_brutto)} €, bereits gezahlt ${eur(k.bereits_gezahlt)} €)`);
+  }
   if (k.basis) teile.push(k.basis.typ === "SNAPSHOT" && k.basis.snapshot ? `Planstand ${datumVollDe(k.basis.snapshot.stichtag)}` : "aktueller Plan");
   return teile.join(" · ");
 }
@@ -1288,7 +1342,7 @@ function adAbweichungZeigen() {
   if (!abschl) {
     const rest = Math.round(((b.betrag_brutto || 0) - gesamt) * 100) / 100;
     el.innerHTML = rest > 0.004
-      ? `Teilzahlung: <strong>${eur(rest)} €</strong> bleiben zum Zahldatum im Plan.`
+      ? `Teilzahlung: <strong>${eur(rest)} €</strong> bleiben offen${b.im_plan ? " und zum Zahldatum im Plan" : ""}.`
       : `Der Betrag deckt die Bestellung vollständig – sie gilt damit als abgelöst.`;
     return;
   }
@@ -1324,7 +1378,7 @@ async function adSpeichern() {
     await bsMitBusy(knopf, "Wird gespeichert …", async () => {
       const neu = await api("POST", `/api/bestellungen/${b.id}/abloesung`, daten);
       toast(neu.status === "ABGELOEST" ? `Bestellung „${neu.kreditor}“ abgelöst.`
-        : `Teilzahlung zugeordnet – Rest ${eur(neu.rest_geplant)} € bleibt im Plan.`, false);
+        : `Teilzahlung zugeordnet – Rest ${eur(neu.rest_offen)} € offen${neu.im_plan ? " (im Plan)" : ""}.`, false);
       bsDialogZu(document.getElementById("abloese-dialog"));
       await bsNachAenderung();
     });
@@ -1488,8 +1542,9 @@ document.getElementById("jn-tabelle").addEventListener("click", (e) => {
     });
   }
 
-  // Freigabe-Tab: KW −2 … +13, Basis aus den Planständen
-  bsKwOptionen(document.getElementById("fg-kw"), { vonWochen: -2, bisWochen: 13 });
+  // Freigabe-Tab: laufende KW … +13 (vergangene KWs lassen sich nicht mehr freigeben), Basis aus den Planständen
+  bsKwOptionen(document.getElementById("fg-kw"), { vonWochen: 0, bisWochen: 13 });
+  fgKnoepfeSetzen();
   document.getElementById("fg-kw").addEventListener("change", fgLaden);
   document.getElementById("fg-zurueck").addEventListener("click", () => fgKwSchritt(-1));
   document.getElementById("fg-vor").addEventListener("click", () => fgKwSchritt(1));

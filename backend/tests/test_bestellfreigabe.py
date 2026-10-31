@@ -2,7 +2,7 @@
 gebundene Zahlungen, bisherige Abweichung inkl. Vorträge und Überfälligem."""
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -402,3 +402,181 @@ def test_kennzahlen_als_journal_momentaufnahme(db):
     # nach der Freigabe ist sie für andere Bestellungen gebunden
     k = _e(_kz(db, m, kw=34, brutto="100", basis="LIVE"))
     assert k["gebunden"]["bestellungen"] == 5950.0
+
+
+# ---------------------------------------------------------------------------
+# Regressionen aus dem Review
+# ---------------------------------------------------------------------------
+
+def test_planstand_ohne_offene_bestellungen_keine_selbstfreigabe(db):
+    """Offene Bestellungen stehen nicht im Planstand: die geprüfte schafft sich
+    keinen eigenen Rahmen, überfällige offene erzeugen kein Guthaben in C1."""
+    m = _mandant(db)
+    u = _benutzer(db)
+    _budget_woche(db, m, "4920", 34, "10000")                         # 11.900
+    o1 = _bestellung(db, m, u, netto="50000", zahldatum=date(2026, 8, 19))   # 59.500
+    _bestellung(db, m, u, netto="50000", zahldatum=date(2026, 8, 20))
+    _bestellung(db, m, u, netto="50000", zahldatum=date(2026, 8, 4), kreditor="Alt")
+    snap = _snapshot(db, m)
+    snap.referenz = True
+    r = _kz(db, m, kw=34, brutto=svc.brutto(o1), ohne=o1.id)
+    assert r["basis"]["snapshot"]["id"] == snap.id
+    k = _e(r)
+    assert (k["soll_kw"], k["gebunden"]["summe"], k["abweichung"]["summe"]) == (11900.0, 0.0, 0.0)
+    assert (k["verfuegbar"], k["nach_freigabe"], r["ampel"]) == (11900.0, -47600.0, "rot")
+    ueb = svc.freigabe_uebersicht(db, m, jahr=2026, kw=34, heute=HEUTE)
+    assert (ueb["gesamt"]["verfuegbar"], ueb["ampel"]) == (11900.0, "rot")
+
+
+@pytest.mark.parametrize("netto, verfuegbar", [
+    ("5000", 5950.0),       # im Budget: 11.900 − 5.950
+    ("20000", 0.0),         # über Budget: Plan = Bestellung, nichts frei
+])
+def test_fruehe_abloesung_laesst_spielraum_der_zahlwoche_unveraendert(db, netto, verfuegbar):
+    m = _mandant(db)
+    u = _benutzer(db)
+    _budget_woche(db, m, "4920", 34, "10000")
+    b = _bestellung(db, m, u, status="FREIGEGEBEN", netto=netto, zahldatum=date(2026, 8, 19))
+    snap = _snapshot(db, m)
+
+    def werte(heute=HEUTE, basen=("LIVE", snap.id)):
+        return [_e(_kz(db, m, kw=34, brutto="100", basis=x, heute=heute))["verfuegbar"]
+                for x in basen]
+
+    assert werte() == [verfuegbar, verfuegbar]
+    svc.abloesen(db, b, u, art="ZAHLUNG",
+                 buchung_id=_zahlung(db, m, date(2026, 8, 4), str(svc.brutto(b))).id)
+    assert b.status == "ABGELOEST"
+    assert werte() == [verfuegbar, verfuegbar]
+    # eine Woche später liegt die Zahlung vor der Basis (LIVE bzw. neuer Planstand)
+    kw33 = date(2026, 8, 10)
+    db.commit()
+    neu = erstelle_snapshot(db, m, start=kw33, heute=kw33)
+    assert werte(kw33, ("LIVE", snap.id, neu.id)) == [verfuegbar] * 3
+    k = _e(_kz(db, m, kw=34, brutto="100", basis="LIVE", heute=kw33))
+    assert k["gebunden"]["bestellungen"] == float(svc.brutto(b))
+
+
+def test_live_basis_ueberfaelliges_hebt_sich_auf(db):
+    """LIVE rechnet die Vergangenheit ungerollt wie ein Planstand: Überfälliges steht
+    in C1 als Minderausgabe und wird durch C3 neutralisiert – auch für künftige KWs."""
+    m = _mandant(db)
+    _budget_woche(db, m, "4920", 34, "10000")
+    _op(db, m, "3000", date(2026, 8, 4))                           # Dienstag, unbezahlt
+    k34 = _e(_kz(db, m, kw=34, brutto="100", basis="LIVE"))
+    assert k34["abweichung"] == {"ist_minus_plan": -3000.0, "vortraege": 0.0,
+                                 "ueberfaellig": 3000.0, "summe": 0.0}
+    assert (k34["gebunden"]["summe"], k34["verfuegbar"]) == (0.0, 11900.0)
+    r40 = _kz(db, m, kw=40, brutto="100")                          # kein Planstand → LIVE
+    assert r40["basis"]["typ"] == "LIVE" and _e(r40)["verfuegbar"] == 0.0
+    k32 = _e(_kz(db, m, kw=32, brutto="100", basis="LIVE"))
+    assert (k32["soll_kw"], k32["soll_kw_rest"], k32["verfuegbar"]) == (3000.0, 0.0, 0.0)
+    # Montag: Überfälliges der Vorwoche steht im Plan auf heute – nur die laufende KW
+    montag = date(2026, 8, 10)
+    k34 = _e(_kz(db, m, kw=34, brutto="100", basis="LIVE", heute=montag))
+    assert (k34["abweichung"]["summe"], k34["verfuegbar"]) == (0.0, 11900.0)
+    k33 = _e(_kz(db, m, kw=33, brutto="100", basis="LIVE", heute=montag))
+    assert (k33["soll_kw_rest"], k33["gebunden"]["summe"], k33["abweichung"]["ueberfaellig"],
+            k33["verfuegbar"]) == (3000.0, 0.0, 3000.0, 0.0)
+
+
+def test_teilzahlung_wird_nicht_doppelt_abgezogen(db):
+    """Geprüft wird der offene Rest: Teilzahlungen bis gestern stehen schon im Ist."""
+    m = _mandant(db)
+    u = _benutzer(db)
+    _budget_woche(db, m, "4920", 32, "10000")                      # 11.900, 2.380 je Banktag
+    b = _bestellung(db, m, u, zahldatum=date(2026, 8, 7))          # 5.950, offen
+    svc.abloesen(db, b, u, art="ZAHLUNG", abschliessend=False,
+                 buchung_id=_zahlung(db, m, date(2026, 8, 4), "2000").id)
+    svc.abloesen(db, b, u, art="MANUELL", betrag=Decimal("500"), datum=HEUTE,
+                 abschliessend=False)                               # heute: noch nicht im Ist
+    db.flush()
+    r = svc.bestellung_kennzahlen(db, m, b, jahr=2026, kw=32, basis="LIVE", heute=HEUTE)
+    assert (r["betrag_brutto"], r["bestellung_brutto"], r["bereits_gezahlt"]) == (
+        3950.0, 5950.0, 2000.0)
+    k = _e(r)
+    assert k["abweichung"]["ist_minus_plan"] == -2760.0            # Mo/Di 4.760 geplant, 2.000 gezahlt
+    assert (k["verfuegbar"], k["nach_freigabe"]) == (9900.0, 5950.0)   # = 11.900 − 5.950
+    ohne = _kz(db, m, kw=32, brutto="777")                         # ohne Bestellung: Brutto = Prüfbetrag
+    assert (ohne["bestellung_brutto"], ohne["bereits_gezahlt"]) == (777.0, 0.0)
+    ueb = svc.freigabe_uebersicht(db, m, jahr=2026, kw=32, basis="LIVE", heute=HEUTE)
+    assert ueb["summe_offen"] == 3950.0
+    assert (ueb["gesamt"]["verfuegbar"], ueb["gesamt"]["nach_freigabe"]) == (9900.0, 5950.0)
+
+
+def test_router_prueft_offenen_rest(db):
+    from app.routers import bestellungen as router
+
+    m = _mandant(db)
+    u = _benutzer(db)
+    heute = date.today()
+    zahltag = heute + timedelta(days=21)
+    b = _bestellung(db, m, u, zahldatum=zahltag)
+    svc.abloesen(db, b, u, art="MANUELL", betrag=Decimal("2000"),
+                 datum=heute - timedelta(days=1), abschliessend=False)
+    db.flush()
+    iso = zahltag.isocalendar()
+    r = router._kennzahlen(db, m, b, iso.year, iso.week, "")
+    assert (r["betrag_brutto"], r["bestellung_brutto"], r["bereits_gezahlt"]) == (
+        3950.0, 5950.0, 2000.0)
+    k = next(x for x in r["ebenen"] if x["ebene"] == r["massgeblich"])
+    assert k["nach_freigabe"] == round(k["verfuegbar"] - 3950.0, 2)
+
+
+@pytest.mark.parametrize("gezahlt_am, gebunden, ist_minus_plan", [
+    (HEUTE, 3000.0, 0.0),                   # heute gezahlt: Ist folgt erst morgen
+    (date(2026, 8, 4), 0.0, 3000.0),        # gestern gezahlt: steht schon im Ist
+])
+def test_erledigter_termin_bleibt_gebunden_bis_das_ist_vorliegt(db, gezahlt_am, gebunden,
+                                                               ist_minus_plan):
+    m = _mandant(db)
+    ust = _konto(db, m, "1780")
+    t = models.Zahlungstermin(mandant_id=m.id, typ="UST_VA", datum=date(2026, 8, 7),
+                              betrag=Decimal("3000"), konto_id=ust.id, status="GEPLANT")
+    db.add(t)
+
+    def gesamt(heute=HEUTE):
+        return _e(_kz(db, m, konto=None, kw=32, basis="LIVE", heute=heute), "gesamt")
+
+    assert gesamt()["verfuegbar"] == 0.0
+    _zahlung(db, m, gezahlt_am, "3000", konto="1780")
+    t.status = "ERLEDIGT"
+    g = gesamt()
+    assert (g["gebunden"]["summe"], g["abweichung"]["ist_minus_plan"], g["verfuegbar"]) == (
+        gebunden, ist_minus_plan, 0.0)
+    morgen = gesamt(date(2026, 8, 6))
+    assert (morgen["gebunden"]["summe"], morgen["abweichung"]["ist_minus_plan"],
+            morgen["verfuegbar"]) == (0.0, 3000.0, 0.0)
+
+
+def test_verschiebung_aus_vergangenem_tag_bindet_bezahltes_nicht(db):
+    m = _mandant(db)
+    tel = _konto(db, m, "4920")
+    _budget_woche(db, m, "4920", 34, "10000")
+    op = _op(db, m, "3000", date(2026, 8, 4))
+    db.add(models.PlanVerschiebung(mandant_id=m.id, konto_id=tel.id, quelle="PLAN",
+                                   von=date(2026, 8, 4), nach=date(2026, 8, 19),
+                                   betrag=Decimal("-3000")))
+    k = _e(_kz(db, m, kw=34, basis="LIVE", brutto="100"))
+    assert (k["soll_kw"], k["gebunden"]["summe"], k["verfuegbar"]) == (14900.0, 3000.0, 11900.0)
+    bu = _zahlung(db, m, date(2026, 8, 4), "3000")
+    bu.posten_id = op.id
+    op.status, op.bezahlt_am, op.bezahlt_betrag = "BEZAHLT", date(2026, 8, 4), Decimal("3000")
+    for heute in (HEUTE, date(2026, 8, 6)):
+        k = _e(_kz(db, m, kw=34, basis="LIVE", brutto="100", heute=heute))
+        assert (k["gebunden"]["summe"], k["abweichung"]["ist_minus_plan"], k["verfuegbar"]) == (
+            0.0, 3000.0, 11900.0)
+
+
+def test_verschobene_bestellung_in_der_aufschluesselung(db):
+    m = _mandant(db)
+    u = _benutzer(db)
+    tel = _konto(db, m, "4920")
+    _bestellung(db, m, u, status="FREIGEGEBEN", zahldatum=date(2026, 8, 19))
+    db.add(models.PlanVerschiebung(mandant_id=m.id, konto_id=tel.id, quelle="PLAN",
+                                   von=date(2026, 8, 19), nach=date(2026, 8, 26),
+                                   betrag=Decimal("-5950")))
+    k34 = _e(_kz(db, m, kw=34, basis="LIVE"))
+    assert k34["gebunden"] == {"bestellungen": 0.0, "sonstige": 0.0, "summe": 0.0}
+    k35 = _e(_kz(db, m, kw=35, basis="LIVE"))
+    assert k35["gebunden"] == {"bestellungen": 5950.0, "sonstige": 0.0, "summe": 5950.0}

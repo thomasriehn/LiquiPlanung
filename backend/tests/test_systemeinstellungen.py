@@ -205,3 +205,108 @@ def test_oeffentlich_leer_und_unsicherer_schluessel(db, monkeypatch):
     assert o["graph"]["client_secret"] == {"gesetzt": False, "lesbar": False, "aus_umgebung": False}
     assert o["graph"]["konfiguriert"] is False and o["llm"]["konfiguriert"] is False
     assert o["llm"]["vision"] is False
+
+
+# --- KI: API-Key gehört zur URL -----------------------------------------------------
+
+
+def test_url_wechsel_verwirft_gespeicherten_key(db):
+    se.setze(db, None, {"llm_url": "https://api.openai.com/v1", "llm_modell": "m", "llm_api_key": "sk-alt"})
+    # gleicher Ursprung (nur Pfad): Key bleibt
+    assert se.setze(db, None, {"llm_url": "https://API.openai.com:443/v2"}) == ["llm_url"]
+    assert se.ki_zugang(db).api_key == "sk-alt"
+    # anderer Host ohne neuen Key: verworfen (und fürs Audit gemeldet)
+    geaendert = se.setze(db, None, {"llm_url": "https://anderer.example/v1"})
+    assert geaendert[0] == "llm_url" and geaendert[1].startswith("llm_api_key (verworfen")
+    assert db.get(models.SystemEinstellung, "llm_api_key") is None
+    assert se.ki_zugang(db).api_key is None
+    # mit neuem Key: dieser gilt
+    se.setze(db, None, {"llm_url": "https://dritter.example/v1", "llm_api_key": "sk-neu"})
+    assert se.ki_zugang(db).api_key == "sk-neu"
+    # anderer Port bzw. Löschen der URL zählt ebenfalls als Wechsel
+    se.setze(db, None, {"llm_url": "https://dritter.example:8443/v1"})
+    assert se.ki_zugang(db).api_key is None
+    se.setze(db, None, {"llm_url": "https://dritter.example/v1", "llm_api_key": "sk-neu"})
+    se.setze(db, None, {"llm_url": ""})
+    se.setze(db, None, {"llm_url": "https://boese.example/v1"})
+    assert se.ki_zugang(db).api_key is None
+
+
+def test_env_key_bleibt_an_bisherigen_server_gebunden(db, monkeypatch):
+    monkeypatch.setattr(get_settings(), "llm_api_key", "env-key")
+    # Ersteinrichtung: URL in der Oberfläche, Key aus der Umgebung
+    se.setze(db, None, {"llm_url": "https://api.openai.com/v1", "llm_modell": "m"})
+    assert se.ki_zugang(db).api_key == "env-key"
+    assert se.oeffentlich(db)["llm"]["api_key_hinweis"] is None
+    # Wechsel auf einen anderen Server: Env-Key geht nicht dorthin
+    se.setze(db, None, {"llm_url": "https://fremd.example/v1"})
+    assert se.ki_zugang(db).api_key is None
+    assert "LLM_API_KEY" in se.oeffentlich(db)["llm"]["api_key_hinweis"]
+    # Löschen und neu setzen umgeht die Bindung nicht
+    se.setze(db, None, {"llm_url": ""})
+    se.setze(db, None, {"llm_url": "https://noch-fremder.example/v1"})
+    assert se.ki_zugang(db).api_key is None
+    # für den neuen Server gilt ein in der Oberfläche eingegebener Key
+    se.setze(db, None, {"llm_api_key": "ui-key"})
+    assert se.ki_zugang(db).api_key == "ui-key"
+    # zurück zum ursprünglichen Server: Env-Key wieder (UI-Key verworfen)
+    se.setze(db, None, {"llm_url": "https://api.openai.com/v1/"})
+    assert se.ki_zugang(db).api_key == "env-key"
+    # Bindung ist eine interne Zeile, nicht über die API änderbar
+    with pytest.raises(ValueError, match="Unbekannte Einstellung"):
+        se.setze(db, None, {se._BINDUNG: "{}"})
+    assert "env-key" not in db.get(models.SystemEinstellung, se._BINDUNG).wert
+
+
+def test_neuer_env_key_gilt_fuer_aktuelle_url(db, monkeypatch):
+    monkeypatch.setattr(get_settings(), "llm_api_key", "env-alt")
+    se.setze(db, None, {"llm_url": "https://a.example/v1", "llm_modell": "m"})
+    se.setze(db, None, {"llm_url": "https://b.example/v1"})
+    assert se.ki_zugang(db).api_key is None
+    # Betreiber hinterlegt einen neuen Key (anderer Fingerabdruck) → gilt für die eingestellte URL
+    monkeypatch.setattr(get_settings(), "llm_api_key", "env-neu")
+    assert se.ki_zugang(db).api_key == "env-neu"
+
+
+@pytest.mark.parametrize("host, lokal", [
+    ("localhost", True), ("127.0.0.1", True), ("[::1]", True), ("10.1.2.3", True),
+    ("192.168.178.20", True), ("172.16.0.5", True), ("169.254.1.1", True), ("fd00::1", True),
+    ("ollama", True), ("llm.local", True), ("ki.intern.lan", True), ("gpu.internal", True),
+    ("2130706433", True),            # = 127.0.0.1
+    ("api.openai.com", False), ("8.8.8.8", False), ("fremder-host.example", False),
+    ("134744072", False),            # = 8.8.8.8 in Zahlform
+    ("", False), (None, False),
+])
+def test_lokale_adresse(host, lokal):
+    assert se.lokale_adresse(host) is lokal
+
+
+def test_key_nie_per_http_nach_aussen(db):
+    with pytest.raises(ValueError, match="https://"):
+        se.setze(db, None, {"llm_url": "http://fremder-host.example:8080/v1", "llm_modell": "m",
+                            "llm_api_key": "sk-1"})
+    assert se.wert(db, "llm_url") is None  # nichts geschrieben
+    # lokal bzw. ohne Key erlaubt
+    se.setze(db, None, {"llm_url": "http://ollama:11434/v1", "llm_modell": "m", "llm_api_key": "sk-1"})
+    assert se.ki_zugang(db).api_key == "sk-1"
+    se.setze(db, None, {"llm_url": "http://fremder-host.example:8080/v1"})   # Key wird verworfen
+    assert se.ki_zugang(db).api_key is None
+    with pytest.raises(ValueError, match="https://"):
+        se.setze(db, None, {"llm_api_key": "sk-2"})
+
+
+def test_env_key_nie_per_http_nach_aussen(db, monkeypatch):
+    monkeypatch.setattr(get_settings(), "llm_api_key", "env-key")
+    with pytest.raises(ValueError, match="https://"):
+        se.setze(db, None, {"llm_url": "http://fremder-host.example/v1", "llm_modell": "m"})
+
+
+def test_alte_http_einstellung_sendet_key_nicht(db):
+    # vor dieser Prüfung gespeichert: http:// nach außen mit Key
+    db.add(models.SystemEinstellung(schluessel="llm_url", wert="http://fremder-host.example/v1"))
+    db.add(models.SystemEinstellung(schluessel="llm_modell", wert="m"))
+    db.add(models.SystemEinstellung(schluessel="llm_api_key", wert=geheimnisse.verschluesseln("sk-1"),
+                                    verschluesselt=True))
+    db.flush()
+    assert se.ki_zugang(db).api_key is None
+    assert se.oeffentlich(db)["llm"]["api_key_hinweis"] == se.HTTP_KEY_FEHLER

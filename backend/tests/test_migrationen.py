@@ -4,7 +4,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import inspect
 
 from app.database import Base
 
@@ -17,13 +17,13 @@ def _cfg() -> Config:
     return cfg
 
 
-def test_migrationen_erzeugen_das_aktuelle_schema(tmp_path):
+def test_migrationen_erzeugen_das_aktuelle_schema(leere_datenbank):
     """`alembic upgrade head` auf leerer DB muss exakt die Modelle abbilden.
 
     Schlägt dieser Test fehl, wurde ein Modell geändert, ohne eine Migration zu
     erzeugen (backend: `alembic revision --autogenerate -m "..."`).
     """
-    engine = create_engine(f"sqlite:///{tmp_path}/migration.db")
+    engine = leere_datenbank
     cfg = _cfg()
     with engine.begin() as verbindung:
         cfg.attributes["connection"] = verbindung
@@ -45,14 +45,14 @@ def test_migrationen_erzeugen_das_aktuelle_schema(tmp_path):
     engine.dispose()
 
 
-def test_uebernahme_bestandsdatenbank(tmp_path, monkeypatch):
+def test_uebernahme_bestandsdatenbank(leere_datenbank, monkeypatch):
     """Alt-Installation (create_all, ohne alembic_version) wird beim Start
     gestempelt; ein zweiter Start läuft als normales Upgrade durch."""
     import app.main as hauptmodul
     import app.database as db_modul
     from sqlalchemy.orm import sessionmaker
 
-    engine = create_engine(f"sqlite:///{tmp_path}/bestand.db")
+    engine = leere_datenbank
     Base.metadata.create_all(engine)  # simulierter Alt-Stand
     monkeypatch.setattr(db_modul, "engine", engine)
     monkeypatch.setattr(hauptmodul, "engine", engine)

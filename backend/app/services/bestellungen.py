@@ -25,6 +25,7 @@ from .. import models
 from ..models import AbloeseArt, BestellStatus, KontoTyp, PostenArt, PostenStatus
 from .ausgleich import _norm, _tokens
 from .feiertage import naechster_bankarbeitstag
+from .insolvenzgeld import igeld_fenster, termin_entlastung
 from .liquiditaet import (
     BESTELL_KEY,
     CENT,
@@ -85,7 +86,9 @@ FELDER = {
     "konto_id": "Konto",
 }
 # Änderungen daran erfordern bei freigegebenen Bestellungen eine erneute Freigabe
-FREIGABE_RELEVANT = ("betrag_netto", "ust_satz", "konto_id")
+# (Kreditor nicht bei bloßer Schreibkorrektur, Zahldatum nur bei Wechsel der KW –
+# siehe _freigabe_relevant); dazu das Ersetzen der Datei (datei_setzen)
+FREIGABE_RELEVANT = ("kreditor", "betrag_netto", "ust_satz", "konto_id", "zahldatum")
 
 SCHWELLE_VORSCHLAG = 60   # Ablösevorschläge ab diesem Score
 SCHWELLE_SICHER = 85
@@ -217,6 +220,40 @@ def _finanz_nrn(konten: list[models.Konto]) -> set[str]:
 
 def _mandant(db: Session, b: models.Bestellung) -> models.Mandant | None:
     return db.get(models.Mandant, b.mandant_id)
+
+
+def _status_setzen(db: Session, b: models.Bestellung, nachher: str) -> None:
+    """Status setzen – nur, wenn die Bestellung in der Datenbank noch den geprüften
+    Status hat (bedingtes UPDATE). So scheitert bei gleichzeitigen Anfragen die
+    zweite (ValueError → 409), statt die erste still zu überschreiben."""
+    vorher = b.status
+    jetzt = models.utcnow()
+    if b.id is not None:
+        db.flush()
+        erg = db.execute(
+            update(models.Bestellung)
+            .where(models.Bestellung.id == b.id, models.Bestellung.status == vorher)
+            .values(status=nachher, geaendert_am=jetzt)
+            .execution_options(synchronize_session=False)
+        )
+        if erg.rowcount != 1:
+            raise ValueError(
+                "Die Bestellung wurde bereits von anderer Seite geändert – bitte neu laden")
+    b.status = nachher
+    b.geaendert_am = jetzt
+
+
+def _freigabe_relevant(feld: str, alt, neu) -> bool:
+    """Wesentliche Änderung, die eine erneute Freigabe erfordert? Kreditor: nicht bei
+    bloßer Schreibkorrektur (Groß-/Kleinschreibung, Leer-/Satzzeichen, Umlaute);
+    Zahldatum: nur beim Wechsel der Kalenderwoche (die Freigabe gilt je KW)."""
+    if feld not in FREIGABE_RELEVANT:
+        return False
+    if feld == "kreditor":
+        return _norm(alt) != _norm(neu)
+    if feld == "zahldatum":
+        return alt is None or neu is None or alt.isocalendar()[:2] != neu.isocalendar()[:2]
+    return True
 
 
 def bestellung_im_plan(b: models.Bestellung, mandant: models.Mandant | None) -> bool:
@@ -509,12 +546,20 @@ def anlegen(
 
 def datei_setzen(db: Session, b: models.Bestellung, benutzer: models.Benutzer | None,
                  datei: DateiRef) -> None:
+    """Datei nachreichen bzw. ersetzen; Ersetzen bei einer freigegebenen Bestellung
+    → wieder OFFEN (erneute Freigabe)."""
     alt = b.datei_name
+    vorher = b.status
+    text = f"{alt} → {datei.name}" if alt else datei.name
     _datei_uebernehmen(b, datei)
+    if vorher == _FREIGEGEBEN and alt:
+        _status_setzen(db, b, _OFFEN)
+        b.entschieden_am = None
+        b.entschieden_von = None
+        text += " – erneute Freigabe erforderlich"
     b.geaendert_am = models.utcnow()
-    journal(db, b.mandant_id, b, benutzer, "DATEI", status_vorher=b.status,
-            status_nachher=b.status,
-            begruendung=(f"{alt} → {datei.name}" if alt else datei.name))
+    journal(db, b.mandant_id, b, benutzer, "DATEI", status_vorher=vorher,
+            status_nachher=b.status, begruendung=text)
 
 
 def _feld_anzeige(db: Session, feld: str, wert) -> str:
@@ -535,9 +580,10 @@ def _feld_anzeige(db: Session, feld: str, wert) -> str:
 
 def aendern(db: Session, b: models.Bestellung, benutzer: models.Benutzer | None,
             daten: dict) -> list[str]:
-    """Felder ändern (nur OFFEN/FREIGEGEBEN/ABGELEHNT). Freigegeben + Änderung an
-    Betrag/USt/Konto → wieder OFFEN (erneute Freigabe); abgelehnt + jede Änderung
-    → OFFEN (Wiedervorlage). Liefert die geänderten Felder."""
+    """Felder ändern (nur OFFEN/FREIGEGEBEN/ABGELEHNT). Freigegeben + wesentliche
+    Änderung (Kreditor, Betrag, USt, Konto, Zahldatum in anderer KW) → wieder OFFEN
+    (erneute Freigabe); abgelehnt + jede Änderung → OFFEN (Wiedervorlage). Liefert
+    die geänderten Felder."""
     if b.status not in (_OFFEN, _FREIGEGEBEN, _ABGELEHNT):
         raise ValueError(
             f"Eine Bestellung im Status „{STATUS_TEXT.get(b.status, b.status)}“ kann nicht geändert werden")
@@ -570,21 +616,22 @@ def aendern(db: Session, b: models.Bestellung, benutzer: models.Benutzer | None,
         f"{FELDER[f]}: {_feld_anzeige(db, f, getattr(b, f))} → {_feld_anzeige(db, f, neu[f])}"
         for f in geaendert
     )
+    wesentlich = any(_freigabe_relevant(f, getattr(b, f), neu[f]) for f in geaendert)
     for f in geaendert:
         setattr(b, f, neu[f])
     if "konto_id" in geaendert:
         b.konto = db.get(models.Konto, b.konto_id)
-    vorher = b.status
-    if vorher == _FREIGEGEBEN and any(f in FREIGABE_RELEVANT for f in geaendert):
-        b.status = _OFFEN
+    vorher = nachher = b.status
+    if vorher == _FREIGEGEBEN and wesentlich:
+        nachher = _OFFEN
         beschreibung += " – erneute Freigabe erforderlich"
     elif vorher == _ABGELEHNT:
-        b.status = _OFFEN
+        nachher = _OFFEN
         beschreibung += " – zur erneuten Freigabe vorgelegt"
-    if b.status != vorher:
+    _status_setzen(db, b, nachher)
+    if nachher != vorher:
         b.entschieden_am = None
         b.entschieden_von = None
-    b.geaendert_am = models.utcnow()
     journal(db, b.mandant_id, b, benutzer, "GEAENDERT", status_vorher=vorher,
             status_nachher=b.status, begruendung=beschreibung)
     return geaendert
@@ -609,7 +656,7 @@ def entscheiden(db: Session, b: models.Bestellung, benutzer: models.Benutzer | N
     else:
         raise ValueError("Unbekannte Entscheidung (FREIGEBEN oder ABLEHNEN)")
     vorher = b.status
-    b.status = nachher
+    _status_setzen(db, b, nachher)
     b.entschieden_am = models.utcnow()
     b.entschieden_von = benutzer.id if benutzer is not None else None
     journal(db, b.mandant_id, b, benutzer, aktion, status_vorher=vorher, status_nachher=nachher,
@@ -625,7 +672,7 @@ def zuruecksetzen(db: Session, b: models.Bestellung, benutzer: models.Benutzer |
     if not text:
         raise ValueError("Bitte das Zurücknehmen der Entscheidung begründen")
     vorher = b.status
-    b.status = _OFFEN
+    _status_setzen(db, b, _OFFEN)
     b.entschieden_am = None
     b.entschieden_von = None
     journal(db, b.mandant_id, b, benutzer, "ZURUECKGESETZT", status_vorher=vorher,
@@ -639,8 +686,7 @@ def stornieren(db: Session, b: models.Bestellung, benutzer: models.Benutzer | No
         raise ValueError(
             f"Eine Bestellung im Status „{STATUS_TEXT.get(b.status, b.status)}“ kann nicht storniert werden")
     vorher = b.status
-    b.status = _STORNIERT
-    b.geaendert_am = models.utcnow()
+    _status_setzen(db, b, _STORNIERT)
     journal(db, b.mandant_id, b, benutzer, "STORNIERT", status_vorher=vorher,
             status_nachher=_STORNIERT, begruendung=_text(begruendung, "begruendung"))
 
@@ -702,8 +748,9 @@ def abloesen(
              noch keiner anderen Ablösung bzw. keinem OP-Ausgleich zugeordnet.
     RECHNUNG: offener Posten (Kreditor) übernimmt die Planung – immer abschließend.
     MANUELL: Betrag und Datum von Hand.
-    Abschließend (oder Rest ≤ 0,01 €) → Status ABGELOEST, auch bei abweichendem
-    Betrag (Minderlieferung); sonst Teilzahlung – der Rest bleibt geplant."""
+    Abschließend (oder alle Ablösungen decken das Brutto bis auf 0,01 €) → Status
+    ABGELOEST, auch bei abweichendem Betrag (Minderlieferung); sonst Teilzahlung –
+    der Rest bleibt geplant. Gespeichert wird nur die ausdrückliche Wahl."""
     if b.status not in (_OFFEN, _FREIGEGEBEN):
         raise ValueError(
             f"Eine Bestellung im Status „{STATUS_TEXT.get(b.status, b.status)}“ kann nicht abgelöst werden")
@@ -751,6 +798,11 @@ def abloesen(
             raise ValueError("Nur Eingangsrechnungen (Kreditoren-Posten) können eine Bestellung ablösen")
         if p.status == PostenStatus.STORNIERT.value:
             raise ValueError("Der Posten ist storniert")
+        if p.forderungsklasse == models.Forderungsklasse.INSOLVENZFORDERUNG.value:
+            # Zahlungssperre: die Engine plant den Posten nie – die Bestellung fiele
+            # ersatzlos aus dem Plan
+            raise ValueError("Der Posten ist eine Insolvenzforderung (Zahlungssperre) und "
+                             "kann die Bestellung nicht ablösen")
         abschliessend = True   # der Posten trägt die Zahlung
         standard_betrag, standard_datum = p.betrag_brutto, p.rechnungsdatum or date.today()
     else:
@@ -766,8 +818,9 @@ def abloesen(
         raise ValueError("Der Betrag muss größer als 0 sein")
 
     br = brutto(b)
-    rest_vorher = bestellung_rest(b)
-    abschliessend = bool(abschliessend) or rest_vorher - betrag_d <= CENT
+    # gespeichert wird nur die ausdrückliche Wahl; ob die Bestellung erledigt ist,
+    # entscheidet _abschluss (auch, wenn die Summe den Bruttobetrag deckt)
+    abschliessend = bool(abschliessend)
     a = models.BestellAbloesung(
         mandant_id=b.mandant_id,
         art=art,
@@ -784,10 +837,10 @@ def abloesen(
     db.flush()
     vorher = b.status
     quelle = ABLOESE_ART_TEXT[art]
-    if abschliessend:
+    if _abschluss(b) is not None:
         summe = sum((x.betrag for x in b.abloesungen), NULL)
         abw = summe - br
-        b.status = _ABGELOEST
+        _status_setzen(db, b, _ABGELOEST)
         b.abgeloest_am = datum_d
         b.abgeloest_durch = art
         text = f"Abgelöst durch {quelle} vom {_datum_de(datum_d)}: {_eur(betrag_d)} €"
@@ -798,18 +851,33 @@ def abloesen(
         journal(db, b.mandant_id, b, benutzer, "ABGELOEST", status_vorher=vorher,
                 status_nachher=_ABGELOEST, begruendung=text)
     else:
+        _status_setzen(db, b, vorher)   # Bestellung inzwischen anderweitig geändert?
         journal(db, b.mandant_id, b, benutzer, "TEILZAHLUNG", status_vorher=vorher,
                 status_nachher=vorher,
                 begruendung=(f"Teilzahlung ({quelle}) vom {_datum_de(datum_d)}: {_eur(betrag_d)} €; "
                              f"weiter geplant: {_eur(bestellung_rest(b))} €"))
-    b.geaendert_am = models.utcnow()
     return a
+
+
+def _abschluss(b: models.Bestellung) -> models.BestellAbloesung | None:
+    """Ablösung, mit der die Bestellung erledigt ist: die letzte ausdrücklich
+    abschließende, sonst die letzte, wenn die Summe aller Ablösungen den
+    Bruttobetrag (bis auf 1 Cent) deckt; None = noch offen."""
+    if not b.abloesungen:
+        return None
+    abschliessende = [a for a in b.abloesungen if a.abschliessend]
+    if abschliessende:
+        return abschliessende[-1]
+    summe = sum((a.betrag for a in b.abloesungen), NULL)
+    return b.abloesungen[-1] if summe >= brutto(b) - CENT else None
 
 
 def abloesung_aufheben(db: Session, abloesung: models.BestellAbloesung,
                        benutzer: models.Benutzer | None, grund: str | None = None) -> None:
-    """Ablösung entfernen; eine abgelöste Bestellung ohne abschließende Ablösung
-    wird wieder FREIGEGEBEN (wenn entschieden) bzw. OFFEN."""
+    """Ablösung entfernen und den Status neu bewerten: abgelöst bleibt die
+    Bestellung nur, solange eine ausdrücklich abschließende Ablösung übrig ist oder
+    die übrigen den Bruttobetrag decken – sonst wieder FREIGEGEBEN (wenn
+    entschieden) bzw. OFFEN."""
     b = abloesung.bestellung
     beschreibung = (f"{ABLOESE_ART_TEXT.get(abloesung.art, abloesung.art)} vom "
                     f"{_datum_de(abloesung.datum)} über {_eur(abloesung.betrag)} € aufgehoben")
@@ -819,17 +887,16 @@ def abloesung_aufheben(db: Session, abloesung: models.BestellAbloesung,
         b.abloesungen.remove(abloesung)
     db.delete(abloesung)
     db.flush()
-    vorher = b.status
+    vorher = nachher = b.status
     if b.status == _ABGELOEST:
-        abschliessende = [x for x in b.abloesungen if x.abschliessend]
-        if abschliessende:
-            letzte = abschliessende[-1]
-            b.abgeloest_am, b.abgeloest_durch = letzte.datum, letzte.art
+        abschluss = _abschluss(b)
+        if abschluss is not None:
+            b.abgeloest_am, b.abgeloest_durch = abschluss.datum, abschluss.art
         else:
-            b.status = _FREIGEGEBEN if b.entschieden_am is not None else _OFFEN
+            nachher = _FREIGEGEBEN if b.entschieden_am is not None else _OFFEN
             b.abgeloest_am = None
             b.abgeloest_durch = None
-    b.geaendert_am = models.utcnow()
+    _status_setzen(db, b, nachher)
     journal(db, b.mandant_id, b, benutzer, "ABLOESUNG_AUFGEHOBEN", status_vorher=vorher,
             status_nachher=b.status, begruendung=beschreibung)
 
@@ -861,6 +928,21 @@ def posten_entfernt(db: Session, posten_ids: list[int], benutzer=None) -> int:
     """Vor dem Löschen offener Posten aufrufen: zugehörige Ablösungen aufheben."""
     return _hook(db, models.BestellAbloesung.posten_id, posten_ids, benutzer,
                  "Rechnung (offener Posten) gelöscht")
+
+
+def posten_geaendert(db: Session, posten: models.OffenerPosten, benutzer=None) -> int:
+    """Nach dem Ändern eines offenen Postens aufrufen: trägt er die Zahlung nicht
+    mehr (storniert, keine Eingangsrechnung, Insolvenzforderung mit Zahlungssperre),
+    werden Ablösungen durch ihn aufgehoben – die Bestellung steht wieder im Plan."""
+    if posten.status == PostenStatus.STORNIERT.value:
+        grund = "Rechnung storniert"
+    elif posten.art != PostenArt.KREDITOR.value:
+        grund = "Posten ist keine Eingangsrechnung mehr"
+    elif posten.forderungsklasse == models.Forderungsklasse.INSOLVENZFORDERUNG.value:
+        grund = "Rechnung ist Insolvenzforderung (Zahlungssperre)"
+    else:
+        return 0
+    return _hook(db, models.BestellAbloesung.posten_id, [posten.id], benutzer, grund)
 
 
 # ---------------------------------------------------------------------------
@@ -932,11 +1014,13 @@ def _kandidaten_pool(db: Session, mandant: models.Mandant, ab: date | None) -> l
             models.OffenerPosten.mandant_id == mandant.id,
             models.OffenerPosten.art == PostenArt.KREDITOR.value,
             models.OffenerPosten.status == PostenStatus.OFFEN.value)):
-        if p.id in belegt_p:
+        # Insolvenzforderungen plant die Engine nie (Zahlungssperre)
+        if p.id in belegt_p or p.forderungsklasse == models.Forderungsklasse.INSOLVENZFORDERUNG.value:
             continue
         k = konto_by_id.get(p.konto_id) if p.konto_id else None
         pool.append({
             "typ": "POSTEN", "id": p.id, "datum": p.zahlung_geplant_am or p.faellig_am,
+            "beleg_datum": p.rechnungsdatum or p.faellig_am,
             "betrag": p.betrag_brutto,
             "text": " · ".join(x for x in (p.partner, p.belegnr and f"Beleg {p.belegnr}") if x),
             "konto": f"{k.nummer} {k.bezeichnung}" if k else None,
@@ -1006,7 +1090,8 @@ def _bewertete(b: models.Bestellung, pool: list[dict]) -> list[tuple[int, list[s
     rest = bestellung_rest(b)
     ergebnis = []
     for k in pool:
-        if k["typ"] != "POSTEN" and k["datum"] < ab:
+        # Zahlungen ab Bestelldatum − 7; Rechnungen nach Rechnungs- bzw. Fälligkeitsdatum
+        if k.get("beleg_datum", k["datum"]) < ab:
             continue
         score, gruende = _bewerte(b, rest, k)
         if score > 0:
@@ -1067,7 +1152,7 @@ def plan_bestellungen(db: Session, mandant: models.Mandant, *, konto_id: int | N
                       von: date, bis: date, heute: date | None = None) -> list[dict]:
     """Bestellungen, die im Plan (Mandantenstandard) im Zeitraum stehen – offene
     mit ihrem Rest am Zahldatum bzw. überfällige am Rolltag, abgelöste (außer
-    durch Rechnung) am Tag min(Zahldatum, Ablösung). konto_id None = Bestellungen
+    durch Rechnung) wie bezahlte Posten am Zahldatum. konto_id None = Bestellungen
     ohne Konto (Planzeile „Bestellungen (ohne Konto)“)."""
     heute = heute or date.today()
     status = bestell_plan_status(mandant, None) or set()
@@ -1086,7 +1171,7 @@ def plan_bestellungen(db: Session, mandant: models.Mandant, *, konto_id: int | N
         if b.status == _ABGELOEST:
             if b.abgeloest_durch == AbloeseArt.RECHNUNG.value or b.abgeloest_am is None:
                 continue
-            tag, betrag = min(b.zahldatum, b.abgeloest_am), brutto(b)
+            tag, betrag = b.zahldatum, brutto(b)
         else:
             betrag = bestellung_rest(b)
             if betrag <= 0:
@@ -1159,16 +1244,20 @@ def _basis_waehlen(db: Session, mandant: models.Mandant, basis, w_von: date, w_b
                   "Abweichung umfasst nur die laufende Woche.")
 
 
-def _extern_explizit(db: Session, mandant: models.Mandant, heute: date,
+def _extern_explizit(db: Session, mandant: models.Mandant, ist_bis: date,
                      ohne_bestellung_id: int | None):
-    """Explizite Planbeträge (ohne Budget) eines Tages außerhalb des Fensters."""
+    """Noch offene explizite Planbeträge (ohne Budget) eines Tages außerhalb des
+    Fensters – Sicht wie „gebunden“: Bezahltes, Abgelöstes und Erledigtes ist nicht
+    mehr verschiebbar; an vergangenen Tagen steht nichts mehr (Überfälliges liegt auf
+    dem Rolltag, von dort bewegt die Verschiebung den gerollten Anteil)."""
     cache: dict[date, dict] = {}
 
     def verfuegbar(key: Key, tag: date) -> Decimal:
         w = wochen_start(tag)
         if w not in cache:
-            cache[w] = plan_fluesse(db, mandant, w, w + timedelta(days=6), heute=heute,
-                                    mit_budget=False, bestellungen="FREIGEGEBEN",
+            cache[w] = plan_fluesse(db, mandant, w, w + timedelta(days=6), heute=ist_bis,
+                                    nur_offen=True, mit_budget=False,
+                                    bestellungen="FREIGEGEBEN",
                                     ohne_bestellung_id=ohne_bestellung_id)
         return cache[w].get(key, {}).get(tag, NULL)
 
@@ -1177,12 +1266,15 @@ def _extern_explizit(db: Session, mandant: models.Mandant, heute: date,
 
 def _stand_gestern(
     db: Session, mandant: models.Mandant, heute: date, ende: date, roll_tag: date,
-    ohne_bestellung_id: int | None, fluesse, gerollt: dict,
+    ohne_bestellung_id: int | None, fluesse, gerollt: dict, mehrausgabe: dict[Key, Decimal],
 ) -> list[tuple[Key, date, Decimal]]:
     """Ist zählt nur bis gestern: Zahlungen und Ablösungen ab heute sind darin noch
     nicht enthalten, die zugehörigen Posten/Bestellungen gelten für die Freigabe
-    weiter als offen (Stand Ende gestern). Ergänzt `fluesse`/`gerollt` und liefert
-    die nicht überfälligen Bestellanteile (key, Zahldatum, Betrag)."""
+    weiter als offen (Stand Ende gestern). Erledigte Zahlungstermine (ohne
+    Erledigungsdatum) bleiben offen, soweit das Ist seit der Basis ihre Zahlung nicht
+    als Mehrausgabe des Terminkontos zeigt (`mehrausgabe`: Soll − Ist je Key).
+    Ergänzt `fluesse`/`gerollt` und liefert die nicht überfälligen Bestellanteile
+    (key, Zahldatum, Betrag)."""
     bestell_anteile: list[tuple[Key, date, Decimal]] = []
 
     def eintragen(key: Key, zahltag: date, betrag: Decimal) -> date | None:
@@ -1254,17 +1346,64 @@ def _stand_gestern(
         d = eintragen(key, b.zahldatum, betrag)
         if d is not None and d == b.zahldatum:
             bestell_anteile.append((key, b.zahldatum, betrag))
+
+    # erledigte Zahlungstermine ab heute (nur mit Konto – sonst fehlt der Ist-Bezug)
+    igeld = igeld_fenster(mandant)
+    gedeckt = {k: max(v, NULL) for k, v in mehrausgabe.items()}
+    for t in db.scalars(
+        select(models.Zahlungstermin).where(
+            models.Zahlungstermin.mandant_id == mandant.id,
+            models.Zahlungstermin.status == models.TerminStatus.ERLEDIGT.value,
+            models.Zahlungstermin.konto_id.is_not(None),
+            models.Zahlungstermin.datum >= heute, models.Zahlungstermin.datum <= ende)
+        .order_by(models.Zahlungstermin.datum, models.Zahlungstermin.id)
+    ):
+        betrag = t.betrag - (termin_entlastung(t, igeld) if igeld else NULL)
+        im_ist = min(max(betrag, NULL), gedeckt.get(t.konto_id, NULL))
+        gedeckt[t.konto_id] = gedeckt.get(t.konto_id, NULL) - im_ist
+        eintragen(t.konto_id, t.datum, betrag - im_ist)
     return bestell_anteile
+
+
+def _abgeloest_vor_basis(db: Session, mandant: models.Mandant, s0: date, ende: date,
+                         ohne_bestellung_id: int | None,
+                         nur_vor_basis_abgeloest: bool) -> list[tuple[Key, date, Decimal]]:
+    """Abgelöste Bestellungen stehen im Soll mit dem vollen Betrag am Zahldatum (vor s0:
+    erster Bankarbeitstag ab s0). Ihre Zahlungen vor s0 enthält das Ist der Prüfung
+    nicht – ohne Nachtrag gäbe die früh bezahlte Bestellung ihren Planbetrag wieder
+    frei. Ein Planstand führt Bestellungen, die zum Stichtag noch nicht abgelöst
+    waren, nur mit ihrem Rest (`nur_vor_basis_abgeloest`). Liefert (key, Plantag, Betrag)."""
+    ergebnis: list[tuple[Key, date, Decimal]] = []
+    for b in db.scalars(
+        select(models.Bestellung)
+        .options(selectinload(models.Bestellung.abloesungen))
+        .where(models.Bestellung.mandant_id == mandant.id, models.Bestellung.status == _ABGELOEST,
+               models.Bestellung.zahldatum <= ende)
+    ):
+        if (b.id == ohne_bestellung_id or b.abgeloest_am is None
+                or b.abgeloest_durch == AbloeseArt.RECHNUNG.value
+                or (b.abgeloest_am < s0 and b.zahldatum < s0)
+                or (nur_vor_basis_abgeloest and b.abgeloest_am >= s0)):
+            continue
+        betrag = sum((a.betrag for a in b.abloesungen if a.datum < s0), NULL)
+        tag = b.zahldatum if b.zahldatum >= s0 else naechster_bankarbeitstag(s0, mandant.bundesland)
+        if betrag > 0 and tag <= ende:
+            ergebnis.append((b.konto_id if b.konto_id is not None else BESTELL_KEY, tag, betrag))
+    return ergebnis
 
 
 def _kennzahlen(
     db: Session, mandant: models.Mandant, *, konto_id: int | None, betrag_brutto: Decimal,
     jahr: int, kw: int, basis, ohne_bestellung_id: int | None, heute: date | None,
-    im_plan: bool | None,
+    im_plan: bool | None, bestellung_brutto: Decimal | None = None,
+    bereits_gezahlt: Decimal | None = None,
 ) -> dict:
     heute = heute or date.today()
     bl = mandant.bundesland
     betrag_brutto = (_dezimal(betrag_brutto, "betrag_brutto") or NULL).quantize(CENT)
+    bereits_gezahlt = Decimal(bereits_gezahlt or 0).quantize(CENT)
+    bestellung_brutto = (betrag_brutto if bestellung_brutto is None
+                         else Decimal(bestellung_brutto).quantize(CENT))
     # 1) Zeitraum
     try:
         w_von = date.fromisocalendar(int(jahr), int(kw), 1)
@@ -1318,54 +1457,29 @@ def _kennzahlen(
     snap, basis_hinweis = _basis_waehlen(db, mandant, basis, w_von, w_bis, heute)
     if basis_hinweis:
         hinweise.append(basis_hinweis)
+    # LIVE: Vergangenheit ungerollt wie ein Planstand zum Wochenbeginn, damit sich
+    # Überfälliges in C1 (Minderausgabe) und C3 aufhebt
+    soll_gerollt: dict[Key, Decimal] = {}
     if snap is not None:
         soll = snapshot_fluesse(snap)
         s0 = snap.stichtag
     else:
         s0 = wochen_start(heute)
-        gerollt_soll: dict[Key, Decimal] = {}
-        soll = plan_fluesse(db, mandant, s0, w_bis, heute=heute, bestellungen="FREIGEGEBEN",
-                            ohne_bestellung_id=ohne_bestellung_id, gerollt=gerollt_soll)
+        soll = plan_fluesse(db, mandant, s0, w_bis, heute=s0, bestellungen="FREIGEGEBEN",
+                            ohne_bestellung_id=ohne_bestellung_id, gerollt=soll_gerollt)
         if verschiebungen:
-            verschiebungen_anwenden(soll, verschiebungen, s0, w_bis, heute,
-                                    naechster_bankarbeitstag(max(s0, heute), bl), gerollt_soll,
-                                    _extern_plan(db, mandant, heute))
-
-    # 5) gebunden: explizite offene Zahlungen ab heute (ohne Budget)
-    e_ende = max(w_bis, roll_tag)
-    g: dict[Key, Decimal] = {}
-    e_fluesse = plan_fluesse(db, mandant, heute, e_ende, heute=ist_bis, nur_offen=True,
-                             mit_budget=False, gerollt=g, bestellungen="FREIGEGEBEN",
-                             ohne_bestellung_id=ohne_bestellung_id)
-    heute_anteile = _stand_gestern(db, mandant, heute, e_ende, roll_tag, ohne_bestellung_id,
-                                   e_fluesse, g)
-    if verschiebungen:
-        bewegungen = verschiebungen_anwenden(
-            e_fluesse, verschiebungen, heute, e_ende, ist_bis, roll_tag, g,
-            _extern_explizit(db, mandant, heute, ohne_bestellung_id))
-        for key, _, _, betrag, art, _ in bewegungen:
-            if art == "rollend":
-                g[key] = g.get(key, NULL) - betrag
-    # Überfälliges (auf den Rolltag gewandert) zählt in C, nicht in B
-    for key, betrag in g.items():
-        if betrag:
-            e_fluesse[key][roll_tag] -= betrag
-
-    # Aufschlüsselung: freigegebene Bestellungen mit Zahldatum in [ab, w_bis]
-    bestell_anteile: list[tuple[Key, Decimal]] = [
-        (key, betrag) for key, tag, betrag in heute_anteile if ab <= tag <= w_bis]
-    for b in db.scalars(
-        select(models.Bestellung)
-        .options(selectinload(models.Bestellung.abloesungen))
-        .where(models.Bestellung.mandant_id == mandant.id,
-               models.Bestellung.status == _FREIGEGEBEN,
-               models.Bestellung.zahldatum >= ab, models.Bestellung.zahldatum <= w_bis)
-    ):
-        if b.id == ohne_bestellung_id:
-            continue
-        rest = bestellung_rest(b)
-        if rest > 0:
-            bestell_anteile.append((b.konto_id if b.konto_id is not None else BESTELL_KEY, rest))
+            for key, _, _, betrag, art, _ in verschiebungen_anwenden(
+                soll, verschiebungen, s0, w_bis, s0, naechster_bankarbeitstag(s0, bl),
+                dict(soll_gerollt),
+                _extern_plan(db, mandant, s0, bestellungen="FREIGEGEBEN",
+                             ohne_bestellung_id=ohne_bestellung_id),
+            ):
+                if art == "rollend":
+                    soll_gerollt[key] = soll_gerollt.get(key, NULL) - betrag
+    # vor s0 Überfälliges steht im LIVE-Soll am ersten Bankarbeitstag ab s0; ist der
+    # noch nicht vorbei und liegt außerhalb der KW, fehlt C3 der Gegenposten
+    s0_roll = naechster_bankarbeitstag(s0, bl)
+    c3_ohne_gegenposten = snap is None and s0_roll > ist_bis and not (ab <= s0_roll <= w_bis)
 
     # 6) Ist bis gestern (Schlüssel wie im Soll/Ist-Vergleich)
     ist: dict[Key, dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
@@ -1393,6 +1507,67 @@ def _kennzahlen(
                         if v.konto_id is not None],
     )
 
+    # 5) gebunden: explizite offene Zahlungen ab heute (ohne Budget)
+    e_ende = max(w_bis, roll_tag)
+    g: dict[Key, Decimal] = {}
+    e_fluesse = plan_fluesse(db, mandant, heute, e_ende, heute=ist_bis, nur_offen=True,
+                             mit_budget=False, gerollt=g, bestellungen="FREIGEGEBEN",
+                             ohne_bestellung_id=ohne_bestellung_id)
+    # vor s0 gezahlte abgelöste Bestellungen am Plantag nachtragen (Ist bzw. gebunden)
+    vor_basis: list[tuple[Key, date, Decimal]] = []
+    for key, tag, betrag in _abgeloest_vor_basis(db, mandant, s0, e_ende, ohne_bestellung_id,
+                                                 nur_vor_basis_abgeloest=snap is not None):
+        if tag <= ist_bis:
+            ist[key][tag] -= betrag
+        elif tag >= heute:
+            e_fluesse[key][tag] -= betrag
+            vor_basis.append((key, tag, betrag))
+    mehrausgabe: dict[Key, Decimal] = defaultdict(Decimal)   # Soll − Ist seit s0
+    for quelle, vz in ((soll, 1), (ist, -1)):
+        for key, tageswerte in quelle.items():
+            for d, v in tageswerte.items():
+                if s0 <= d <= ist_bis:
+                    mehrausgabe[key] += vz * v
+    heute_anteile = _stand_gestern(db, mandant, heute, e_ende, roll_tag, ohne_bestellung_id,
+                                   e_fluesse, g, mehrausgabe)
+    bewegungen: list[tuple] = []
+    if verschiebungen:
+        bewegungen = verschiebungen_anwenden(
+            e_fluesse, verschiebungen, heute, e_ende, ist_bis, roll_tag, g,
+            _extern_explizit(db, mandant, ist_bis, ohne_bestellung_id))
+        for key, _, _, betrag, art, _ in bewegungen:
+            if art == "rollend":
+                g[key] = g.get(key, NULL) - betrag
+    # Überfälliges (auf den Rolltag gewandert) zählt in C, nicht in B
+    for key, betrag in g.items():
+        if betrag:
+            e_fluesse[key][roll_tag] -= betrag
+
+    # Aufschlüsselung: nicht überfällige Bestellanteile je Konto/Tag; Verschiebungen
+    # nehmen sie mit, begrenzt auf den dort noch gebundenen Betrag
+    anteile: dict[tuple[Key, date], Decimal] = defaultdict(Decimal)
+    for key, tag, betrag in heute_anteile + vor_basis:
+        anteile[(key, tag)] += betrag
+    for b in db.scalars(
+        select(models.Bestellung)
+        .options(selectinload(models.Bestellung.abloesungen))
+        .where(models.Bestellung.mandant_id == mandant.id,
+               models.Bestellung.status == _FREIGEGEBEN, models.Bestellung.zahldatum >= heute)
+    ):
+        if b.id == ohne_bestellung_id:
+            continue
+        rest = bestellung_rest(b)
+        if rest > 0:
+            anteile[(b.konto_id if b.konto_id is not None else BESTELL_KEY, b.zahldatum)] += rest
+    for key, von_tag, nach_tag, betrag, art, _ in bewegungen:
+        if art == "fest" and betrag < 0 and anteile.get((key, von_tag), NULL) > 0:
+            mit = min(anteile[(key, von_tag)], -betrag)
+            anteile[(key, von_tag)] -= mit
+            anteile[(key, nach_tag)] += mit
+    bestell_anteile: list[tuple[Key, Decimal]] = [
+        (key, min(betrag, max(NULL, -e_fluesse.get(key, {}).get(tag, NULL))))
+        for (key, tag), betrag in anteile.items() if betrag > 0 and ab <= tag <= w_bis]
+
     def summe(fluesse, pruefe, von: date, bis: date) -> Decimal:
         s = NULL
         for key, tageswerte in fluesse.items():
@@ -1415,6 +1590,8 @@ def _kennzahlen(
             if s0 <= ist_bis else NULL
         c2 = sum((-v["betrag"] for v in vortraege if pruefe(v["konto_id"])), NULL)
         c3 = sum((-betrag for key, betrag in g.items() if pruefe(key)), NULL)
+        if c3_ohne_gegenposten:
+            c3 -= sum((-betrag for key, betrag in soll_gerollt.items() if pruefe(key)), NULL)
         abweichung = c1 + c2 + c3
         verfuegbar = soll_rest - gebunden - abweichung
         nach = verfuegbar - betrag_brutto
@@ -1485,7 +1662,9 @@ def _kennzahlen(
             "s0": s0.isoformat(),
             "hinweis": basis_hinweis,
         },
-        "betrag_brutto": _f(betrag_brutto),
+        "betrag_brutto": _f(betrag_brutto),           # Prüfbetrag (offener Rest)
+        "bestellung_brutto": _f(bestellung_brutto),
+        "bereits_gezahlt": _f(bereits_gezahlt),
         "ebenen": ebenen,
         "massgeblich": massgeblich,
         "ampel": ampel,
@@ -1521,6 +1700,27 @@ def freigabe_kennzahlen(
                        im_plan=None)
 
 
+def pruefbetrag(b: models.Bestellung, heute: date) -> tuple[Decimal, Decimal]:
+    """(Prüfbetrag, bereits gezahlt) der Freigabe: Brutto abzüglich der Teilzahlungen
+    vor heute – die stehen schon im Ist bis gestern (bzw. vor der Basis); heutige
+    zählen erst morgen im Ist und bleiben im Prüfbetrag."""
+    gezahlt = sum((a.betrag for a in b.abloesungen if not a.abschliessend and a.datum < heute),
+                  NULL)
+    return max(brutto(b) - gezahlt, NULL), gezahlt
+
+
+def bestellung_kennzahlen(db: Session, mandant: models.Mandant, b: models.Bestellung, *,
+                          jahr: int, kw: int, basis: str | int | None = None,
+                          heute: date | None = None) -> dict:
+    """Freigabe-Kennzahlen einer Bestellung: geprüft wird der offene Rest
+    (`betrag_brutto`), dazu `bestellung_brutto` und `bereits_gezahlt`."""
+    heute = heute or date.today()
+    pruef, gezahlt = pruefbetrag(b, heute)
+    return _kennzahlen(db, mandant, konto_id=b.konto_id, betrag_brutto=pruef, jahr=jahr, kw=kw,
+                       basis=basis, ohne_bestellung_id=b.id, heute=heute, im_plan=None,
+                       bestellung_brutto=brutto(b), bereits_gezahlt=gezahlt)
+
+
 def _kw_bestellungen(db: Session, mandant: models.Mandant, status: str, w_von: date,
                      w_bis: date, heute: date) -> list[models.Bestellung]:
     q = (
@@ -1546,7 +1746,7 @@ def freigabe_uebersicht(db: Session, mandant: models.Mandant, *, jahr: int, kw: 
     w_bis = w_von + timedelta(days=6)
     offen = _kw_bestellungen(db, mandant, _OFFEN, w_von, w_bis, heute)
     freigegeben = _kw_bestellungen(db, mandant, _FREIGEGEBEN, w_von, w_bis, heute)
-    summe_offen = sum((brutto(b) for b in offen), NULL)
+    summe_offen = sum((pruefbetrag(b, heute)[0] for b in offen), NULL)   # offener Rest
     k = _kennzahlen(db, mandant, konto_id=None, betrag_brutto=summe_offen, jahr=jahr, kw=kw,
                     basis=basis, ohne_bestellung_id=None, heute=heute,
                     im_plan=bool(offen) and (bestell_plan_status(mandant, None) or set()) >= {_OFFEN})

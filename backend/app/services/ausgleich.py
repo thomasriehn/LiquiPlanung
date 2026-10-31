@@ -204,9 +204,14 @@ def vorschlaege(db: Session, mandant: models.Mandant) -> list[dict]:
             )
         )
     )
+    # schon abgeglichene und einer Bestellung zugeordnete Umsätze (Ablösung) auslassen
     zugeordnete = set(
         db.scalars(select(models.AusgleichZuordnung.transaktion_id).where(
             models.AusgleichZuordnung.mandant_id == mandant.id))
+    ) | set(
+        db.scalars(select(models.BestellAbloesung.transaktion_id).where(
+            models.BestellAbloesung.mandant_id == mandant.id,
+            models.BestellAbloesung.transaktion_id.is_not(None)))
     )
     umsaetze = [
         t
@@ -303,6 +308,10 @@ def gleiche_aus(
             raise ValueError("Umsatz nicht gefunden")
         if t.zuordnungen:
             raise ValueError(f"Bankumsatz {transaktion_id} ist bereits abgeglichen")
+        if db.scalar(select(models.BestellAbloesung.id).where(
+                models.BestellAbloesung.transaktion_id == t.id).limit(1)) is not None:
+            raise ValueError(f"Bankumsatz {transaktion_id} ist bereits einer Bestellung "
+                             "zugeordnet – dort Ablösung aufheben")
         if not posten_ids:
             raise ValueError("Keine Posten angegeben")
         posten: list[models.OffenerPosten] = []
