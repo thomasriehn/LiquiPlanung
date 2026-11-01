@@ -28,9 +28,12 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
     orange Eckmarke (Tooltip mit Beträgen); jede Verschiebung ist im Dialog mit
     Kommentar und Benutzer aufgeführt und per ✕ zurücknehmbar. Verschiebungen
     sind auf den tatsächlich geplanten Betrag begrenzt (fällt die Planbasis weg,
-    entsteht kein Phantombetrag); verschobene Dauerschuld-Raten werden für den
-    Vortrag erst am Zieltag fällig, ein verschobener Vortrag gilt bis zu seinem
-    Zieltag. Eingefrorene Planstände übernehmen die Verschiebungen.
+    entsteht kein Phantombetrag); spätere Zahlungen ändern nicht, welche Posten,
+    Raten oder Budgetanteile sie bewegen, und schon Bezahltes belastet die
+    Liquidität am Zieltag nicht erneut. Verschobene Dauerschuld-Raten sind für den
+    Vortrag mit ihrem offenen Anteil am Zieltag fällig, ein verschobener Vortrag gilt
+    bis zu seinem Zieltag. Eingefrorene Planstände und die Bestellfreigabe
+    übernehmen die Verschiebungen.
   - **Ist-Buchungen** einer Zelle bis heute mit Text, Beleg, Zahlungsmittel und
     Import-Herkunft; die Kontoverknüpfung lässt sich per ✕ lösen und über dieselbe
     durchsuchbare, nach BWA-Gruppen gegliederte Kontoauswahl wie beim PDF-Import

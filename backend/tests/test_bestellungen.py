@@ -287,8 +287,11 @@ def test_projektionsfix_vergangene_dauerrate_verbraucht_budget(db):
 
 
 def test_projektion_gerollter_offener_posten_unveraendert_am_freitag(db):
-    """Offene, überfällige Posten verbrauchen das Budget der Woche, in die die
-    Projektion sie rollt (heute = Freitag → Montag) – wie vor dem §5.4-Fix."""
+    """Offene, überfällige Posten verbrauchen das Restbudget in beiden Sichten am Rolltag der
+    vollen Sicht (heute = Freitag: Freitag, KW 32) – nicht das Budget der Woche, in die die
+    Projektion sie hinter heute rollt (Montag, KW 33); sonst wäre die Liquidität freitags um
+    das Budget höher als donnerstags (Iteration 4, P3). Montag ist Ist-Tag: der Posten rollt
+    in der Projektion auf Dienstag und verbraucht das Budget seiner Woche."""
     m = _mandant(db)
     _bank(db, m)
     _budget_woche(db, m, "4920", 33, "10000")
@@ -297,7 +300,9 @@ def test_projektion_gerollter_offener_posten_unveraendert_am_freitag(db):
                                 konto_id=_konto(db, m, "4920").id))
     freitag = _plan(db, m, wochen=2, heute=date(2026, 8, 7))
     montag = _plan(db, m, wochen=2, heute=date(2026, 8, 10))
-    assert freitag["bestaende"]["liquiditaet"]["2026-08-16"] == 88100.0     # max(11.900, 3.000)
+    donnerstag = _plan(db, m, wochen=2, heute=date(2026, 8, 6))
+    assert freitag["bestaende"]["liquiditaet"]["2026-08-16"] == 85100.0     # 11.900 + 3.000
+    assert donnerstag["bestaende"]["liquiditaet"]["2026-08-16"] == 85100.0
     assert montag["bestaende"]["liquiditaet"]["2026-08-16"] == 89880.0      # Montag ist Ist-Tag
 
 
