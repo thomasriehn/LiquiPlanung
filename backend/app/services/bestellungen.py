@@ -1815,40 +1815,95 @@ def _kennzahlen(
     # des damaligen Tags sagt darüber nichts (eine frühe Zahlung eines anderen Postens am selben
     # Tag verdeckte die Minderausgabe sonst). Maßstab ist allein, wie viel der Planstand am
     # damaligen Tag mehr führt als der heutige Plan mit dem Datenstand des Planstands (ohne
-    # seitdem Erfasstes) – das seitdem von dort Verschobene
+    # seitdem Erfasstes) – das seitdem von dort Verschobene. Reicht das am damaligen Tag nicht
+    # (der Planstand enthielt eine inzwischen gelöschte Verschiebung und führte den Anteil an
+    # deren Zieltag), gilt derselbe Maßstab für die übrigen Tage der Zeile in [s0, gestern]:
+    # dort führt der Planstand mehr als der heutige Plan, und es ist seitdem von dort weg.
+    # Ebenso ein nach dem Planstand von einem vergangenen Tag auf einen Tag ab heute
+    # verschobenes Budget: der Planstand plant es am Herkunftstag (Minderausgabe in C1), heute
+    # ist es am Zieltag geplant – es zählt in C3 und im Soll seiner Zielwoche, in B nicht
+    # (Budget bindet nicht); so rechnet die Basis wie ein frischer Planstand. Maßstab ist hier
+    # allein der Planstand am Herkunftstag (abzüglich des dort schon Ausgeglichenen) – nicht der
+    # heutige Plan, dessen Restbudget-Verteilung eine Zahlung von heute verschiebt (der Stand
+    # gestern soll sich durch sie nicht ändern); Zurückverschobenes ist kein Fragment mehr.
     verschoben_c3: dict[Key, Decimal] = defaultdict(Decimal)
+    budget_ziel: dict[tuple[Key, date], Decimal] = defaultdict(Decimal)
     if snap is not None and s0 <= ist_bis:
         # Anlagezeitpunkt des Planstands; liegt er nach dem Datenstand (unzuverlässig), gilt
         # vorsichtig der Beginn seines Stichtags
         snap_zeit = _zeitpunkt(snap.erstellt_am)
         if not _zeitpunkt_verlaesslich(snap_zeit, heute):
             snap_zeit = datetime.combine(snap.stichtag, datetime.min.time()).astimezone()
-        frei_tag: dict[tuple[Key, date], Decimal] = {}
-        aktuell: dict = {}
-        for key, damals, ziel, betrag in zuordnung.nach_stand_verschoben(snap_zeit, s0, ist_bis,
-                                                                         heute):
-            if not aktuell:
-                # der heutige Plan (wie die LIVE-Basis, Datenstand des Planstands) zum Vergleich:
-                # führt der Planstand am damaligen Tag mehr als er – ohne das seitdem dorthin
-                # Verschobene –, ist der Unterschied die seitdem von dort verschobene Zahlung
-                aktuell = {"soll": plan_fluesse(
-                    db, mandant, s0, wochen_start(ist_bis) + timedelta(days=6), heute=s0,
-                    bestellungen="FREIGEGEBEN", ohne_bestellung_id=ohne_bestellung_id,
-                    zuordnung=zuordnung, ueberschuss_ab=heute, angelegt_bis=snap_zeit,
-                    daten_bis=heute),
-                    "zugezogen": zuordnung.zugezogen_nach_stand(snap_zeit, s0, ist_bis)}
-            if (key, damals) not in frei_tag:
-                stand = soll.get(key, {}).get(damals, NULL)
-                frei_tag[(key, damals)] = max(
-                    NULL, aktuell["soll"].get(key, {}).get(damals, NULL)
-                    + aktuell["zugezogen"].get((key, damals), NULL) - stand)
-            anteil = min(betrag, frei_tag[(key, damals)])
-            if anteil <= 0:
-                continue
-            frei_tag[(key, damals)] -= anteil
-            verschoben_c3[key] += anteil
-            if ziel <= e_ende:
-                e_fluesse[key][ziel] += anteil
+        bestandteile = zuordnung.nach_stand_verschoben(snap_zeit, s0, ist_bis, heute)
+        budgets = zuordnung.budget_nach_stand_verschoben(snap_zeit, s0, ist_bis, heute)
+        if bestandteile or budgets:
+            # der heutige Plan (wie die LIVE-Basis, Datenstand des Planstands) zum Vergleich:
+            # führt der Planstand am damaligen Tag mehr als er – ohne das seitdem dorthin
+            # Verschobene –, ist der Unterschied die seitdem von dort verschobene Zahlung
+            aktuell = plan_fluesse(
+                db, mandant, s0, wochen_start(ist_bis) + timedelta(days=6), heute=s0,
+                bestellungen="FREIGEGEBEN", ohne_bestellung_id=ohne_bestellung_id,
+                zuordnung=zuordnung, ueberschuss_ab=heute, angelegt_bis=snap_zeit,
+                daten_bis=heute)
+            zugezogen = zuordnung.zugezogen_nach_stand(snap_zeit, s0, ist_bis)
+            frei_tag: dict[tuple[Key, date], Decimal] = {}
+
+            genommen: dict[tuple[Key, date], Decimal] = defaultdict(Decimal)   # je Tag ausgeglichen
+
+            def mehr(key: Key, tag: date) -> Decimal:
+                """Was der Planstand an `tag` mehr führt als der heutige Plan (fortgeschrieben)."""
+                if (key, tag) not in frei_tag:
+                    frei_tag[(key, tag)] = max(
+                        NULL, aktuell.get(key, {}).get(tag, NULL)
+                        + zugezogen.get((key, tag), NULL) - soll.get(key, {}).get(tag, NULL))
+                return frei_tag[(key, tag)]
+
+            def frei(key: Key, tag: date, betrag: Decimal) -> Decimal:
+                """Von `betrag` so viel, wie der Planstand an `tag` mehr führt als der heutige
+                Plan."""
+                anteil = max(NULL, min(betrag, mehr(key, tag)))
+                frei_tag[(key, tag)] -= anteil
+                genommen[(key, tag)] += anteil
+                return anteil
+
+            def frei_stand(key: Key, tag: date, betrag: Decimal) -> Decimal:
+                """Von `betrag` so viel, wie der Planstand an `tag` führt und noch nicht
+                ausgeglichen ist (Budget: der Herkunftstag ist bekannt)."""
+                anteil = max(NULL, min(betrag, -soll.get(key, {}).get(tag, NULL)
+                                       - genommen[(key, tag)]))
+                genommen[(key, tag)] += anteil
+                frei_tag[(key, tag)] = max(NULL, mehr(key, tag) - anteil)
+                return anteil
+
+            def ausgleichen(key: Key, ziel: date, anteil: Decimal, budget: bool) -> None:
+                verschoben_c3[key] += anteil
+                if budget:
+                    budget_ziel[(key, ziel)] += anteil
+                elif ziel <= e_ende:
+                    e_fluesse[key][ziel] += anteil
+
+            offen: list[tuple[Key, date, Decimal]] = []
+            for key, damals, ziel, betrag in bestandteile:
+                anteil = frei(key, damals, betrag)
+                if anteil > 0:
+                    ausgleichen(key, ziel, anteil, False)
+                if betrag - anteil > 0:
+                    offen.append((key, ziel, betrag - anteil))
+            for key, damals, ziel, betrag in budgets:
+                anteil = frei_stand(key, damals, betrag)
+                if anteil > 0:
+                    ausgleichen(key, ziel, anteil, True)
+            # Rest eines Bestandteils je Zeile aus den übrigen Tagen in [s0, gestern]
+            # (chronologisch); Budget nur tagesgenau – sein Herkunftstag ist bekannt, ein Rest dort
+            # ist Umverteilung des Restbudgets, keine fehlende Zahlung
+            for key, ziel, rest in offen:
+                tag = s0
+                while rest > 0 and tag <= ist_bis:
+                    anteil = frei(key, tag, rest)
+                    if anteil > 0:
+                        ausgleichen(key, ziel, anteil, False)
+                        rest -= anteil
+                    tag += timedelta(days=1)
     # Überfälliges (auf den Rolltag gewandert) zählt in C, nicht in B
     for key, betrag in g.items():
         if betrag:
@@ -1901,8 +1956,11 @@ def _kennzahlen(
     ebenen = []
     werte: dict[str, dict[str, Decimal]] = {}
     for name, bezeichnung, pruefe in ebenen_def:
-        soll_kw = -summe(soll, pruefe, w_von, w_bis)
-        soll_rest = -summe(soll, pruefe, ab, w_bis)
+        # dazu das nach dem Planstand in die KW verschobene Budget (Ausgleich, s. o.)
+        soll_kw = -summe(soll, pruefe, w_von, w_bis) + sum(
+            (b for (k, t), b in budget_ziel.items() if pruefe(k) and w_von <= t <= w_bis), NULL)
+        soll_rest = -summe(soll, pruefe, ab, w_bis) + sum(
+            (b for (k, t), b in budget_ziel.items() if pruefe(k) and ab <= t <= w_bis), NULL)
         gebunden = -summe(e_fluesse, pruefe, ab, w_bis)
         gebunden_best = sum((betrag for key, betrag in bestell_anteile if pruefe(key)), NULL)
         c1 = summe(soll, pruefe, s0, ist_bis) - summe(ist, pruefe, s0, ist_bis) \

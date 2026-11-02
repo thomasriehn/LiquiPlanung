@@ -848,7 +848,11 @@ def _dauer_termine(d: models.Dauerbuchung, start: date, ende: date) -> list[date
 #      Tranchen; bei einer Verschiebung vom Rolltag ihres Anlagetags (angelegt am Wochenende
 #      oder Feiertag, Ursprung = nächster Bankarbeitstag) auch die damals überfälligen, nach t
 #      noch offenen Posten und Bestellungen, die auf diesen Tag gerollt waren (am Anlagetag
-#      schon Bezahltes stand bezahlt an seinem Plantag, nicht gerollt in der Zelle).
+#      schon Bezahltes stand bezahlt an seinem Plantag, nicht gerollt in der Zelle – außer der
+#      Plantag liegt vor dem Fenster des Anlagetags und der Ursprung ist dessen erster
+#      Bankarbeitstag, der Wochenbeginn also ein Feiertag: dort zeigt die volle Sicht bezahlte
+#      Posten mit ihren Tranchen ab Fensterbeginn und ab Fensterbeginn abgelöste Bestellungen,
+#      `erster`; bis zum Anlagetag Gezahltes zählt dann als beim Anlegen bezahlt, Punkt 2).
 #      Ein Bestandteil, dessen beim Anlegen sichtbarer offener Betrag der Verschiebung
 #      entspricht, zuerst (Teilbeträge mit gleicher Zeile, gleichem Ursprung und Ziel zählen
 #      mit ihrem Gesamtbetrag und setzen beim schon gewählten Bestandteil fort), sonst
@@ -915,8 +919,15 @@ def _dauer_termine(d: models.Dauerbuchung, start: date, ende: date) -> list[date
 # der Anteil ist beim Stand gestern offen, seine Zahlung fehlt dem Ist gewiss – begrenzt nur
 # durch das, was der Planstand am damaligen Tag mehr führt als der heutige Plan mit dem
 # Datenstand des Planstands, ohne seitdem dorthin Verschobenes (`zugezogen_nach_stand`);
-# erst nach dem Planstand Angelegtes zählt nicht; eine Verschiebung mit unzuverlässigem
-# Anlagezeitpunkt zählt mit ihrem angenommenen Anlagetag mittags, wie in der Zuordnung).
+# reicht das am damaligen Tag nicht – der Planstand enthielt eine inzwischen gelöschte
+# Verschiebung und führte den Anteil an deren Ziel –, gilt derselbe Maßstab für die übrigen
+# Tage der Zeile zwischen Stichtag und gestern; erst nach dem Planstand Angelegtes zählt
+# nicht; eine Verschiebung mit unzuverlässigem Anlagezeitpunkt zählt mit ihrem angenommenen
+# Anlagetag mittags, wie in der Zuordnung). Ebenso nach dem Planstand von einem Tag zwischen
+# Stichtag und gestern auf einen Tag ab heute verschobenes Budget (`budget_nach_stand_verschoben`,
+# je Herkunftstag des Fragments, nur tagesgenau – ein Herkunftstag ab heute ist eine Verlagerung
+# zwischen den Wochen des Planstands, keine Minderausgabe): es zählt in C3 und im Soll seiner
+# Zielwoche, nicht als gebunden – die Basis rechnet wie ein frischer Planstand.
 # Verschobene Raten sind mit ihrem offenen Anteil am Zieltag fällig (Vortrag), bezahlte nie.
 # Budget: jede Sicht nimmt die bewegten Beträge je Entnahme in der Folge der Verschiebungen
 # (`_wochen_abgabe`) zuerst vom angezeigten Tageswert des Ursprungstags (jede Entnahme sieht
@@ -1418,6 +1429,31 @@ class Zuordnung:
                     ergebnis[(info[0], tag)] += f[1]
         return ergebnis
 
+    def budget_nach_stand_verschoben(self, zeitpunkt: datetime | None, s0: date, bis: date,
+                                     heute: date) -> list[tuple[Key, date, date, Decimal]]:
+        """Budgetanteile von Auszahlungszeilen, die erst nach `zeitpunkt` (Anlage eines
+        Planstands) von einem Tag in [s0, bis] weg verschoben wurden und jetzt an einem Tag ab
+        heute liegen: (Zeile, damaliger Tag, Tag, Betrag) je Budgetfragment und Herkunftstag
+        (Ursprungstag des Bruttobudgets). Nur Fragmente, deren ganze Kette nach dem Planstand
+        angelegt ist – dann führte der Planstand das Budget genau am Herkunftstag; ein schon vor
+        dem Planstand verschobenes Fragment führte er am Ziel jener Verschiebung, das die
+        Herkunft nicht kennt (kein Ausgleich, vorsichtig). Anteile mit Herkunft an einem Tag ab
+        heute sind keine Minderausgabe, sondern eine Verlagerung zwischen den Wochen des
+        Planstands. Zurückverschobenes Budget ist kein Fragment mehr (`_budget_nehmen`)."""
+        if zeitpunkt is None:
+            return []
+        ergebnis = []
+        for key, tag, betrag, vz, herkunft, kette in self._budget_frag:
+            if betrag <= 0 or vz > 0 or tag < heute:
+                continue
+            if not kette or not all(self._v_vergleich.get(vid) is not None
+                                    and self._v_vergleich[vid] > zeitpunkt for vid in kette):
+                continue
+            for damals, anteil in sorted(herkunft.items()):
+                if anteil > 0 and s0 <= damals <= bis:
+                    ergebnis.append((key, damals, tag, anteil))
+        return ergebnis
+
     def vom_plantag_weg(self, ref: tuple, plantag: date) -> Decimal:
         """Betrag der Fragmente eines Bestandteils, die eine Verschiebung von seinem Plantag
         weg auf einen anderen Tag gelegt hat (nicht vom Rolltag, nicht zurück)."""
@@ -1449,6 +1485,12 @@ class Zuordnung:
         # Verschiebungen vom Rolltag ihrer Anlage: Überfälliges vor diesem Tag war dorthin gerollt
         rolltag_schwelle: dict[int, date] = {}
         roll_grenze: dict[Key, date] = {}
+        # Verschiebungen vom ersten Bankarbeitstag des Fensters am Anlagetag (Wochenbeginn ein
+        # Feiertag, Anlage an einem Tag davor): die volle Sicht zeigt dort auch die ab Fensterbeginn
+        # bezahlten Posten und abgelösten Bestellungen mit Plantag vor dem Fenster (`erster` in
+        # `_explizite_fluesse`) – je Verschiebung der Fensterbeginn, je Zeile der späteste
+        fenster_schwelle: dict[int, date] = {}
+        fenster_grenze: dict[Key, date] = {}
         # Anlagetag je Verschiebung; unbekannt: spätestmöglich (Vortag des Ursprungs, höchstens heute)
         anlage = {v.id: self._anlage(v) for v in self.verschiebungen}
         stand = {v.id: anlage[v.id] or min(v.von - eintag, self.heute) for v in self.verschiebungen}
@@ -1459,6 +1501,10 @@ class Zuordnung:
             if t < v.von and naechster_bankarbeitstag(t, bl) == v.von:
                 rolltag_schwelle[v.id] = t
                 roll_grenze[key] = max(roll_grenze.get(key, t), t)
+            w0 = wochen_start(t)
+            if w0 <= t < v.von and naechster_bankarbeitstag(w0, bl) == v.von:
+                fenster_schwelle[v.id] = w0
+                fenster_grenze[key] = max(fenster_grenze.get(key, w0), w0)
         teile: list[tuple[_Teil, Decimal]] = []
 
         def neu(teil: _Teil, betrag: Decimal) -> None:
@@ -1466,7 +1512,9 @@ class Zuordnung:
                 teile.append((teil, betrag))
 
         def relevant(key: Key, tag: date) -> bool:
-            return tag in urspruenge.get(key, ()) or (key in roll_grenze and tag < roll_grenze[key])
+            return (tag in urspruenge.get(key, ())
+                    or (key in roll_grenze and tag < roll_grenze[key])
+                    or (key in fenster_grenze and tag < fenster_grenze[key]))
 
         # nur Zeilen mit Verschiebungen laden (Konten per SQL, Zeilen ohne Konto gesondert) und
         # nur Bestandteile, die an einem Ursprungstag liegen oder auf einen Rolltag gerollt sein
@@ -1481,6 +1529,8 @@ class Zuordnung:
                 models.PlanVerschiebung.quelle == "PLAN").distinct()
         roll_max = max(roll_grenze.values()) if roll_grenze else None
         schwelle_min = min(rolltag_schwelle.values()) if rolltag_schwelle else None
+        fenster_max = max(fenster_grenze.values()) if fenster_grenze else None
+        fenster_min = min(fenster_schwelle.values()) if fenster_schwelle else None
 
         def nur_zeilen(spalte, ohne_konto: bool):
             bedingung = spalte.in_(konto_ids)
@@ -1494,6 +1544,10 @@ class Zuordnung:
             lage = lage | ((plantag < roll_max) & (
                 (op.status != PostenStatus.BEZAHLT.value) | op.bezahlt_am.is_(None)
                 | (op.bezahlt_am >= schwelle_min)))
+        if fenster_max is not None:
+            # vor dem Fenster fällig, ab Fensterbeginn bezahlt: am ersten Bankarbeitstag gezeigt
+            lage = lage | ((plantag < fenster_max) & (op.status == PostenStatus.BEZAHLT.value)
+                           & (op.bezahlt_am >= fenster_min))
         posten_bedingung = (op.mandant_id == m.id, op.status != PostenStatus.STORNIERT.value,
                             nur_zeilen(op.konto_id,
                                        any(str(k).startswith("TERMIN:OP_") for k in urspruenge)),
@@ -1531,6 +1585,8 @@ class Zuordnung:
         b_lage = best.zahldatum.in_(tage_auswahl)
         if roll_max is not None:
             b_lage = b_lage | (best.zahldatum < roll_max)
+        if fenster_max is not None:
+            b_lage = b_lage | (best.zahldatum < fenster_max)
         for b in db.scalars(select(best)
                             .options(selectinload(best.abloesungen))
                             .where(best.mandant_id == m.id, best.status.in_(sorted(status)),
@@ -1623,7 +1679,7 @@ class Zuordnung:
             self._zahltag[id(frag)] = teil.zahltag
             teil_von[id(frag)] = teil
             liegt[(teil.key, teil.tag)].append(frag)
-            if teil.rollbar and teil.key in roll_grenze:
+            if teil.rollbar and (teil.key in roll_grenze or teil.key in fenster_grenze):
                 ueber[teil.key][teil.ref] = None
         budget: list[_BudgetBrutto] = []                 # erst bei Bedarf geladen
         budget_liegt: dict[tuple[int, date], list[list]] = defaultdict(list)
@@ -1734,6 +1790,24 @@ class Zuordnung:
                             teil.zahltag is not None and teil.zahltag > schwelle)
                         if (f[1] > 0 and teil.vz == vz and f[0] < schwelle and f[0] != v.nach
                                 and (anlage[v.id] or not f[2]) and offen):
+                            einordnen(f, True)
+            w0_fenster = fenster_schwelle.get(v.id)
+            if w0_fenster is not None:
+                # vom ersten Bankarbeitstag des Fensters am Anlagetag (Wochenbeginn ein Feiertag):
+                # die volle Sicht zeigt dort auch bezahlte Posten mit Plantag vor dem Fenster mit
+                # ihren Tranchen ab Fensterbeginn und ab Fensterbeginn abgelöste Bestellungen
+                # (`erster`). Bis zum Anlagetag Gezahltes stand so in der Zelle (beim Anlegen
+                # schon bezahlt); erst danach Gezahltes war beim Anlegen offen und stand gerollt
+                # in der Zelle (s. o.)
+                for ref in ueber.get(key, ()):
+                    if ref[-1] != "erledigt":
+                        continue
+                    for f in self._fragmente[ref]:
+                        teil = teil_von[id(f)]
+                        sicht = teil.zahltag if ref[0] == "OP" else teil.abschluss
+                        if (f[1] > 0 and teil.vz == vz and f[0] < w0_fenster and f[0] != v.nach
+                                and (anlage[v.id] or not f[2]) and teil.zahltag is not None
+                                and teil.zahltag <= t and sicht is not None and sicht >= w0_fenster):
                             einordnen(f, True)
             budget_kontext: list = []
 
