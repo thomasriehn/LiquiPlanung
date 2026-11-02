@@ -799,7 +799,8 @@ def aufbauen(sz: Szenario, *, mit_verschiebungen: bool = True, planstaende: bool
         db.add(models.Dauerbuchung(
             mandant_id=m.id, name=f"Dauer {d.nr}", art="KREDITOR", konto_id=konto_id[d.konto],
             betrag_brutto=d.betrag, intervall="MONATLICH", stichtag=d.stichtag,
-            gueltig_von=date(2025, 1, 1), aktiv=True, vortragen=d.vortragen))
+            gueltig_von=date(2025, 1, 1), aktiv=True, vortragen=d.vortragen,
+            **altbestand(models.Dauerbuchung)))   # Altbestand, nicht die Uhrzeit des Testlaufs
         for _, t in d.bezahlt:
             _zahlung(db, m, t, str(d.betrag), konto=d.konto, text=f"Rate {d.nr}")
     for b in sz.bestellungen:
@@ -842,7 +843,12 @@ def aufbauen(sz: Szenario, *, mit_verschiebungen: bool = True, planstaende: bool
                 db.commit()
             a.planstand_id[k] = snap.id
     if frischer_planstand:
-        a.frisch_id = liq.erstelle_snapshot(db, m, start=sz.s0, wochen=WOCHEN, heute=sz.heute).id
+        frisch = liq.erstelle_snapshot(db, m, start=sz.s0, wochen=WOCHEN, heute=sz.heute)
+        # heute nach allen Verschiebungen angelegt (in der simulierten Zeit, nicht zur Uhrzeit
+        # des Testlaufs – sonst gälten die Verschiebungen von heute als nach dem Planstand)
+        frisch.erstellt_am = nach_allen_verschiebungen(sz.heute)
+        db.commit()
+        a.frisch_id = frisch.id
     return a
 
 

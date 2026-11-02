@@ -472,6 +472,10 @@ class Dauerbuchung(Base):
     # nicht gebuchte fällige Zahlungen in der Ansicht „mit Vortrag“ auf den
     # nächsten Bankarbeitstag vortragen
     vortragen: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Anlagezeitpunkt (Zuordnung der Planverschiebungen: Raten einer erst danach angelegten
+    # Dauerbuchung rangieren hinter dem Budget); NULL = vor Einführung angelegt, unbekannt
+    erstellt_am: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True,
+                                                         default=utcnow)
 
     konto: Mapped[Konto | None] = relationship()
 

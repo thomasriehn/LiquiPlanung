@@ -295,6 +295,8 @@ def plan_fluesse(
     zuordnung: "Zuordnung | None" = None,
     verschoben: dict[Key, dict[date, Decimal]] | None = None,
     ueberschuss_ab: date | None = None,
+    angelegt_bis: datetime | None = None,
+    daten_bis: date | None = None,
 ) -> dict[Key, dict[date, Decimal]]:
     """Planzahlungen je Konto/Tag für das Fenster [start, ende].
 
@@ -323,6 +325,9 @@ def plan_fluesse(
     ueberschuss_ab: erster Tag, der den Überschuss eines verschobenen Budgetanteils über den
                Tageswert tragen darf (Standard: heute, in der Projektion morgen) – vergangene
                Soll-Tage bleiben unverändert.
+    angelegt_bis, daten_bis: Stand zu diesem Zeitpunkt – später angelegte Posten, Termine,
+               Dauerbuchungen und Bestellungen fehlen (`_explizite_fluesse`; Vergleich mit einem
+               Planstand).
     """
     heute = heute or start
     if ueberschuss_ab is None:
@@ -337,6 +342,7 @@ def plan_fluesse(
     plan, verbrauch = _explizite_fluesse(
         db, mandant, konto_by_id, start, ende, heute, nur_offen, szenario, gerollt,
         igeld, bestell_status, ohne_bestellung_id, zuordnung, verschoben,
+        angelegt_bis=angelegt_bis, daten_bis=daten_bis,
     )
     if explizit is not None:
         for key, tageswerte in plan.items():
@@ -353,17 +359,33 @@ def plan_fluesse(
         # dieser Sicht abgeben können, zeigt ihr Restbudget – dafür die expliziten Beträge bis
         # zum Ende der spätesten Ursprungswoche (gleiche Regeln, gleicher Fensterbeginn)
         budget_ende = ende
+        # … und aus Wochen vor dem Fenster: was eine solche Herkunftswoche abgeben konnte, zeigt
+        # ihr Restbudget in der Sicht zu ihrem Beginn (`_herkunft_sicht`) – je (Zeile, Woche)
+        # einmal gerechnet, in jeder Sicht gleich (sonst erschiene der ungedeckte Anteil am
+        # Zieltag, sobald die Herkunftswoche aus dem Fenster fällt)
+        vor_wochen: set[tuple[int, date]] = set()
         if zuordnung is not None:
-            for _, tag, _, _, herkunft in zuordnung.budget_fragmente():
+            for k, tag, _, _, herkunft in zuordnung.budget_fragmente():
                 if start <= tag <= ende and herkunft:
                     budget_ende = max(budget_ende, wochen_start(max(herkunft)) + timedelta(days=6))
+                    vor_wochen.update((k, wochen_start(d)) for d in herkunft
+                                      if d < wochen_start(start))
         if budget_ende > ende:
             _, verbrauch = _explizite_fluesse(
                 db, mandant, konto_by_id, start, budget_ende, heute, nur_offen, szenario, None,
-                igeld, bestell_status, ohne_bestellung_id, zuordnung, None)
+                igeld, bestell_status, ohne_bestellung_id, zuordnung, None,
+                angelegt_bis=angelegt_bis, daten_bis=daten_bis)
+        verbrauch_vor: dict[tuple[int, date], dict[date, Decimal]] = {}
+        for k, w in sorted(vor_wochen):
+            _, v_vor = _explizite_fluesse(
+                db, mandant, konto_by_id, w, w + timedelta(days=6), _herkunft_sicht(w, heute),
+                nur_offen, szenario, None, igeld, bestell_status, ohne_bestellung_id, zuordnung,
+                None, angelegt_bis=angelegt_bis, daten_bis=daten_bis, nur_konto=k)
+            verbrauch_vor[(k, w)] = v_vor.get(k, {})
         _budget_einarbeiten(db, mandant, konto_by_id, budget, start, budget_ende, szenario, igeld,
                             verbrauch=verbrauch, zuordnung=zuordnung, verschoben=verschoben,
-                            ueberschuss_ab=ueberschuss_ab, ende_anzeige=ende)
+                            ueberschuss_ab=ueberschuss_ab, ende_anzeige=ende,
+                            verbrauch_vor=verbrauch_vor)
         for key, tageswerte in budget.items():
             for d, v in tageswerte.items():
                 if v and d <= ende:
@@ -475,15 +497,15 @@ def _explizite_fluesse(
     wird je Fragment der Zuordnung nach den Regeln dieser Sicht an seinem (ggf.
     verschobenen) Plantag geführt; `verbrauch` ohne Verschiebungen für das Restbudget,
     in der Projektion einschließlich des als erledigt Ausgelassenen an seinem Tag der
-    vollen Sicht. angelegt_bis: Stand zu diesem Zeitpunkt – später angelegte Posten, Termine
-    und Bestellungen fehlen (damals noch offene Bestellungen nur, wenn der Mandant offene
-    einplant); posten_angelegt_bis: abweichende Grenze für Posten und Termine (wie `v_stand`
-    der Zuordnung); daten_bis: Stand der Daten (ein Anlagezeitpunkt eines Postens oder
-    Termins danach gilt als unbekannt, wie in der Zuordnung); nur_konto: nur die Flüsse dieses
+    vollen Sicht. angelegt_bis: Stand zu diesem Zeitpunkt – später angelegte Posten, Termine,
+    Dauerbuchungen und Bestellungen fehlen (damals noch offene Bestellungen nur, wenn der
+    Mandant offene einplant); posten_angelegt_bis: abweichende Grenze für Posten, Termine und
+    Dauerbuchungen (wie `v_stand` der Zuordnung); daten_bis: Stand der Daten (ein
+    Anlagezeitpunkt danach gilt als unbekannt, wie in der Zuordnung); nur_konto: nur die Flüsse dieses
     Kontos (Restbudget einer Zeile – Abfragen per SQL auf das Konto und das Fenster beschränkt);
     beitraege: nimmt je Objekt seinen Restbudget-Verbrauch auf (Zeile, Tag, Betrag, Objekt –
-    None bei Dauerbuchungen –, Bestandteil und Plantag – None bei Raten und Terminen), ohne den
-    Plan zu rechnen (nur `verbrauch` ist dann gültig)."""
+    Posten, Dauerbuchung, Termin oder Bestellung –, Bestandteil und Plantag – None bei Raten und
+    Terminen), ohne den Plan zu rechnen (nur `verbrauch` ist dann gültig)."""
     bl = mandant.bundesland
 
     def spaeter(obj) -> bool:
@@ -566,9 +588,11 @@ def _explizite_fluesse(
         posten_bedingung += [op.konto_id == nur_konto,
                              func.coalesce(op.zahlung_geplant_am, op.faellig_am) <= ende]
     posten = db.scalars(select(op).where(*posten_bedingung))
-    # bezahlte Posten zeigt die volle Sicht nur mit ihren Zahlungen ab Fensterbeginn
-    vor_fenster = {} if nur_offen or beitraege is not None else \
-        _zahlungen_vor(db, mandant.id, start, nur_konto)
+    # bezahlte Posten zeigt die volle Sicht nur mit ihren Zahlungen ab Fensterbeginn – und nur
+    # diese verbrauchen in beiden Sichten das Restbudget (eine Tranche vor dem Fenster
+    # verbrauchte das Budget ihrer Woche; sonst spränge der Verbrauch mit der Schlusszahlung
+    # vom offenen Rest auf den Bruttobetrag)
+    vor_fenster = _zahlungen_vor(db, mandant.id, start, nur_konto)
     for p in posten:
         # Zahlungssperre: Insolvenzforderungen (§ 38 InsO) werden nicht bedient
         if (
@@ -580,10 +604,12 @@ def _explizite_fluesse(
         verz = verzoegerung if p.art == PostenArt.DEBITOR.value else 0
         key: Key = p.konto_id if p.konto_id is not None else f"TERMIN:OP_{p.art}"
         bezahlt = p.status == PostenStatus.BEZAHLT.value
+        vorab = Decimal("0")
         if bezahlt:
             if p.bezahlt_am is None or p.bezahlt_am < start:
                 continue
             ref, grundbetrag = ("OP", p.id, "erledigt"), p.betrag_brutto
+            vorab = min(vor_fenster.get(p.id, Decimal("0")), p.betrag_brutto)
 
             def ort(tag: date, verz=verz) -> tuple[date | None, bool]:
                 tag = tag + timedelta(days=verz)
@@ -598,10 +624,10 @@ def _explizite_fluesse(
             if p.art == PostenArt.DEBITOR.value else Decimal("-1")
         natur, _ = ort(zahltag)
         vtag = natur if bezahlt else verbrauch_tag(zahltag, verz)
-        if vtag is not None:
-            # Restbudget: bezahlte Posten verbrauchen in beiden Sichten mit ihrem vollen Betrag
-            # (auch den vor dem Fenster gezahlten Teil), in der Projektion nur dafür
-            anteil = (verbrauchend(ref, zahltag, grundbetrag, verz) * f).quantize(CENT)
+        if vtag is not None and grundbetrag > vorab:
+            # Restbudget: bezahlte Posten verbrauchen in beiden Sichten mit ihren Zahlungen ab
+            # Fensterbeginn (wie die volle Sicht sie zeigt), in der Projektion nur dafür
+            anteil = (verbrauchend(ref, zahltag, grundbetrag - vorab, verz) * f).quantize(CENT)
             verbrauch[key][vtag] += anteil
             if beitraege is not None:
                 beitraege.append((key, vtag, anteil, p, ref, zahltag + timedelta(days=verz)))
@@ -612,7 +638,6 @@ def _explizite_fluesse(
             # Zuordnung vom Betrag am Plantag abgezogen
             fragmente = z.bezahlt_zwischen(ref, ab=start)
             if fragmente is None:
-                vorab = min(vor_fenster.get(p.id, Decimal("0")), p.betrag_brutto)
                 fragmente = _ohne_vorab(z.verteilung(ref, zahltag, grundbetrag), vorab)
             grundbetrag = sum((fr[1] for fr in fragmente), Decimal("0"))
             if grundbetrag <= 0:
@@ -630,6 +655,8 @@ def _explizite_fluesse(
         dauer_bedingung.append(models.Dauerbuchung.konto_id == nur_konto)
     dauer = db.scalars(select(models.Dauerbuchung).where(*dauer_bedingung))
     for db_ in dauer:
+        if spaeter(db_):
+            continue
         d_konto = konto_by_id.get(db_.konto_id) if db_.konto_id else None
         tage = {naechster_bankarbeitstag(roh, bl)
                 for roh in _dauer_termine(db_, start - timedelta(days=31), ende)}
@@ -647,7 +674,7 @@ def _explizite_fluesse(
             if natur is not None:
                 verbrauch[key][d] += betrag   # vergangen in der Projektion: nur fürs Restbudget
                 if beitraege is not None:
-                    beitraege.append((key, d, betrag, None, None, None))
+                    beitraege.append((key, d, betrag, db_, None, None))
             if beitraege is not None:
                 continue
             for tag, teil, bewegt, zustand in _skaliert(
@@ -811,7 +838,8 @@ def _dauer_termine(d: models.Dauerbuchung, start: date, ende: date) -> list[date
 # dann war sie beim Anlegen offen; eine am Anlagetag selbst gezahlte gilt als vor der
 # Verschiebung gezahlt, außer der Betrag übersteigt, was die Zelle dann gezeigt hätte, und
 # passt erst mit ihr – der Zellendialog verschiebt höchstens den Zellwert, sie wurde also erst
-# danach erfasst). Ein erst nach t ganz bezahlter Posten bzw. abgelöste
+# danach erfasst; dann zählt sie erst nach allen sichtbaren Resten, sonst bliebe ein sichtbarer
+# Rest am Ursprung). Ein erst nach t ganz bezahlter Posten bzw. abgelöste
 # Bestellung war beim Anlegen offen: seine bis t gezahlten Tranchen zählen wie Teilzahlungen
 # (so ändert die spätere Schlusszahlung die Zuordnung nicht). Reihenfolge:
 #   1. sichtbare, beim Anlegen noch offene Bestandteile: Posten mit Plantag `von`,
@@ -836,19 +864,21 @@ def _dauer_termine(d: models.Dauerbuchung, start: date, ende: date) -> list[date
 #      verschobenes Budget gilt dort wieder als dessen Bruttobudget (nur der von dort stammende
 #      Anteil – Budget anderer Herkunft füllt die Lücke nicht, sonst änderte es Herkunft und
 #      Wirkung der Verschiebung, die dem Tag Budget entnommen hat). Lag beim Anlegen eine
-#      noch nicht entschiedene Bestellung in der Zelle und übersteigt der Betrag das
-#      Bruttobudget des Tages oder das, was die Woche beim Anlegen abgeben konnte (angezeigter
-#      Tageswert und die übrigen Tage ab dem Anlagetag, `_angezeigtes_budget`), hat der Nutzer
-#      (auch) sie verschoben: dann zuerst das damals angezeigte Budget (Restbudget der Woche im
-#      Plan am Anlagetag, ohne später Angelegtes, nach den Entnahmen früherer Verschiebungen),
-#      dann die Bestellung, erst ein Überschuss über die Zelle hinaus aus dem übrigen
-#      Bruttobudget. Das Restbudget am Anlagetag rechnet die Zuordnung je Zeile und Anlagetag
-#      einmal (`_beitraege`, nur diese Zeile) und filtert je Verschiebung später Angelegtes;
-#      von einem Plantag vor dem Fenster weg Verschobenes (frühere Verschiebungen) verbraucht
-#      wie in jeder Sicht nichts,
+#      noch nicht entschiedene Bestellung in der Zelle und übersteigt der Betrag das in der
+#      Zelle angezeigte Budget (Tageswert und gedecktes dorthin verschobenes Budget) oder das,
+#      was die Woche beim Anlegen abgeben konnte (dazu die übrigen Tage ab dem Anlagetag,
+#      `_angezeigtes_budget`), hat der Nutzer (auch) sie verschoben: dann zuerst das damals
+#      angezeigte Budget (Restbudget der Woche im Plan am Anlagetag, ohne später Angelegtes,
+#      nach den Entnahmen früherer Verschiebungen), dann die Bestellung, erst ein Überschuss
+#      über die Zelle hinaus aus dem übrigen Bruttobudget – die Zelle verliert genau den
+#      Betrag. Das Restbudget am Anlagetag rechnet die Zuordnung je Zeile und Anlagetag
+#      einmal (`_beitraege`, nur diese Zeile; eine Herkunftswoche vor diesem Fenster in der
+#      Sicht zu ihrem Beginn, je Zeile und Woche einmal) und filtert je Verschiebung später
+#      Angelegtes; von einem Plantag vor dem Fenster weg Verschobenes (frühere Verschiebungen)
+#      verbraucht wie in jeder Sicht nichts,
 #   4. noch nicht entschiedene Bestellungen (wenn der Mandant sie einplant) sowie erst nach
-#      der Verschiebung angelegte Posten, Termine (`erstellt_am`; unbekannt oder nach dem
-#      Datenstand: alt) und Bestellungen bzw. erst nach ihr freigegebene: sie schaffen sich
+#      der Verschiebung angelegte Posten, Termine und Dauerbuchungen (`erstellt_am`; unbekannt
+#      oder nach dem Datenstand: alt) und Bestellungen bzw. erst nach ihr freigegebene: sie schaffen sich
 #      keinen Rahmen und nehmen der Verschiebung kein Budget weg – außer Anteilen, die eine
 #      frühere Verschiebung bewusst an den Ursprungstag gelegt hat (Hin- und Rückverschiebung).
 #      Erst nach der Verschiebung Angelegtes nimmt sie nur, wenn ihr eigener Anlagezeitpunkt
@@ -882,8 +912,11 @@ def _dauer_termine(d: models.Dauerbuchung, start: date, ende: date) -> list[date
 # vor der Verschiebung eingefrorener Planstand führt den Anteil noch an seinem damaligen Tag
 # (lag der vor dem Stichtag – überfällig –, am ersten Bankarbeitstag ab dem Stichtag) – ist
 # der vorbei und der Anteil offen, zählt er dort wie Überfälliges (`nach_stand_verschoben`;
-# begrenzt durch die Minderausgabe seines Tags und die Summe der Tage mit Minderausgabe
-# seiner Zeile – eine Mehrausgabe an anderen Tagen erklärt sie nicht).
+# der Anteil ist beim Stand gestern offen, seine Zahlung fehlt dem Ist gewiss – begrenzt nur
+# durch das, was der Planstand am damaligen Tag mehr führt als der heutige Plan mit dem
+# Datenstand des Planstands, ohne seitdem dorthin Verschobenes (`zugezogen_nach_stand`);
+# erst nach dem Planstand Angelegtes zählt nicht; eine Verschiebung mit unzuverlässigem
+# Anlagezeitpunkt zählt mit ihrem angenommenen Anlagetag mittags, wie in der Zuordnung).
 # Verschobene Raten sind mit ihrem offenen Anteil am Zieltag fällig (Vortrag), bezahlte nie.
 # Budget: jede Sicht nimmt die bewegten Beträge je Entnahme in der Folge der Verschiebungen
 # (`_wochen_abgabe`) zuerst vom angezeigten Tageswert des Ursprungstags (jede Entnahme sieht
@@ -892,10 +925,15 @@ def _dauer_termine(d: models.Dauerbuchung, start: date, ende: date) -> list[date
 # ab heute (`ueberschuss_ab`; vergangene Soll-Tage bleiben). Was die Woche in dieser Sicht nicht
 # abgeben kann (kein Restbudget mehr), fehlt auch am Zieltag – je Herkunft gekürzt, am
 # ältesten Anteil zuerst; die Summe jeder Sicht bleibt (keine Phantom-Ausgabe); liegt die
-# Ursprungswoche nach dem Fenster,
-# rechnet die Sicht deren Restbudget mit. Am Zieltag wird unabhängig vom dortigen Restbudget
-# gebucht. Das Restbudget verbrauchen die expliziten Beträge an ihrem Tag ohne
-# Verschiebungen, bezahlte Posten in beiden Sichten mit ihrem vollen Betrag, Überfälliges in
+# Ursprungswoche nach dem Fenster, rechnet die Sicht deren Restbudget mit; liegt sie vor dem
+# Fenster, gilt ihr Restbudget in der Sicht zu ihrem Beginn (`_herkunft_sicht`: alles, was in
+# ihr geplant war oder in sie gerollt ist, verbraucht ihr Budget; ein Überschuss von allen
+# ihren Tagen) – je Zeile und Woche einmal, in jeder Sicht gleich, sonst erschiene der
+# ungedeckte Anteil am Zieltag, sobald die Herkunftswoche aus dem Fenster fällt. Am Zieltag
+# wird unabhängig vom dortigen Restbudget gebucht. Das Restbudget verbrauchen die expliziten
+# Beträge an ihrem Tag ohne Verschiebungen, bezahlte Posten in beiden Sichten mit ihren
+# Tranchen ab Fensterbeginn (wie die volle Sicht sie zeigt – die Wochensumme bleibt beim
+# Budget, eine Schlusszahlung ändert den Verbrauch nicht), Überfälliges in
 # beiden Sichten am Rolltag der vollen Sicht (ab heute, auch in der Projektion – sie
 # unterscheidet sich darin nicht nach dem Wochentag); von ihrem Plantag vor dem Fenster
 # weg verschobene Anteile eines Bestandteils verbrauchen im Fenster nichts (sie verbrauchten
@@ -956,6 +994,13 @@ def _anlagetag(v) -> date | None:
     if isinstance(t, datetime):
         return _zeitpunkt(t).astimezone().date()
     return t
+
+
+def _herkunft_sicht(woche: date, heute: date | None) -> date:
+    """Datenstand („heute“) der Sicht, in der eine Herkunftswoche vor dem Fenster ihr Restbudget
+    abgibt: ihr Beginn – alles, was in der Woche geplant war oder in sie gerollt ist, verbraucht
+    ihr Budget (ist sie noch nicht angebrochen, der heutige Stand)."""
+    return woche if heute is None else min(heute, woche)
 
 
 def _rate_entfaellt(d_: models.Dauerbuchung, konto: models.Konto | None, tag: date,
@@ -1123,7 +1168,7 @@ class _Teil:
         beide aus einem späteren Stand und werden unmittelbar verglichen)."""
         if self.spaet:
             return True
-        if v_stand is not None and (self.ref[0] in ("OP", "TERMIN") or self.verlaesslich):
+        if v_stand is not None and (self.ref[0] in ("OP", "TERMIN", "DAUER") or self.verlaesslich):
             v_angelegt = v_stand
         if v_angelegt is None:
             return False
@@ -1133,7 +1178,7 @@ class _Teil:
                v_stand: datetime | None = None) -> bool:
         """Stand beim Anlegen der Verschiebung schon in der Zelle: bis dahin angelegt; eine
         damals noch nicht entschiedene Bestellung nur, wenn der Mandant offene einplant."""
-        if v_stand is not None and (self.ref[0] in ("OP", "TERMIN") or self.verlaesslich):
+        if v_stand is not None and (self.ref[0] in ("OP", "TERMIN", "DAUER") or self.verlaesslich):
             v_angelegt = v_stand
         if v_angelegt is not None and self.angelegt is not None and self.angelegt > v_angelegt:
             return False
@@ -1207,9 +1252,13 @@ class Zuordnung:
         # id(Fragment) → Weg ((Verschiebung, Tag, an dem das Fragment lag, Ursprungstag der
         # Verschiebung), …) – vom Rolltag genommenes Überfälliges lag an seinem Plantag
         self._weg: dict[int, tuple[tuple[int, date, date], ...]] = {}
-        self._ref_info: dict[tuple, tuple[Key, int, bool]] = {}   # Zeile, vz, im Soll der Freigabe
+        # Bestandteil → (Zeile, vz, im Soll der Freigabe, Anlage, Freigabe der Bestellung)
+        self._ref_info: dict[tuple, tuple] = {}
         self._v_zeit = {v.id: _zeitpunkt(getattr(v, "erstellt_am", None))
                         for v in self.verschiebungen}
+        # Anlagezeitpunkt für den Vergleich mit einem Planstand: der gespeicherte, ist er
+        # unzuverlässig (nach dem Datenstand) der angenommene Anlagetag mittags (`v_stand`)
+        self._v_vergleich: dict[int, datetime] = dict(self._v_zeit)
         self.raten: dict[int, set[date]] = {}             # Dauerbuchung → Plantage verschobener Raten
         self.termin_ids: set[int] = set()                 # Termine mit verschobenen Anteilen
         self._status: dict | None = None
@@ -1293,7 +1342,11 @@ class Zuordnung:
         sie an einem Tag ab heute und sind beim Stand gestern noch offen. (Zeile, damaliger
         Tag, Tag, Betrag). Lag ein offener Posten bzw. eine Bestellung damals vor s0 (beim
         Stichtag überfällig, später vom Rolltag verschoben), führt ihn der Planstand – wie
-        jede Sicht zum Stichtag – am ersten Bankarbeitstag ab s0."""
+        jede Sicht zum Stichtag – am ersten Bankarbeitstag ab s0. Erst nach dem Planstand
+        angelegte Posten, Termine und Bestellungen (bzw. erst danach freigegebene) standen nicht
+        in ihm und zählen nicht. Eine Verschiebung mit unzuverlässigem Anlagezeitpunkt (nach dem
+        Datenstand) zählt mit ihrem angenommenen Anlagetag (Vortag des Ursprungs, höchstens heute,
+        mittags – wie in der Zuordnung)."""
         if zeitpunkt is None:
             return []
         s0_roll = naechster_bankarbeitstag(s0, self._mandant.bundesland)
@@ -1301,6 +1354,8 @@ class Zuordnung:
         for ref, frags in self._fragmente.items():
             info = self._ref_info.get(ref)
             if info is None or info[1] > 0 or not info[2]:
+                continue
+            if any(z is not None and z > zeitpunkt for z in info[3:5]):
                 continue
             zustand = ref[-1]
             if ref[0] == "TERMIN" and zustand == "erledigt":
@@ -1313,7 +1368,7 @@ class Zuordnung:
                     continue
                 damals = None
                 for vid, tag, _ in self._weg.get(id(f), ()):
-                    t = self._v_zeit.get(vid)
+                    t = self._v_vergleich.get(vid)
                     if t is not None and t > zeitpunkt:
                         damals = tag
                         break
@@ -1321,6 +1376,46 @@ class Zuordnung:
                     damals = s0_roll      # im Planstand überfällig auf den Rolltag gerollt
                 if damals is not None and s0 <= damals <= bis:
                     ergebnis.append((info[0], damals, f[0], f[1]))
+        return ergebnis
+
+    def zugezogen_nach_stand(self, zeitpunkt: datetime | None, s0: date, bis: date
+                             ) -> dict[tuple[Key, date], Decimal]:
+        """Auszahlungsanteile, die erst nach `zeitpunkt` (Anlage eines Planstands) auf einen Tag
+        in [s0, bis] gelegt wurden und dort in der Soll-Sicht ab s0 stehen (offene Anteile;
+        bezahlte mit Zahlung ab s0; Raten, Termine und abgelöste Bestellungen stets), je (Zeile,
+        Tag; vor s0 liegende Anteile am ersten Bankarbeitstag ab s0). Der heutige Plan führt sie
+        dort zusätzlich zum Planstand – beim Vergleich je Tag (`nach_stand_verschoben`) verdeckten
+        sie sonst, was seitdem von diesem Tag weg verschoben wurde."""
+        ergebnis: dict[tuple[Key, date], Decimal] = defaultdict(Decimal)
+        if zeitpunkt is None:
+            return ergebnis
+        s0_roll = naechster_bankarbeitstag(s0, self._mandant.bundesland)
+        for ref, frags in self._fragmente.items():
+            info = self._ref_info.get(ref)
+            if info is None or info[1] > 0 or not info[2]:
+                continue
+            zustand = ref[-1]
+            if zustand == "teil":
+                continue
+            for f in frags:
+                if not f[2] or f[1] <= 0:
+                    continue
+                zahltag = self._zahltag.get(id(f))
+                if ref[0] == "OP" and zustand == "erledigt" and (zahltag is None or zahltag < s0):
+                    continue
+                damals = None
+                for vid, tag, _ in self._weg.get(id(f), ()):
+                    t = self._v_vergleich.get(vid)
+                    if t is not None and t > zeitpunkt:
+                        damals = tag      # dort führte ihn der Planstand
+                        break
+                if damals is None:
+                    continue
+                if damals < s0 and ref[0] in ("OP", "BEST"):
+                    damals = s0_roll
+                tag = f[0] if f[0] >= s0 else s0_roll
+                if s0 <= tag <= bis and tag != damals:
+                    ergebnis[(info[0], tag)] += f[1]
         return ergebnis
 
     def vom_plantag_weg(self, ref: tuple, plantag: date) -> Decimal:
@@ -1509,9 +1604,12 @@ class Zuordnung:
             bezahlt, gezahlt = self._bezahlt(d_.id, d) if d_.konto_id is not None \
                 else (Decimal("0"), [])
             bezahlt = min(bezahlt, d_.betrag_brutto)
-            neu(_Teil(("DAUER", d_.id, d, "offen"), key, d, vz, "offen"), d_.betrag_brutto - bezahlt)
+            angelegt = _angelegt_bekannt(d_, self.heute)
+            neu(_Teil(("DAUER", d_.id, d, "offen"), key, d, vz, "offen", angelegt=angelegt),
+                d_.betrag_brutto - bezahlt)
             for zahltag, betrag in _tranchen(gezahlt, bezahlt, None):
-                neu(_Teil(("DAUER", d_.id, d, "erledigt"), key, d, vz, "erledigt", zahltag), betrag)
+                neu(_Teil(("DAUER", d_.id, d, "erledigt"), key, d, vz, "erledigt", zahltag,
+                          angelegt=angelegt), betrag)
 
         # Fragmente und Lage je (Zeile, Tag)
         liegt: dict[tuple[Key, date], list[list]] = defaultdict(list)
@@ -1519,7 +1617,8 @@ class Zuordnung:
         teil_von: dict[int, _Teil] = {}
         for teil, betrag in teile:
             frag = [teil.tag, betrag, False]
-            self._ref_info.setdefault(teil.ref, (teil.key, teil.vz, not teil.spaet))
+            self._ref_info.setdefault(teil.ref, (teil.key, teil.vz, not teil.spaet,
+                                                 teil.angelegt, teil.entschieden))
             self._fragmente.setdefault(teil.ref, []).append(frag)
             self._zahltag[id(frag)] = teil.zahltag
             teil_von[id(frag)] = teil
@@ -1588,6 +1687,7 @@ class Zuordnung:
             # der angenommene Anlagetag, mittags
             v_stand = v_angelegt if _zeitpunkt_verlaesslich(v_angelegt, self.heute) else \
                 datetime.combine(t, datetime.min.time().replace(hour=12)).astimezone()
+            self._v_vergleich[v.id] = v_stand
             # (Fragment, Klasse 0 = beim Anlegen offen / 1 = schon bezahlt, überfällig)
             kandidaten: list[tuple[list, int, bool]] = []
             unsichtbar: list[list] = []      # beim Anlegen in keiner Sicht der Zelle
@@ -1595,6 +1695,7 @@ class Zuordnung:
             am_anlagetag: list[tuple[list, bool]] = []   # Teilzahlung am Anlagetag selbst
             spaet_da: list[list] = []        # spät eingestuft, beim Anlegen in der Zelle
             spaet: list[list] = []           # erst nach der Verschiebung angelegt/freigegeben
+            nachrang: set[int] = set()       # am Anlagetag gezahlte Tranchen: nach allen Resten
 
             def einordnen(f: list, ueberfaellig: bool) -> None:
                 teil = teil_von[id(f)]
@@ -1667,7 +1768,11 @@ class Zuordnung:
                     zelle += self._angezeigtes_budget(v, key, vz, kt[0], kt[1], kt[2])[0]
                 heute_teil = sum((f[1] for f, _ in am_anlagetag), Decimal("0"))
                 if zelle < abs(v.betrag) <= zelle + heute_teil:
+                    # in keiner Sicht geführt: erst nach allen sichtbaren Resten (welche Tranche
+                    # am Ursprung hängen bleibt, ändert keine Anzeige – ein sichtbarer offener Rest
+                    # dort schon; am Ziel käme sonst zu wenig an)
                     kandidaten.extend((f, 0, ueberfaellig) for f, ueberfaellig in am_anlagetag)
+                    nachrang.update(id(f) for f, _ in am_anlagetag)
             gruppe = (key, v.von, v.nach, vz)
             ziel_betrag, wahl = gruppen_ziel[gruppe], gruppen_wahl[gruppe]
             if unbekannt:
@@ -1695,7 +1800,7 @@ class Zuordnung:
             def ordnung(e: tuple) -> tuple:
                 f, k, ueberfaellig = e
                 teil = teil_von[id(f)]
-                return (k, teil.ordnung[:2] not in wahl,
+                return (k, id(f) in nachrang, teil.ordnung[:2] not in wahl,
                         summe[(k,) + teil.ordnung[:2]] != ziel_betrag,
                         not ueberfaellig, f[0]) + teil.ordnung
 
@@ -1710,15 +1815,16 @@ class Zuordnung:
                 bb, anlage_sicht, gedeckt = kontext()
                 if spaet_da:
                     # lag eine noch nicht entschiedene Bestellung in der Zelle und übersteigt der
-                    # Betrag das Bruttobudget des Tages oder das, was die Woche beim Anlegen
-                    # abgeben konnte (angezeigter Tageswert, Überschuss von den übrigen Tagen ab
-                    # dem Anlagetag), hat der Nutzer (auch) sie verschoben – zuerst das angezeigte
-                    # Budget, dann die Bestellung, erst ein Überschuss über die Zelle hinaus aus
-                    # dem übrigen Bruttobudget (nicht abgebbares Budget nie vor einem in der Zelle
-                    # gezeigten Bestandteil)
+                    # Betrag das in der Zelle angezeigte Budget (Tageswert und gedecktes dorthin
+                    # verschobenes Budget) oder das, was die Woche beim Anlegen abgeben konnte
+                    # (dazu der Überschuss von den übrigen Tagen ab dem Anlagetag), hat der Nutzer
+                    # (auch) sie verschoben – zuerst das angezeigte Budget, dann die Bestellung,
+                    # erst ein Überschuss über die Zelle hinaus aus dem übrigen Bruttobudget (die
+                    # Zelle verliert genau den Betrag; nicht abgebbares oder nicht angezeigtes
+                    # Budget nie vor einem in der Zelle gezeigten Bestandteil)
                     angezeigt, abgebbar = self._angezeigtes_budget(v, key, vz, bb, anlage_sicht,
                                                                    gedeckt)
-                    if rest > abgebbar or rest > self._budget_frei(v, key, vz, bb, gedeckt):
+                    if rest > abgebbar or rest > angezeigt:
                         rest = self._budget_nehmen(v, key, vz, rest, bb, budget_liegt, gedeckt,
                                                    angezeigt)
                         rest = nehmen(v, key, folge(spaet_da), rest)
@@ -1832,35 +1938,40 @@ class Zuordnung:
                     self._zahltag[id(neu_frag)] = z[0]
                     self._weg[id(neu_frag)] = self._weg.get(id(f), ())
 
-    def _beitraege(self, key: int, t: date, konto_by_id: dict, igeld) -> dict[date, list]:
-        """Restbudget-Verbrauch der Zeile im Plan am Anlagetag t (Fenster ab dessen Wochenbeginn,
-        Mandantenstandard) je Objekt, nach Wochen: [(Tag, Betrag, Art, Anlage, Freigabe,
-        Bestandteil, Plantag)] –
-        einmal je Zeile und Anlagetag bis zur spätesten Ursprungswoche der Zeile geladen; was
-        erst nach einer Verschiebung angelegt ist, filtert `_wochen_rest` (wie
-        `_explizite_fluesse` mit angelegt_bis)."""
-        schluessel = (key, t)
-        if schluessel not in self._beitraege_cache:
-            s = wochen_start(t)
+    def _beitraege(self, key: int, t: date, konto_by_id: dict, igeld,
+                   woche: date | None = None) -> dict[date, list]:
+        """Restbudget-Verbrauch der Zeile je Objekt, nach Wochen: [(Tag, Betrag, Art, Anlage,
+        Freigabe, Bestandteil, Plantag)] – im Plan am Anlagetag t (Fenster ab dessen
+        Wochenbeginn, Mandantenstandard), einmal je Zeile und Anlagetag bis zur spätesten
+        Ursprungswoche der Zeile geladen; mit `woche` (eine Herkunftswoche vor diesem Fenster)
+        in der Sicht zum Beginn dieser Woche (`_herkunft_sicht`: alles, was in ihr geplant war
+        oder in sie gerollt ist, verbraucht ihr Budget), einmal je Zeile und Woche. Was erst nach
+        einer Verschiebung angelegt ist, filtert `_wochen_rest` (wie `_explizite_fluesse` mit
+        angelegt_bis)."""
+        if woche is not None:
+            schluessel: tuple = (key, "woche", woche)
+            s, ende, sicht = woche, woche + timedelta(days=6), _herkunft_sicht(woche, self.heute)
+        else:
+            schluessel = (key, t)
+            s, sicht = wochen_start(t), t
             ende = max(wochen_start(v.von) for v in self.verschiebungen
                        if verschiebung_key(v) == key) + timedelta(days=6)
+        if schluessel not in self._beitraege_cache:
             liste: list = []
             if ende >= s:
                 _explizite_fluesse(
-                    self._db, self._mandant, konto_by_id, s, ende, t, False, None, None, igeld,
-                    bestell_plan_status(self._mandant, None), None, nur_konto=key,
+                    self._db, self._mandant, konto_by_id, s, ende, sicht, False, None, None,
+                    igeld, bestell_plan_status(self._mandant, None), None, nur_konto=key,
                     beitraege=liste)
             einplanen = getattr(self._mandant, "bestellungen_offen_einplanen", True) is not False
             je_woche: dict[date, list] = defaultdict(list)
             for k, tag, betrag, obj, ref, plantag in liste:
                 if k != key:
                     continue
-                if obj is None:
-                    zeit = ("D", None, None)
-                elif isinstance(obj, models.Bestellung):
+                if isinstance(obj, models.Bestellung):
                     zeit = ("B", _zeitpunkt(obj.erstellt_am),
                             None if einplanen else _zeitpunkt(obj.entschieden_am))
-                else:
+                else:       # Posten, Dauerbuchung, Termin: Anlage wie `v_stand` verglichen
                     zeit = ("P", _angelegt_bekannt(obj, self.heute), None)
                 # ein Plantag vor dem Fenster: von dort weg Verschobenes verbraucht im Fenster
                 # nichts (wie `verbrauchend`) – das rechnet `_wochen_rest` mit dem Stand der
@@ -1881,8 +1992,10 @@ class Zuordnung:
         t, v_angelegt, v_stand, konto_by_id, igeld, _ = anlage_sicht
         grenze = v_stand if v_stand is not None else v_angelegt
         tage: dict[date, Decimal] = defaultdict(Decimal)
+        # eine Herkunftswoche vor dem Fenster des Anlagetags: Sicht zu ihrem Beginn
+        vor = w if w < wochen_start(t) else None
         for tag, betrag, art, angelegt, entschieden, ref, plantag in \
-                self._beitraege(key, t, konto_by_id, igeld).get(w, ()):
+                self._beitraege(key, t, konto_by_id, igeld, woche=vor).get(w, ()):
             if art == "P" and grenze is not None and angelegt is not None and angelegt > grenze:
                 continue
             if art == "B" and v_angelegt is not None and any(
@@ -1901,20 +2014,21 @@ class Zuordnung:
                    anlage_sicht) -> tuple[dict[date, Decimal], dict[date, Decimal]] | None:
         """Budget der Woche ab `w` in der vollen Sicht am Anlagetag t nach den Entnahmen der
         früher angelegten Verschiebungen (wie `_budget_einarbeiten`): (angezeigter Tageswert,
-        je Ursprungstag nicht Abgebbares). None: die Woche liegt vor diesem Fenster (dort kürzt
-        keine Sicht) oder hat kein Budget. Je Verschiebung einmal je Woche gerechnet."""
+        je Ursprungstag nicht Abgebbares). Eine Herkunftswoche vor diesem Fenster in der Sicht
+        zu ihrem Beginn, ein Überschuss von allen ihren Tagen (wie `_budget_einarbeiten`). None:
+        die Woche hat kein Budget. Je Verschiebung einmal je Woche gerechnet."""
         t, wochen = anlage_sicht[0], anlage_sicht[5]
         if w in wochen:
             return wochen[w]
         brutto = budget.woche(key, w)
         ergebnis = None
-        if w >= wochen_start(t) and brutto:
+        if brutto:
             rest = self._wochen_rest(key, w, brutto, anlage_sicht)
             bis = w + timedelta(days=6)
             weg = [(d, b) for k, d, b in self.budget_entnahmen if k == key and w <= d <= bis and b > 0]
             if rest > 0:
                 werte = _verteile(brutto, rest)
-                fehlt = _wochen_abgabe(werte, weg, t)
+                fehlt = _wochen_abgabe(werte, weg, t if w >= wochen_start(t) else None)
             else:
                 werte = dict.fromkeys(brutto, Decimal("0"))
                 fehlt = defaultdict(Decimal)
@@ -1948,16 +2062,6 @@ class Zuordnung:
             if b > 0:
                 gedeckt[d] = b
         return gedeckt
-
-    def _budget_frei(self, v, key: int, vz: int, budget: _BudgetBrutto,
-                     gedeckt: dict[int, dict[date, Decimal]]) -> Decimal:
-        """Am Ursprungstag für die Verschiebung verfügbares Budget: der gedeckte Teil des
-        dorthin verschobenen und das noch nicht entnommene Bruttobudget des Tages."""
-        frei = sum((b for g in gedeckt.values() for b in g.values()), Decimal("0"))
-        natur = budget.tag(key, v.von)
-        if natur is not None and natur[1] == vz:
-            frei += max(Decimal("0"), natur[0] - self.budget_genommen.get((key, v.von), Decimal("0")))
-        return frei
 
     def _angezeigtes_budget(self, v, key: int, vz: int, budget: _BudgetBrutto, anlage_sicht,
                             gedeckt: dict[int, dict[date, Decimal]]) -> tuple[Decimal, Decimal]:
@@ -2499,6 +2603,7 @@ def _budget_einarbeiten(
     verschoben: dict[Key, dict[date, Decimal]] | None = None,
     ueberschuss_ab: date | None = None,
     ende_anzeige: date | None = None,
+    verbrauch_vor: dict[tuple[int, date], dict[date, Decimal]] | None = None,
 ) -> set[int]:
     """Budget je Konto und Woche als Restbudget in `plan` einarbeiten. Liefert die
     Konten mit einer Budgetquelle.
@@ -2513,7 +2618,11 @@ def _budget_einarbeiten(
                (kein Restbudget mehr), fehlt auch am Zieltag – sonst entstünde eine
                Phantom-Ausgabe. Am
                Zieltag unabhängig vom dortigen Restbudget gebucht; `verschoben` nimmt die
-               Markierung auf (bis `ende_anzeige`, Standard `ende`)."""
+               Markierung auf (bis `ende_anzeige`, Standard `ende`).
+    verbrauch_vor: je (Konto, Herkunftswoche vor dem Fenster) die expliziten Flüsse dieser Woche
+               in der Sicht zu ihrem Beginn (plan_fluesse): dorthin verschobenes Budget aus
+               einer solchen Woche wird wie aus einer Woche des Fensters gekürzt, ein Überschuss
+               von allen ihren Tagen."""
     bl = mandant.bundesland
     ende_anzeige = ende_anzeige or ende
     zugang: dict[int, list[tuple[date, Decimal, int, dict]]] = defaultdict(list)
@@ -2529,6 +2638,9 @@ def _budget_einarbeiten(
             if betrag > 0:
                 entnahme[k].append((d, betrag))
     explizit_quelle = plan if verbrauch is None else verbrauch
+    vor_wochen: dict[int, list[date]] = defaultdict(list)
+    for k, w in sorted(verbrauch_vor or ()):
+        vor_wochen[k].append(w)
     monat_budget = MonatsBudgets(
         db.scalars(select(models.Budget).where(models.Budget.mandant_id == mandant.id))
     )
@@ -2542,7 +2654,7 @@ def _budget_einarbeiten(
         (bt.konto_id, bt.datum): bt.betrag_netto
         for bt in db.scalars(select(models.BudgetTag).where(
             models.BudgetTag.mandant_id == mandant.id,
-            models.BudgetTag.datum >= wochen_start(start),
+            models.BudgetTag.datum >= min([wochen_start(start)] + [w for _, w in verbrauch_vor or ()]),
             models.BudgetTag.datum <= ende,
         ))
     }
@@ -2578,7 +2690,11 @@ def _budget_einarbeiten(
             else None
         )
         fehlt: dict[date, Decimal] = {}     # je Ursprungstag: in dieser Sicht nicht abgebbar
-        for w_von, w_bis in wochen:
+
+        def woche_rechnen(w_von: date, w_bis: date, tageswerte: dict[date, Decimal],
+                          ueberschuss: date | None) -> dict[date, Decimal] | None:
+            """Angezeigte Tageswerte der Woche nach den Entnahmen (None: kein Restbudget);
+            nicht Abgebbares in `fehlt`."""
             # Tagesgenaue Basisverteilung (brutto) gemäß Verteilungsprofil bzw.
             # Wochen-/Tageswerten
             basis: dict[date, Decimal] = {
@@ -2596,7 +2712,6 @@ def _budget_einarbeiten(
                         for d, betrag in entnahme.get(konto_id, ()) if w_von <= d <= woche_bis]
             gesamt = sum(basis.values(), NULL_EUR)
             # Restbudget: bereits explizit geplante Beträge dieses Kontos in der Woche
-            tageswerte = explizit_quelle.get(konto_id, {})
             explizit = sum(
                 (abs(tageswerte.get(w_von + timedelta(days=i), NULL_EUR)) for i in range(7)),
                 NULL_EUR,
@@ -2606,14 +2721,22 @@ def _budget_einarbeiten(
                 for d, weg in weg_tage:
                     if weg > 0:
                         fehlt[d] = fehlt.get(d, NULL_EUR) + weg
-                continue
+                return None
             werte = _verteile(basis, rest)
             # verschobene Budgetanteile (Zuordnung) je Entnahme in der Folge der Verschiebungen
             # (`_wochen_abgabe`) – eine ganz verschobene Zelle ist leer, die übrigen Tage zeigen,
             # was danach übrig ist
-            for d, b in _wochen_abgabe(werte, weg_tage, ueberschuss_ab).items():
+            for d, b in _wochen_abgabe(werte, weg_tage, ueberschuss).items():
                 fehlt[d] = fehlt.get(d, NULL_EUR) + b
-            for d, betrag in werte.items():
+            return werte
+
+        # Herkunftswochen vor dem Fenster (Sicht zu ihrem Beginn, Überschuss von allen Tagen):
+        # nur die Kürzung zählt, ihre Tageswerte liegen außerhalb des Fensters
+        for w in vor_wochen.get(konto_id, ()):
+            woche_rechnen(w, w + timedelta(days=6), verbrauch_vor[(konto_id, w)], None)
+        for w_von, w_bis in wochen:
+            werte = woche_rechnen(w_von, w_bis, explizit_quelle.get(konto_id, {}), ueberschuss_ab)
+            for d, betrag in (werte or {}).items():
                 if betrag:
                     plan[konto_id][d] += vorzeichen * betrag
         # verschobenes Budget am Zieltag, gekürzt um das in dieser Sicht nicht Abgebbare seiner

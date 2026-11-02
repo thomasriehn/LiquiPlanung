@@ -26,14 +26,18 @@ Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
     wählbar (Standard: Gesamtbetrag), z. B. bleiben von 6.000 € 2.000 € stehen und
     4.000 € wandern in eine spätere Woche. Verschobene Zellen tragen eine
     orange Eckmarke (Tooltip mit Beträgen); jede Verschiebung ist im Dialog mit
-    Kommentar und Benutzer aufgeführt und per ✕ zurücknehmbar. Verschiebungen
+    Kommentar und Benutzer aufgeführt und per ✕ zurücknehmbar – Folgeverschiebungen,
+    die den Betrag weiterbewegt haben, werden dabei entsprechend gekürzt. Verschiebungen
     sind auf den tatsächlich geplanten Betrag begrenzt (fällt die Planbasis weg,
-    entsteht kein Phantombetrag); spätere Zahlungen ändern nicht, welche Posten,
-    Raten oder Budgetanteile sie bewegen, und schon Bezahltes belastet die
-    Liquidität am Zieltag nicht erneut. Verschobene Dauerschuld-Raten sind für den
-    Vortrag mit ihrem offenen Anteil am Zieltag fällig, ein verschobener Vortrag gilt
-    bis zu seinem Zieltag. Eingefrorene Planstände und die Bestellfreigabe
-    übernehmen die Verschiebungen.
+    entsteht kein Phantombetrag) und gelten mit den Beträgen des Basisplans (in einer
+    Szenario-Ansicht nur für Zeilen, die dort dem Basisplan entsprechen); spätere
+    Zahlungen und danach erfasste Rechnungen, Termine oder Dauerschuldverhältnisse
+    ändern nicht, welche Posten, Raten oder Budgetanteile sie bewegen, und schon
+    Bezahltes belastet die Liquidität am Zieltag nicht erneut. Verschobene
+    Dauerschuld-Raten sind für den Vortrag mit ihrem offenen Anteil am Zieltag fällig,
+    ein verschobener Vortrag gilt bis zu seinem Zieltag. Eingefrorene Planstände und
+    die Bestellfreigabe übernehmen die Verschiebungen; auch ein vor der Verschiebung
+    eingefrorener Planstand gibt der Freigabe keinen Rahmen frei.
   - **Ist-Buchungen** einer Zelle bis heute mit Text, Beleg, Zahlungsmittel und
     Import-Herkunft; die Kontoverknüpfung lässt sich per ✕ lösen und über dieselbe
     durchsuchbare, nach BWA-Gruppen gegliederte Kontoauswahl wie beim PDF-Import

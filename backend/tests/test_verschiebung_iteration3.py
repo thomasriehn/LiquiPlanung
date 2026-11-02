@@ -20,10 +20,12 @@ from test_verschiebung_zuordnung import _kz_ebene, _op, _plan, _verschiebe
 # ---------------------------------------------------------------------------
 
 def test_restbudget_bezahlter_posten_mit_vorabzahlung_gleich_in_plan_und_projektion(db):
-    """Budget KW 33 10.000 netto (TAG); OP 2.000 fällig 11.08., 1.000 am 05.08. (vor dem
-    Fenster) und 1.000 am 11.08. bezahlt; heute 12.08.: die angezeigte Planzelle eines
-    künftigen Tages ist die Liquiditätsänderung des Tages (der Posten verbraucht in beiden
-    Sichten sein volles Restbudget)."""
+    """Budget KW 33 10.000 netto (TAG, 11.900 brutto); OP 2.000 fällig 11.08., 1.000 am 05.08.
+    (vor dem Fenster) und 1.000 am 11.08. bezahlt; heute 12.08.: die angezeigte Planzelle eines
+    künftigen Tages ist die Liquiditätsänderung des Tages. Der Posten verbraucht in beiden
+    Sichten dasselbe Restbudget – seit Iteration 4.3 nur mit seiner Tranche ab Fensterbeginn
+    (1.000, wie die volle Sicht ihn zeigt; die Tranche vom 05.08. verbrauchte das Budget der
+    KW 32): Rest 10.900, je Tag 2.180; die Wochensumme der Zeile bleibt beim Budget."""
     m = _mandant(db)
     _bank(db, m)
     _budget_woche(db, m, "4920", 33, "10000")
@@ -32,7 +34,8 @@ def test_restbudget_bezahlter_posten_mit_vorabzahlung_gleich_in_plan_und_projekt
     plan, p = _plan(db, m, date(2026, 8, 10), date(2026, 8, 12), wochen=2)
     liq = p["bestaende"]["liquiditaet"]
     for tag, vortag in (("2026-08-13", "2026-08-12"), ("2026-08-14", "2026-08-13")):
-        assert plan[tag] == round(liq[tag] - liq[vortag], 2) == -1980.0
+        assert plan[tag] == round(liq[tag] - liq[vortag], 2) == -2180.0
+    assert round(sum(w for t, w in plan.items() if "2026-08-10" <= t <= "2026-08-16"), 2) == -11900.0
 
 
 @pytest.mark.parametrize("start", [date(2026, 8, 24), date(2026, 8, 31)])
@@ -224,9 +227,12 @@ def test_verschiebung_vom_rolltag_nimmt_den_ueberfaelligen_posten_in_ihrer_hoehe
 
 
 def test_nach_der_verschiebung_freigegebene_bestellung_nimmt_ihr_kein_budget(db):
-    """Budget KW 34 5.000 netto (TAG); Bestellung 2.380 brutto am 19.08. am 03.08. 09:00 offen
-    angelegt, 12:00 1.190 vom 19.08. auf den 31.08. verschoben (Budget, die Bestellung war noch
-    nicht entschieden), am 06.08. freigegeben: die Bestellung bleibt am 19.08."""
+    """Budget KW 34 5.000 netto (TAG, 1.190 je Tag); Bestellung 2.380 brutto am 19.08. am 03.08.
+    09:00 offen angelegt (die Zelle zeigt 714 Budget und 2.380 Bestellung), 12:00 1.190 vom
+    19.08. auf den 31.08. verschoben, am 06.08. freigegeben. Die Zelle verliert genau den Betrag
+    (Iteration 4.3, wie der gesicherte Rechenkern): zuerst das angezeigte Budget 714, dann 476
+    der noch nicht entschiedenen Bestellung – nicht das Bruttobudget der übrigen Tage; die
+    freigegebene Bestellung steht mit 1.904 am 19.08. und 476 am 31.08."""
     from test_bestellungen import _benutzer, _bestellung
     from app.services import bestellungen as svc
     m = _mandant(db)
@@ -241,10 +247,11 @@ def test_nach_der_verschiebung_freigegebene_bestellung_nimmt_ihr_kein_budget(db)
     b.entschieden_am = datetime(2026, 8, 6, 10)
     heute = date(2026, 8, 6)
     plan, _ = _plan(db, m, date(2026, 8, 17), heute, wochen=3)
-    assert plan["2026-08-31"] == -1190.0 and plan["2026-08-19"] == -2380.0
+    assert plan["2026-08-31"] == -1190.0 and plan["2026-08-19"] == -1904.0
     k34 = _kz_ebene(db, m, 34, heute)
-    assert (k34["gebunden"]["summe"], k34["verfuegbar"]) == (2380.0, 2380.0)
-    assert _kz_ebene(db, m, 36, heute)["verfuegbar"] == 1190.0
+    assert (k34["gebunden"]["summe"], k34["verfuegbar"]) == (1904.0, 2856.0)
+    k36 = _kz_ebene(db, m, 36, heute)
+    assert (k36["gebunden"]["summe"], k36["verfuegbar"]) == (476.0, 714.0)
 
 
 def test_teilzahlung_vor_der_anlage_dann_vollzahlung_verschiebung_bleibt_beim_posten(db):

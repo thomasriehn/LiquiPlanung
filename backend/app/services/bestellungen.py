@@ -1414,14 +1414,22 @@ def _stand_gestern(
         betrag = heute_bezahlt.get(pid, NULL)
         bezahlt = p.status == PostenStatus.BEZAHLT.value
         if bezahlt and p.bezahlt_am and p.bezahlt_am >= heute:
-            betrag = NULL if pid in im_ist else \
-                max(NULL, p.betrag_brutto - vorher_bezahlt.get(pid, NULL))
+            # vor heute gezahlt: die Buchungen vor heute – und, wenn heute mit Beleg gezahlt
+            # wurde, mindestens der buchhalterische Stand ohne das heute Gezahlte (eine frühere
+            # Teilzahlung ohne Beleg hat keine Buchung zum Posten, steht aber im Ist und zählte
+            # sonst in C1 und gebunden doppelt)
+            vorher = vorher_bezahlt.get(pid, NULL)
+            if heute_bezahlt.get(pid, NULL) > 0:
+                vorher = max(vorher, (p.bezahlt_betrag or NULL) - heute_bezahlt[pid])
+            betrag = NULL if pid in im_ist else max(NULL, p.betrag_brutto - vorher)
         key = p.konto_id if p.konto_id is not None else f"TERMIN:OP_{p.art}"
         eintragen(key, ("OP", p.id, "erledigt" if bezahlt else "teil"),
                   p.zahlung_geplant_am or p.faellig_am, betrag)
 
-    # freigegebene Bestellungen: Teilzahlungen ab heute, heute abgelöste (außer durch
-    # Rechnung – dann trägt der offene Posten die Zahlung)
+    # freigegebene Bestellungen: Teilzahlungen ab heute; ab heute abgelöste Bestellungen (außer
+    # durch Rechnung – dann trägt der offene Posten die Zahlung) – auch nie freigegebene: das
+    # Soll führt jede abgelöste wie einen bezahlten Posten am Zahldatum, das Ist bis gestern
+    # kennt die Zahlung noch nicht
     for b in db.scalars(
         select(models.Bestellung)
         .options(selectinload(models.Bestellung.abloesungen))
@@ -1435,8 +1443,8 @@ def _stand_gestern(
             betrag = sum((a.betrag for a in b.abloesungen
                           if not a.abschliessend and a.datum >= heute), NULL)
             ref = ("BEST", b.id, "teil")
-        elif (b.entschieden_am is not None and b.abgeloest_am is not None
-              and b.abgeloest_am >= heute and b.abgeloest_durch != AbloeseArt.RECHNUNG.value):
+        elif (b.abgeloest_am is not None and b.abgeloest_am >= heute
+              and b.abgeloest_durch != AbloeseArt.RECHNUNG.value):
             betrag = brutto(b) - sum((a.betrag for a in b.abloesungen
                                       if not a.abschliessend and a.datum < heute), NULL)
             ref = ("BEST", b.id, "erledigt")
@@ -1802,8 +1810,12 @@ def _kennzahlen(
                                    vortraege=vortraege, vor_s0_gerollt=vor_s0_gerollt)
     # Planstand vor einer Verschiebung eingefroren (z. B. montags, verschoben im Lauf der Woche):
     # der dort an einem vergangenen Tag geplante, jetzt verschobene und noch offene Anteil fehlt
-    # dem Ist (C1) – er zählt wie Überfälliges in C3, im B seiner Zielwoche nicht noch einmal
-    # (höchstens die von Überfälligem und Vorträgen nicht erklärte Minderausgabe seiner Zeile)
+    # dem Ist (C1) – er zählt wie Überfälliges in C3, im B seiner Zielwoche nicht noch einmal.
+    # Der Anteil ist beim Stand gestern offen, seine Zahlung fehlt dem Ist also gewiss; das Ist
+    # des damaligen Tags sagt darüber nichts (eine frühe Zahlung eines anderen Postens am selben
+    # Tag verdeckte die Minderausgabe sonst). Maßstab ist allein, wie viel der Planstand am
+    # damaligen Tag mehr führt als der heutige Plan mit dem Datenstand des Planstands (ohne
+    # seitdem Erfasstes) – das seitdem von dort Verschobene
     verschoben_c3: dict[Key, Decimal] = defaultdict(Decimal)
     if snap is not None and s0 <= ist_bis:
         # Anlagezeitpunkt des Planstands; liegt er nach dem Datenstand (unzuverlässig), gilt
@@ -1811,44 +1823,28 @@ def _kennzahlen(
         snap_zeit = _zeitpunkt(snap.erstellt_am)
         if not _zeitpunkt_verlaesslich(snap_zeit, heute):
             snap_zeit = datetime.combine(snap.stichtag, datetime.min.time()).astimezone()
-        erklaert: dict[Key, Decimal] = defaultdict(Decimal)
-        for k, v in g.items():
-            erklaert[k] -= v
-        for v in vortraege:
-            erklaert[v["konto_id"]] -= v["betrag"]
-        # Minderausgabe je Zeile als Summe der Tage mit Minderausgabe (Soll − Ist je Tag) – eine
-        # Mehrausgabe an einem anderen Tag (z. B. ein früher bezahlter, später geplanter Posten)
-        # erklärt die fehlende Zahlung des verschobenen Anteils nicht
-        minder: dict[Key, Decimal] = defaultdict(Decimal)
-        for key in set(soll) | set(ist):
-            tage = {d for d in soll.get(key, {}) if s0 <= d <= ist_bis} | \
-                {d for d in ist.get(key, {}) if s0 <= d <= ist_bis}
-            for d in tage:
-                m_tag = soll.get(key, {}).get(d, NULL) - ist.get(key, {}).get(d, NULL)
-                if m_tag < 0:
-                    minder[key] -= m_tag
-        frei = {k: max(NULL, v - erklaert.get(k, NULL)) for k, v in minder.items()}
         frei_tag: dict[tuple[Key, date], Decimal] = {}
         aktuell: dict = {}
         for key, damals, ziel, betrag in zuordnung.nach_stand_verschoben(snap_zeit, s0, ist_bis,
                                                                          heute):
             if not aktuell:
-                # der heutige Plan (wie die LIVE-Basis) zum Vergleich: führt der Planstand am
-                # damaligen Tag mehr als er, ist der Unterschied die seitdem verschobene Zahlung
+                # der heutige Plan (wie die LIVE-Basis, Datenstand des Planstands) zum Vergleich:
+                # führt der Planstand am damaligen Tag mehr als er – ohne das seitdem dorthin
+                # Verschobene –, ist der Unterschied die seitdem von dort verschobene Zahlung
                 aktuell = {"soll": plan_fluesse(
                     db, mandant, s0, wochen_start(ist_bis) + timedelta(days=6), heute=s0,
                     bestellungen="FREIGEGEBEN", ohne_bestellung_id=ohne_bestellung_id,
-                    zuordnung=zuordnung, ueberschuss_ab=heute)}
-            if (key, damals) not in frei_tag:     # Minderausgabe dieses Tags (Soll − Ist) …
+                    zuordnung=zuordnung, ueberschuss_ab=heute, angelegt_bis=snap_zeit,
+                    daten_bis=heute),
+                    "zugezogen": zuordnung.zugezogen_nach_stand(snap_zeit, s0, ist_bis)}
+            if (key, damals) not in frei_tag:
                 stand = soll.get(key, {}).get(damals, NULL)
-                frei_tag[(key, damals)] = max(NULL, min(
-                    ist.get(key, {}).get(damals, NULL) - stand,
-                    # … soweit der Planstand dort mehr führt als der heutige Plan
-                    aktuell["soll"].get(key, {}).get(damals, NULL) - stand))
-            anteil = min(betrag, frei.get(key, NULL), frei_tag[(key, damals)])
+                frei_tag[(key, damals)] = max(
+                    NULL, aktuell["soll"].get(key, {}).get(damals, NULL)
+                    + aktuell["zugezogen"].get((key, damals), NULL) - stand)
+            anteil = min(betrag, frei_tag[(key, damals)])
             if anteil <= 0:
                 continue
-            frei[key] -= anteil
             frei_tag[(key, damals)] -= anteil
             verschoben_c3[key] += anteil
             if ziel <= e_ende:
