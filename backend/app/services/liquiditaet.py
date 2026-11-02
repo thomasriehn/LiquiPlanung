@@ -1753,7 +1753,9 @@ class Zuordnung:
             spaet: list[list] = []           # erst nach der Verschiebung angelegt/freigegeben
             nachrang: set[int] = set()       # am Anlagetag gezahlte Tranchen: nach allen Resten
 
-            def einordnen(f: list, ueberfaellig: bool) -> None:
+            def einordnen(f: list, ueberfaellig: bool, bezahlt: bool = False) -> None:
+                """`bezahlt`: beim Anlegen schon bezahlt (Rang 2 der Reihenfolge), auch wenn
+                die Tranche genau am Anlagetag gezahlt ist (Fensterblock unten)."""
                 teil = teil_von[id(f)]
                 sichtbar = teil.sichtbar_bei(t, w0)
                 # dorthin verschobene Anteile hat der Nutzer bewusst an den Tag gelegt: nie spät
@@ -1768,7 +1770,8 @@ class Zuordnung:
                     else:
                         unsichtbar.append(f)
                 else:
-                    kandidaten.append((f, 0 if teil.offen_bei(t) else 1, ueberfaellig))
+                    kandidaten.append((f, 0 if teil.offen_bei(t) and not bezahlt else 1,
+                                       ueberfaellig))
 
             for f in liegt.get((key, v.von), ()):
                 if f[1] > 0 and teil_von[id(f)].vz == vz:
@@ -1808,7 +1811,7 @@ class Zuordnung:
                         if (f[1] > 0 and teil.vz == vz and f[0] < w0_fenster and f[0] != v.nach
                                 and (anlage[v.id] or not f[2]) and teil.zahltag is not None
                                 and teil.zahltag <= t and sicht is not None and sicht >= w0_fenster):
-                            einordnen(f, True)
+                            einordnen(f, True, bezahlt=True)
             budget_kontext: list = []
 
             def kontext() -> tuple | None:

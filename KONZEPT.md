@@ -772,7 +772,13 @@ das heute Gezahlte, auch wenn eine frühere Teilzahlung ohne Beleg erfasst wurde
 späteren Tag umdatiert) erkennt die Prüfung nicht – der Planstand speichert nur Beträge je
 Zeile und Tag, nicht, welcher Posten dahinter stand; die Minderausgabe erscheint dann in den
 übrigen KWs als Rahmen. Solche Änderungen als Verschiebung anlegen oder den Planstand neu
-einfrieren. Führte der Planstand einen Anteil an einem künftigen Tag (etwa am Ziel einer
+einfrieren. Ebenso bleibt ohne Ausgleich (wie im Rechenkern vor dem Umbau): eine im
+Planstand enthaltene Verschiebung, die einen Anteil vorgezogen hatte und danach gelöscht
+wird, und bei Budget eine Kette, deren erste Verschiebung vor dem Planstand liegt – nach dem
+Löschen einer Verschiebung bzw. bei Budgetketten über den Planstand hinweg den Planstand neu
+einfrieren. Umgekehrt kann die Restverteilung (s. o.) eine Minderausgabe eines anderen
+Bestandteils derselben Zeile aufbrauchen, etwa wenn ein Posten nach dem Planstand erhöht und
+ein anderer storniert wurde (vorsichtig). Führte der Planstand einen Anteil an einem künftigen Tag (etwa am Ziel einer
 inzwischen gelöschten Verschiebung) und wird er jetzt – auch vom Rolltag aus – in eine andere
 Woche verschoben, verlagert sich der Rahmen wie bei jeder Verschiebung gegenüber einem älteren
 Planstand: Die Woche des Planstand-Tags zeigt den Betrag frei, die Zielwoche gebunden (Summe

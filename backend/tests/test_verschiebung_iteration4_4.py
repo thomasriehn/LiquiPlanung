@@ -104,6 +104,39 @@ def test_bezahlter_posten_vor_dem_fenster_am_ersten_bankarbeitstag_verschiebbar(
     assert liq.Zuordnung(db, m, heute).rest == {}
 
 
+@pytest.mark.parametrize("art,konto,vz", [("DEBITOR", "8400", 1), ("KREDITOR", "3400", -1)])
+def test_feiertags_montag_gemischte_zelle_bewegt_zuerst_den_offenen_posten(
+        db, monkeypatch, art, konto, vz):
+    """Wie oben (Pfingstmontag 25.05., erster Bankarbeitstag 26.05.), dazu ein offener Posten
+    600 fällig 26.05. in derselben Zelle (1.100). 300 auf den 02.06.: Die heute gezahlte
+    Tranche des vor dem Fenster fälligen Postens war beim Anlegen schon bezahlt – bewegt wird
+    der offene Posten, die Liquidität bis 31.05. ändert sich um die 300 (wie im gesicherten
+    Rechenkern). Bei einem Debitor stünde sonst die nach hinten geschobene Einzahlung weiter
+    in KW 22 (Liquidität zu hoch)."""
+    heute = date(2026, 5, 25)
+    m = _mandant(db)
+    nutzer = _benutzer(db)
+    _bank(db, m, tag=date(2026, 3, 16))
+    d1 = _posten(db, m, "1000", date(2026, 5, 21), konto=konto, art=art)
+    _posten(db, m, "600", date(2026, 5, 26), konto=konto, art=art)
+    db.commit()
+    _heute_setzen(monkeypatch, date(2026, 5, 16))
+    _zahlen(db, m, nutzer, d1, "500", date(2026, 5, 16))
+    _heute_setzen(monkeypatch, heute)
+    _zahlen(db, m, nutzer, d1, "500", heute)
+    assert _zeile(db, m, heute, heute, konto=konto) == {"2026-05-26": vz * 1100.0}
+    liq_vorher = _liq(db, m, heute, heute, "2026-05-31")
+    _verschieben(db, m, nutzer, monkeypatch, heute, konto, date(2026, 5, 26), date(2026, 6, 2),
+                 "300")
+    assert _zeile(db, m, heute, heute, konto=konto) == \
+        {"2026-05-26": vz * 800.0, "2026-06-02": vz * 300.0}
+    assert _liq(db, m, heute, heute, "2026-05-31") == pytest.approx(liq_vorher - vz * 300.0)
+    z = liq.Zuordnung(db, m, heute)
+    assert z.rest == {}
+    bewegt = {ref[:2] for ref, fr in z._fragmente.items() if any(f[2] for f in fr)}
+    assert bewegt and ("OP", d1.id) not in bewegt
+
+
 # ---------------------------------------------------------------------------
 # B1: nach dem Planstand verschobenes Budget (P1-Lücke Budgetzellen)
 # ---------------------------------------------------------------------------
