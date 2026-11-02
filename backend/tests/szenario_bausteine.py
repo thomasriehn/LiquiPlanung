@@ -124,7 +124,8 @@ class Bestellung:
     zahldatum: date
     status: str = "FREIGEGEBEN"                  # FREIGEGEBEN | OFFEN
     zahlungen: tuple[tuple[date, Decimal, bool], ...] = ()
-    angelegt: date | None = None                  # Anlagetag (None: Bestelldatum = Zahldatum − 30)
+    angelegt: date | None = None                  # Anlagetag (None: Bestelldatum = Zahldatum − 30;
+                                                  # datetime: genauer Anlagezeitpunkt)
 
     @property
     def brutto(self) -> Decimal:
@@ -806,7 +807,7 @@ def aufbauen(sz: Szenario, *, mit_verschiebungen: bool = True, planstaende: bool
             "kreditor": f"Kreditor {b.nr}", "bestellnummer": f"B-{b.nr}",
             "bestelldatum": b.zahldatum - timedelta(days=30), "zahldatum": b.zahldatum,
             "betrag_netto": str(b.netto), "konto_id": konto_id[b.konto]})
-        best.erstellt_am = datetime.combine(
+        best.erstellt_am = b.angelegt if isinstance(b.angelegt, datetime) else datetime.combine(
             b.angelegt or min(sz.heute, b.zahldatum - timedelta(days=30)), datetime.min.time())
         if b.status == "FREIGEGEBEN":
             svc.entscheiden(db, best, benutzer, "FREIGEBEN", "Orakel", {"orakel": True})

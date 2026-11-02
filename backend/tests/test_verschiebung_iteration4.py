@@ -5,6 +5,9 @@ Fehler (Planstand vor der Verschiebung, Anlagezeitpunkt von Posten, Projektion, 
 Ketten, Szenario-Ansicht). Jeder Test schlug gegen den Stand der Iteration 3 fehl – außer
 den Gegenproben (umgekehrte Anlagefolge bei RD, Planstand nach der Verschiebung, Posten ohne
 Anlagezeitpunkt) und der Teilzahlung ohne Beleg (sichert V1 der dritten Runde gegen RA ab);
+die Tests der Abschlussprüfung (Zahlstand beim Anlegen nach späterer Schlusszahlung, Ordnung
+nach Fälligkeit vor einer späteren Verschiebung, Budget anderer Herkunft, Bestellung bei
+unbekanntem Anlagetag der Verschiebung) schlugen auch gegen den ersten Stand dieser Runde fehl;
 nur synthetische Daten."""
 
 from datetime import date, datetime, timedelta, timezone
@@ -516,23 +519,35 @@ def test_posten_ohne_anlagezeitpunkt_verhaelt_sich_wie_bisher(db):
 
 
 def test_nach_der_verschiebung_angelegter_termin_bleibt_am_ursprungstag(db):
-    """USt-VA (ohne Konto) 2.000 am 10.09. am 01.09. verschoben (auf den 21.09.); ein am 03.09.
-    angelegter zweiter Termin am 10.09. bleibt dort."""
+    """USt-VA (ohne Konto) 2.000 am 10.09., am 20.08. angelegt und am 01.09. auf den 21.09.
+    verschoben; ein am 03.09. angelegter, schon erledigter zweiter Termin am 10.09. (kleinere ID)
+    bleibt dort – verschoben ist der offene: die Projektion führt ihn am 21.09., nicht am 10.09.
+    (ohne Anlagezeitpunkt nähme die Verschiebung den Termin mit der kleineren ID)."""
     m = _mandant(db)
     _bank(db, m)
-    db.add(models.Zahlungstermin(mandant_id=m.id, typ="UST_VA", datum=date(2026, 9, 10),
-                                 betrag=D("2000"), generiert=False,
-                                 erstellt_am=datetime(2026, 8, 20, tzinfo=timezone.utc)))
+    spaet = models.Zahlungstermin(mandant_id=m.id, typ="UST_VA", datum=date(2026, 9, 10),
+                                  betrag=D("2000"), generiert=False,
+                                  status=models.TerminStatus.ERLEDIGT.value,
+                                  erstellt_am=datetime(2026, 9, 3, tzinfo=timezone.utc))
+    db.add(spaet)
+    db.flush()
+    frueh = models.Zahlungstermin(mandant_id=m.id, typ="UST_VA", datum=date(2026, 9, 10),
+                                  betrag=D("2000"), generiert=False,
+                                  erstellt_am=datetime(2026, 8, 20, tzinfo=timezone.utc))
+    db.add(frueh)
     _verschiebe(db, m, date(2026, 9, 10), date(2026, 9, 21), "-2000", termin_typ="UST_VA",
                 angelegt=date(2026, 9, 1))
-    db.add(models.Zahlungstermin(mandant_id=m.id, typ="UST_VA", datum=date(2026, 9, 10),
-                                 betrag=D("2000"), generiert=False,
-                                 erstellt_am=datetime(2026, 9, 3, tzinfo=timezone.utc)))
     db.commit()
-    p = liq.berechne_plan(db, m, start=date(2026, 9, 7), wochen=3, heute=date(2026, 9, 4))
+    assert spaet.id < frueh.id
+    heute = date(2026, 9, 4)
+    assert liq.Zuordnung(db, m, heute).termin_ids == {frueh.id}
+    p = liq.berechne_plan(db, m, start=date(2026, 9, 7), wochen=3, heute=heute)
     z = next(k for g in p["zeilen"] for k in g["kinder"] if k["key"] == "TERMIN:UST_VA")
     assert {t: v for t, v in z["plan"].items() if v} == {"2026-09-10": -2000.0,
                                                           "2026-09-21": -2000.0}
+    # Projektion: der erledigte Termin zählt nicht, der offene erst am 21.09.
+    liquiditaet = p["bestaende"]["liquiditaet"]
+    assert (liquiditaet["2026-09-13"], liquiditaet["2026-09-27"]) == (100000.0, 98000.0)
 
 
 def test_neue_posten_und_termine_erhalten_den_anlagezeitpunkt(db):
@@ -795,3 +810,139 @@ def test_verschiebung_in_der_szenarioansicht(db, monkeypatch):
     _api_verschieben(db, m, nutzer, "4920", date(2026, 8, 26), date(2026, 9, 2), "600", start,
                      szenario_id=sz.id)
     assert [v.betrag for v in db.query(models.PlanVerschiebung)] == [D("-600")]
+
+
+# ---------------------------------------------------------------------------
+# Abschlussprüfung 4.1: Zahlstand beim Anlegen auch nach späterer Zahlung (I15) und
+# Ordnung nach Fälligkeit vor einer späteren Verschiebung (I24)
+# ---------------------------------------------------------------------------
+
+def _api_verschieben_heute(db, m, nutzer, heute: date, *args, **kwargs) -> dict:
+    """Wie `_api_verschieben`, Anlagezeitpunkt wie im Betrieb am (gesetzten) heutigen Tag – der
+    Zeitstempel des Testlaufs läge nach dem Datenstand und gälte als unbekannt."""
+    antwort = _api_verschieben(db, m, nutzer, *args, **kwargs)
+    for vid in antwort["ids"]:
+        db.get(models.PlanVerschiebung, vid).erstellt_am = datetime(
+            heute.year, heute.month, heute.day, 12, tzinfo=timezone.utc)
+    db.commit()
+    return antwort
+
+
+def test_spaeter_ganz_bezahlter_posten_aendert_die_zuordnung_nicht(db, monkeypatch):
+    """Budget KW 35 1.000 netto; OP 1.000 fällig Fr 28.08., Anzahlung 400 am Mo 24.08. Am Mi
+    26.08. wird die ganze Zelle 28.08. (Rest 600 + Restbudget) auf den 07.09. verschoben, am
+    27.08. der Rest bezahlt. Die Anzahlung war beim Anlegen eine Teilzahlung (in keiner Sicht):
+    auch nachdem der Posten ganz bezahlt ist, nimmt die Verschiebung sie nicht vor dem Budget –
+    sie bewegt denselben Posten- und Budgetanteil wie vor der Zahlung."""
+    heute = date(2026, 8, 26)
+    _heute_setzen(monkeypatch, heute)
+    m = _mandant(db)
+    nutzer = _benutzer(db)
+    _bank(db, m)
+    _budget_woche(db, m, "4920", 35, "1000")
+    p = _op(db, m, "1000", date(2026, 8, 28), bezahlt=((date(2026, 8, 24), "400"),))
+    start = date(2026, 8, 24)
+    zelle = _zeile(db, m, start, heute)["2026-08-28"]
+    _api_verschieben_heute(db, m, nutzer, heute, "4920", date(2026, 8, 28), date(2026, 9, 7),
+                           -zelle, start)
+    assert "2026-08-28" not in _zeile(db, m, start, heute)
+    v = db.query(models.PlanVerschiebung).one()
+
+    def zuordnung(tag: date) -> tuple:
+        db.commit()
+        z = liq.Zuordnung(db, m, tag)
+        bewegt = sum((b for ref in (("OP", p.id, "offen"), ("OP", p.id, "erledigt"))
+                      for t, b, _ in z.verteilung(ref, p.faellig_am, D("0"))
+                      if t == date(2026, 9, 7)), D("0"))
+        return bewegt, z.budget_anspruch.get(v.id, D("0"))
+
+    vorher = zuordnung(date(2026, 8, 26))
+    assert vorher == (D("600"), D(str(-zelle)) - D("600"))
+    _zahlung(db, m, date(2026, 8, 27), "600").posten_id = p.id
+    p.bezahlt_betrag, p.status, p.bezahlt_am = D("1000"), "BEZAHLT", date(2026, 8, 27)
+    assert zuordnung(date(2026, 8, 31)) == vorher
+
+
+def test_spaetere_verschiebung_sieht_den_bestandteil_nach_faelligkeit_geordnet(db, monkeypatch):
+    """OP 2.500 fällig Mi 29.04.: am 14.04. 1.500 auf den 22.04. verschoben, am 24.04. der Rest
+    1.000 auf den 28.05.; am 04.05. 750 angezahlt (früheste Fälligkeit zuerst: der Teil am 22.04.).
+    Sa 09.05.: der Plan zeigt den überfälligen Rest 750 am Rolltag Mo 11.05. und 1.000 am 28.05.
+    Die ganze Rolltagszelle auf den 18.05. verschoben: 11.05. leer, 28.05. unverändert."""
+    heute = date(2026, 5, 9)
+    _heute_setzen(monkeypatch, heute)
+    m = _mandant(db)
+    nutzer = _benutzer(db)
+    _bank(db, m, tag=date(2026, 4, 1))
+    p = _op(db, m, "2500", date(2026, 4, 29))
+    _verschiebe(db, m, date(2026, 4, 29), date(2026, 4, 22), "-1500", angelegt=date(2026, 4, 14))
+    _verschiebe(db, m, date(2026, 4, 29), date(2026, 5, 28), "-1000", angelegt=date(2026, 4, 24))
+    _zahlung(db, m, date(2026, 5, 4), "750").posten_id = p.id
+    p.bezahlt_betrag = D("750")
+    start = date(2026, 5, 4)
+    assert _zeile(db, m, start, heute) == {"2026-05-11": -750.0, "2026-05-28": -1000.0}
+    _api_verschieben_heute(db, m, nutzer, heute, "4920", date(2026, 5, 11), date(2026, 5, 18),
+                           "750", start)
+    assert _zeile(db, m, start, heute) == {"2026-05-18": -750.0, "2026-05-28": -1000.0}
+
+
+def test_budget_anderer_herkunft_aendert_die_fruehere_verschiebung_nicht(db, monkeypatch):
+    """Miete 4210 (ohne USt) 2.000 am 13.07., Budget KW 29 2.500 (500 je Tag; die Rate
+    verbraucht 2.000 des Restbudgets). Am 01.07.: 13.07. ganz (Rate + 500 Budget) auf den
+    17.07. und 300 Budget vom 16.07. auf den 10.07. (KW 28 – die Woche hat dafür kein
+    Restbudget mehr). Heute 02.07. wird die Zelle 17.07. auf den 16.07. gelegt: eine Verschiebung
+    innerhalb der KW 29 – das Budget vom 13.07. füllt nicht die Lücke, die die zweite dem 16.07.
+    entnommen hat, KW 28 bleibt unverändert."""
+    heute = date(2026, 7, 2)
+    _heute_setzen(monkeypatch, heute)
+    m = _mandant(db)
+    nutzer = _benutzer(db)
+    _bank(db, m, tag=date(2026, 4, 1))
+    _budget_woche(db, m, "4210", 29, "2500")
+    db.add(models.Dauerbuchung(mandant_id=m.id, name="Miete", art="KREDITOR",
+                               konto_id=_konto(db, m, "4210").id, betrag_brutto=D("2000"),
+                               intervall="MONATLICH", stichtag=13, gueltig_von=date(2026, 1, 1)))
+    _verschiebe(db, m, date(2026, 7, 13), date(2026, 7, 17), "-2500", konto="4210",
+                angelegt=date(2026, 7, 1))
+    _verschiebe(db, m, date(2026, 7, 16), date(2026, 7, 10), "-300", konto="4210",
+                angelegt=date(2026, 7, 1))
+    start = date(2026, 6, 29)
+
+    def kennzahlen() -> tuple:
+        return tuple(_kz(db, m, kw, heute, konto="4210")["verfuegbar"] for kw in (28, 29))
+
+    vorher = kennzahlen()
+    assert _zeile(db, m, start, heute, konto="4210")["2026-07-17"] == -2500.0
+    _api_verschieben_heute(db, m, nutzer, heute, "4210", date(2026, 7, 17), date(2026, 7, 16),
+                           "2500", start)
+    zeile = _zeile(db, m, start, heute, konto="4210")
+    assert "2026-07-17" not in zeile and zeile["2026-07-16"] == -2500.0
+    assert kennzahlen() == vorher
+
+
+def test_nach_der_verschiebung_freigegebene_bestellung_bei_unbekanntem_anlagetag_spaet(db):
+    """OP 1.500 fällig 02.06., am 11.05. bezahlt; am 12.05. auf So 24.05. verschoben, eine
+    Folgeverschiebung 24.05. → 18.06. ohne verlässlichen Anlagezeitpunkt (gilt als heute
+    angelegt, Do 14.05. mittags). Eine erst am Abend des 14.05. erfasste und freigegebene
+    Bestellung am 24.05. stand beim Anlegen nicht in der Zelle: die Folgeverschiebung nimmt den
+    Posten, die Bestellung bleibt ganz am 24.05. (wie Posten und Termine verglichen mit dem
+    angenommenen Anlagezeitpunkt)."""
+    from test_bestellungen import _bestellung
+
+    heute = date(2026, 5, 14)
+    m = _mandant(db)
+    nutzer = _benutzer(db)
+    _bank(db, m, tag=date(2026, 3, 1))
+    p = _op(db, m, "1500", date(2026, 6, 2), bezahlt=((date(2026, 5, 11), "1500"),))
+    _verschiebe(db, m, date(2026, 6, 2), date(2026, 5, 24), "-1500", angelegt=date(2026, 5, 12))
+    _verschiebe(db, m, date(2026, 5, 24), date(2026, 6, 18), "-1500")     # Zeitpunkt des Laufs
+    b = _bestellung(db, m, nutzer, konto="4920", netto="2000", zahldatum=date(2026, 5, 24),
+                    status="FREIGEGEBEN")
+    b.erstellt_am = datetime(2026, 5, 14, 20, tzinfo=timezone.utc)
+    b.entschieden_am = datetime(2026, 5, 14, 20, 30, tzinfo=timezone.utc)
+    db.commit()
+    z = liq.Zuordnung(db, m, heute)
+    assert [t for t, _, _ in z.verteilung(("BEST", b.id, "offen"), b.zahldatum, D("0"))] == \
+        [date(2026, 5, 24)]
+    assert [t for t, _, _ in z.verteilung(("OP", p.id, "erledigt"), p.faellig_am, D("0"))] == \
+        [date(2026, 6, 18)]
+    assert _kz(db, m, 21, heute)["gebunden"]["summe"] == 2380.0

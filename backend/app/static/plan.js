@@ -416,8 +416,10 @@ async function bestellAbschnitt(zeile, sp) {
   box.className = "zd-abschnitt";
   let liste = [];
   try {
+    // Fensterbeginn des Plans mitgeben: davor liegende Bestellungen führt der Plan am ersten
+    // Bankarbeitstag des Fensters
     liste = await api("GET", `/api/mandanten/${MANDANT_ID}/plan/bestellungen?konto_id=${encodeURIComponent(zeile.key)}` +
-      `&von=${sp.tage[0]}&bis=${sp.tage[sp.tage.length - 1]}`);
+      `&von=${sp.tage[0]}&bis=${sp.tage[sp.tage.length - 1]}` + (daten && daten.start ? `&start=${daten.start}` : ""));
   } catch (e) { return box; }                 // Abschnitt ist optional
   if (!liste || !liste.length) return box;
   const STATUS = { OFFEN: ["offen", "zur Freigabe"], FREIGEGEBEN: ["freigegeben", "freigegeben"],

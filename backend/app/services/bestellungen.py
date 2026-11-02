@@ -31,7 +31,9 @@ from .liquiditaet import (
     CENT,
     Key,
     Zuordnung,
+    _betragsgleich,
     _brutto,
+    _ist_zahlungen,
     _zeitpunkt,
     _zeitpunkt_verlaesslich,
     _f,
@@ -1164,9 +1166,10 @@ def plan_bestellungen(db: Session, mandant: models.Mandant, *, konto_id: int | N
     Fenster abgelöst: am ersten Bankarbeitstag des Fensters, wie der Plan); verschobene
     Anteile an ihrem Zieltag (je Anteil ein Eintrag, Zuordnung wie im Plan). konto_id None =
     Bestellungen ohne Konto (Planzeile „Bestellungen (ohne Konto)“); start: Beginn des
-    Planfensters (Standard: Montag der laufenden Woche, wie der Plan)."""
+    Planfensters (Fensterbeginn der Planseite; ohne Angabe der späteste, der den Zeitraum zeigt:
+    Montag der laufenden Woche bzw. der Woche von `von`, liegt diese davor)."""
     heute = heute or date.today()
-    start = wochen_start(start or heute)
+    start = wochen_start(start) if start else min(wochen_start(heute), wochen_start(von))
     status = bestell_plan_status(mandant, None) or set()
     roll_ziel = naechster_bankarbeitstag(max(start, heute), mandant.bundesland)
     erster = naechster_bankarbeitstag(start, mandant.bundesland)
@@ -1175,6 +1178,7 @@ def plan_bestellungen(db: Session, mandant: models.Mandant, *, konto_id: int | N
     key = konto_id if konto_id is not None else BESTELL_KEY
     zuordnung = Zuordnung(db, mandant, heute, verschiebungen=[
         v for v in plan_verschiebungen(db, mandant.id, "PLAN") if verschiebung_key(v) == key],
+        abgleich_ab=min(start, wochen_start(heute)),
         nur_konten={konto_id} if konto_id is not None else set())
     q = (
         select(models.Bestellung)
@@ -1289,6 +1293,7 @@ def _stand_gestern(
     db: Session, mandant: models.Mandant, heute: date, ende: date, roll_tag: date,
     ohne_bestellung_id: int | None, fluesse, gerollt: dict, mehrausgabe: dict[Key, Decimal],
     zuordnung: Zuordnung, s0: date, gruppe_fuer_key=None, vortraege: list[dict] | None = None,
+    vor_s0_gerollt: dict[Key, Decimal] | None = None,
 ) -> list[tuple[Key, date, Decimal]]:
     """Ist zählt nur bis gestern: Zahlungen und Ablösungen ab heute sind darin noch
     nicht enthalten, die zugehörigen Posten/Bestellungen gelten für die Freigabe
@@ -1298,7 +1303,10 @@ def _stand_gestern(
     erledigte ab heute bleiben gebunden, soweit keine Mehrausgabe sie deckt; vergangene seit
     s0 sind überfällig, soweit eine unerklärte Minderausgabe zeigt, dass ihre Zahlung im Ist
     fehlt. Ergänzt `fluesse`/`gerollt` und liefert die nicht überfälligen Bestellanteile
-    (key, Plantag, Betrag)."""
+    (key, Plantag, Betrag); `vor_s0_gerollt` nimmt den Teil des so Gerollten auf, dessen
+    Plantag vor s0 liegt (erst ab heute ganz bezahlte Posten und abgelöste Bestellungen stehen
+    im Soll nicht mehr gerollt, sondern bezahlt am ersten Bankarbeitstag ab s0 – für den
+    Gegenposten in C3)."""
     bestell_anteile: list[tuple[Key, date, Decimal]] = []
 
     def eintragen(key: Key, ref: tuple, zahltag: date, betrag: Decimal) -> list[tuple[date, Decimal]]:
@@ -1318,6 +1326,8 @@ def _stand_gestern(
             fluesse[key][d] -= anteil
             if d == roll_tag and tag < d:
                 gerollt[key] = gerollt.get(key, NULL) - anteil
+                if vor_s0_gerollt is not None and tag < s0 and ref[2] == "erledigt":
+                    vor_s0_gerollt[key] = vor_s0_gerollt.get(key, NULL) - anteil
             else:
                 frei.append((tag, anteil))
         return frei
@@ -1368,16 +1378,44 @@ def _stand_gestern(
                models.BankTransaktion.buchungstag < heute)
     ):
         vorher_bezahlt[pid] += abs(betrag)
+    posten_liste = []
     for pid in sorted(kandidaten):
         p = db.get(models.OffenerPosten, pid)
         if (p is None or p.mandant_id != mandant.id or p.art != PostenArt.KREDITOR.value
                 or p.status == PostenStatus.STORNIERT.value
                 or p.forderungsklasse == models.Forderungsklasse.INSOLVENZFORDERUNG.value):
             continue
+        posten_liste.append(p)
+    # ab heute ohne jeden Beleg als bezahlt erfasst („Zahlung erfassen“ ohne Bankkonto): steht
+    # die Zahlung als Buchung ohne Posten-Bezug schon im Ist bis gestern (Import mit früherem
+    # Buchungstag), ist sie nicht mehr offen – sonst zählte sie in C1 und gebunden doppelt.
+    # Abgleich auf dem Sachkonto des Postens, betragsgleich, Buchungstag ab s0; eine Buchung
+    # deckt einen Posten
+    ohne_beleg = [p for p in posten_liste
+                  if p.status == PostenStatus.BEZAHLT.value and p.bezahlt_am and p.bezahlt_am >= heute
+                  and not heute_bezahlt.get(p.id) and not vorher_bezahlt.get(p.id)
+                  and p.konto_id is not None]
+    im_ist: set[int] = set()
+    if ohne_beleg and s0 < heute:
+        konten = _lade_konten(db, mandant.id)
+        nr_von = {k.id: k.nummer for k in konten}
+        zahlungen = _ist_zahlungen(db, mandant.id, _finanz_nrn(konten), s0,
+                                   heute - timedelta(days=1), ohne_zugeordnete=True,
+                                   nur_nrn={nr_von[p.konto_id] for p in ohne_beleg
+                                            if p.konto_id in nr_von})
+        for p in sorted(ohne_beleg, key=lambda p: (p.zahlung_geplant_am or p.faellig_am, p.id)):
+            for z in zahlungen.get(nr_von.get(p.konto_id), ()):
+                if z[2] > 0 and z[1] < 0 and _betragsgleich(z[1], p.betrag_brutto):
+                    z[2] = NULL
+                    im_ist.add(p.id)
+                    break
+    for p in posten_liste:
+        pid = p.id
         betrag = heute_bezahlt.get(pid, NULL)
         bezahlt = p.status == PostenStatus.BEZAHLT.value
         if bezahlt and p.bezahlt_am and p.bezahlt_am >= heute:
-            betrag = max(NULL, p.betrag_brutto - vorher_bezahlt.get(pid, NULL))
+            betrag = NULL if pid in im_ist else \
+                max(NULL, p.betrag_brutto - vorher_bezahlt.get(pid, NULL))
         key = p.konto_id if p.konto_id is not None else f"TERMIN:OP_{p.art}"
         eintragen(key, ("OP", p.id, "erledigt" if bezahlt else "teil"),
                   p.zahlung_geplant_am or p.faellig_am, betrag)
@@ -1758,9 +1796,10 @@ def _kennzahlen(
             for d, v in tageswerte.items():
                 if s0 <= d <= ist_bis:
                     mehrausgabe[key] += vz * v
+    vor_s0_gerollt: dict[Key, Decimal] = {}
     heute_anteile = _stand_gestern(db, mandant, heute, e_ende, roll_tag, ohne_bestellung_id,
                                    e_fluesse, g, mehrausgabe, zuordnung, s0, gruppe_fuer_key,
-                                   vortraege=vortraege)
+                                   vortraege=vortraege, vor_s0_gerollt=vor_s0_gerollt)
     # Planstand vor einer Verschiebung eingefroren (z. B. montags, verschoben im Lauf der Woche):
     # der dort an einem vergangenen Tag geplante, jetzt verschobene und noch offene Anteil fehlt
     # dem Ist (C1) – er zählt wie Überfälliges in C3, im B seiner Zielwoche nicht noch einmal
@@ -1777,7 +1816,18 @@ def _kennzahlen(
             erklaert[k] -= v
         for v in vortraege:
             erklaert[v["konto_id"]] -= v["betrag"]
-        frei = {k: max(NULL, -v - erklaert.get(k, NULL)) for k, v in mehrausgabe.items()}
+        # Minderausgabe je Zeile als Summe der Tage mit Minderausgabe (Soll − Ist je Tag) – eine
+        # Mehrausgabe an einem anderen Tag (z. B. ein früher bezahlter, später geplanter Posten)
+        # erklärt die fehlende Zahlung des verschobenen Anteils nicht
+        minder: dict[Key, Decimal] = defaultdict(Decimal)
+        for key in set(soll) | set(ist):
+            tage = {d for d in soll.get(key, {}) if s0 <= d <= ist_bis} | \
+                {d for d in ist.get(key, {}) if s0 <= d <= ist_bis}
+            for d in tage:
+                m_tag = soll.get(key, {}).get(d, NULL) - ist.get(key, {}).get(d, NULL)
+                if m_tag < 0:
+                    minder[key] -= m_tag
+        frei = {k: max(NULL, v - erklaert.get(k, NULL)) for k, v in minder.items()}
         frei_tag: dict[tuple[Key, date], Decimal] = {}
         aktuell: dict = {}
         for key, damals, ziel, betrag in zuordnung.nach_stand_verschoben(snap_zeit, s0, ist_bis,
@@ -1808,10 +1858,12 @@ def _kennzahlen(
         if betrag:
             e_fluesse[key][roll_tag] -= betrag
     # Gegenposten des vor s0 Überfälligen am noch bevorstehenden ersten Bankarbeitstag:
-    # höchstens das, was das Soll dort führt und weiter überfällig ist
+    # höchstens das, was das Soll dort führt und weiter überfällig ist – auch was erst ab heute
+    # ganz bezahlt ist (Stand gestern überfällig; das Soll führt es dort bezahlt statt gerollt)
     gegenposten: dict[Key, Decimal] = {}
     if c3_ohne_gegenposten:
-        for key, betrag in soll_gerollt.items():
+        for key in set(soll_gerollt) | set(vor_s0_gerollt):
+            betrag = soll_gerollt.get(key, NULL) + vor_s0_gerollt.get(key, NULL)
             gegenposten[key] = max(NULL, min(-betrag, -g.get(key, NULL),
                                              -soll.get(key, {}).get(s0_roll, NULL)))
 
