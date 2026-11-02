@@ -121,26 +121,62 @@ Wer `SECRET_KEY` ändert oder eine Sicherung auf einer anderen Installation eins
 muss die Geheimnisse unter „System“ neu eingeben – oder vorab `GEHEIMNIS_SCHLUESSEL`
 setzen, dann bleibt `SECRET_KEY` frei änderbar.
 
-## 6. Updates
+## 6. Updates und Rücksprung
+
+Updates laufen über `deploy/aktualisieren.sh` (als root im Installationsverzeichnis):
 
 ```bash
 cd /opt/liquiplanung
-git pull
-docker compose up -d --build
+deploy/aktualisieren.sh            # ausgecheckten Zweig aktualisieren
+deploy/aktualisieren.sh claude/bestellfreigabe   # oder einen Zweig angeben
 ```
+
+Das Skript hält den laufenden Stand fest (Commit, Zweig, Schema-Revision), sichert die
+Datenbank (`pg_dump`), holt den neuen Stand (nur Fast-Forward), baut und startet die
+Container und wartet, bis die Anwendung antwortet. Sicherungen, Rücksprungpunkte
+(`stand-*.env`, der jüngste zusätzlich als `letzter-stand.env`) und eine Kopie beider
+Skripte liegen unter `/var/backups/liquiplanung` (änderbar über `LIQUI_SICHERUNG`).
+
+**Erstes Update mit den Skripten:** Ein älterer Stand enthält sie noch nicht. Dann einmal
+das Skript aus dem neuen Stand holen und ausführen:
+
+```bash
+cd /opt/liquiplanung
+git fetch origin
+git show origin/claude/bestellfreigabe:deploy/aktualisieren.sh > /tmp/liqui-aktualisieren.sh
+bash /tmp/liqui-aktualisieren.sh claude/bestellfreigabe
+```
+
+**Rücksprung** auf den Stand vor dem letzten Update:
+
+```bash
+/var/backups/liquiplanung/werkzeug/zuruecksetzen.sh
+```
+
+Das Skript sichert die Datenbank, stuft das Schema mit dem noch ausgecheckten neuen Code
+auf die Revision von vorher zurück (`alembic downgrade`), checkt den alten Commit aus
+(losgelöst, der Zweig bleibt unverändert), baut und startet neu. Seit dem Update erfasste
+Daten bleiben erhalten; es entfallen nur Spalten, die die neuen Migrationen angelegt
+haben. Einen älteren Rücksprungpunkt wählt man mit
+`zuruecksetzen.sh /var/backups/liquiplanung/stand-<Zeitpunkt>.env`. Wieder nach vorn:
+`/var/backups/liquiplanung/werkzeug/aktualisieren.sh claude/bestellfreigabe`. Den
+kompletten Datenbestand von vor dem Update stellt dagegen nur die Sicherung aus der
+Standdatei (`SICHERUNG_DATEI`) her, siehe Abschnitt 5 – sie verwirft alles seither
+Erfasste.
 
 Schemaänderungen laufen über Alembic-Migrationen und werden beim Anwendungsstart
 automatisch angewendet (`alembic upgrade head`); ältere Installationen aus der Zeit
-vor Alembic werden beim ersten Start übernommen. Vor Updates empfiehlt sich dennoch
-eine Sicherung (Abschnitt 5).
+vor Alembic werden beim ersten Start übernommen. Ein Stand ohne die neueren Migrationen
+startet nicht auf einer Datenbank mit neuerem Schema – deshalb erst zurückstufen, dann
+auschecken (das erledigt `zuruecksetzen.sh`).
 
 Bricht eine Migration ab, startet die Anwendung nicht, und die Datenbank bleibt auf
-dem bisherigen Stand; die Ursache steht in `docker compose logs app`. Beispiel:
-Migration `799a2322545e` (eine Zahlung löst höchstens eine Bestellung ab) bricht ab,
-wenn eine Buchung oder ein Bankumsatz bereits mehreren Bestellungen zugeordnet ist.
-Dann den vorherigen Stand wieder starten (`git checkout <vorheriger Stand>` und
-`docker compose up -d --build`), die doppelten Ablösungen in der Anwendung aufheben
-und das Update wiederholen.
+dem bisherigen Stand; die Ursache steht in `docker compose logs app`, und
+`aktualisieren.sh` meldet den Fehler. `zuruecksetzen.sh` startet dann den vorherigen
+Stand (ohne Zurückstufen, das Schema ist unverändert). Beispiel: Migration
+`799a2322545e` (eine Zahlung löst höchstens eine Bestellung ab) bricht ab, wenn eine
+Buchung oder ein Bankumsatz bereits mehreren Bestellungen zugeordnet ist – dann die
+doppelten Ablösungen in der Anwendung aufheben und das Update wiederholen.
 
 ## 7. SharePoint-Anbindung (Microsoft Graph, optional)
 

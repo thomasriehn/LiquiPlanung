@@ -286,8 +286,12 @@ am Anlagetag schon bezahlt war, und spätere Zahlungen ändern die Zuordnung nic
 Kandidat ist nur, was beim Anlegen eine Sicht in der Zelle zeigte – bis zum Anlagetag
 gezahlte Teilzahlungen (auch die eines erst danach ganz bezahlten Postens bzw. abgelösten
 Bestellung) und vor dem Fenster bezahlte Posten nicht (ein Betrag darüber hinaus bleibt
-wirkungslos); eine Teilzahlung ohne Beleg (Zahltag unbekannt) nur, wenn erst der
-Bestandteil samt ihr der Verschiebung entspricht. Eine am Anlagetag selbst gezahlte
+wirkungslos). Ausnahme Feiertag zu Wochenbeginn (z. B. Pfingstmontag, Anlage an diesem
+Tag): Die volle Sicht zeigt die Tranchen ab Fensterbeginn bezahlter Posten und abgelöster
+Bestellungen mit Plantag vor dem Fenster am ersten Bankarbeitstag; von diesem Tag aus sind
+sie Kandidaten (bis zum Anlagetag gezahlt wie beim Anlegen Bezahltes). Eine Teilzahlung
+ohne Beleg (Zahltag unbekannt) nur, wenn erst der Bestandteil samt ihr der Verschiebung
+entspricht. Eine am Anlagetag selbst gezahlte
 Teilzahlung gilt als vor der Verschiebung gezahlt – außer der Betrag übersteigt, was die
 Zelle dann gezeigt hätte, und passt erst mit ihr (der Zellendialog verschiebt höchstens den
 Zellwert, die Zahlung kam also danach; sie zählt dann erst nach allen sichtbaren offenen
@@ -399,6 +403,15 @@ ausgeführt); die Rücknahme der Verschiebung ändert so die Liquidität. Das L�
 Verschiebung, deren Ziel heute oder vergangen ist, legt den Anteil wieder an seinen
 Ursprungstag – vergangene Termine ohne Ist gelten in der Projektion als ausgeführt
 (Entscheidung C), die Liquidität am Horizont ändert sich um den Anteil.
+Der Zielwert verschobenen Budgets ist, solange die Herkunftswoche im Fenster liegt,
+sichtabhängig: Drückt eine später erfasste Rechnung ihr Restbudget unter den verschobenen
+Betrag, kommt der Überschuss nur von Tagen ab heute; nach dem Wochenwechsel gilt die Sicht
+zu ihrem Beginn (Überschuss von allen Tagen) – die Zielzelle wechselt dann ohne Ereignis
+(z. B. 38 am Freitag, 190 am Montag), Wochensummen und Freigabe bleiben gleich. Ebenso
+wechselt sie am Wochenende, wenn Überfälliges an den Rolltag in der Folgewoche rollt und so
+das Restbudget der Ursprungswoche wieder frei wird. Was eine Woche nicht mehr abgeben kann,
+kürzt auch ein Fragment an einem vergangenen Zieltag (LIVE-Soll dieses Tags und C1 ändern
+sich, vorsichtig).
 
 **Ist-Buchungen einer Zelle:** `GET /mandanten/{id}/plan/ist-buchungen` liefert die
 Zahlungsbuchungen (genau eine Seite Bank/Kasse) der Planzeile im Zeitraum;
@@ -676,8 +689,11 @@ keinen eigenen Rahmen.
   solange das Ist bis gestern keine passende Buchung ohne Posten-Bezug zeigt) und den
   Verschiebungen wie im Soll; Überfälliges zählt in C. **Grenzen:** Teilzahlungen ohne
   Bankkonto tragen kein Datum – eine heute ohne Beleg erfasste Teilzahlung mindert B
-  sofort (Spielraum, bis der Import im Ist steht); Teilzahlungen sind stets mit Bankkonto
-  zu erfassen. Der Abgleich eines heute ohne Beleg bezahlten Postens nimmt jede
+  sofort (Spielraum, bis der Import im Ist steht), eine vor dem Wochenbeginn ohne Beleg
+  erfasste erscheint nach einer Schlusszahlung von heute im LIVE-Soll ab s0; ebenso gibt
+  eine ohne Bankkonto mit Datum gestern erfasste Zahlung, deren Buchung erst mit
+  Buchungstag heute importiert wird, bis morgen Rahmen frei. Zahlungen sind stets mit
+  Bankkonto zu erfassen. Der Abgleich eines heute ohne Beleg bezahlten Postens nimmt jede
   betragsgleiche Buchung ohne Posten-Bezug seines Sachkontos seit s0 – auch eine, die zu
   einem früher ohne Beleg bezahlten Posten oder einer Rate gehört.
 - **C – bisherige Abweichung inkl. Vorträge:** Σ (Ist − Soll) seit Basisbeginn bis
@@ -731,7 +747,15 @@ Stand gestern offen, seine Zahlung fehlt dem Ist also gewiss (eine frühe Zahlun
 anderen Postens am selben Tag verdeckt das nicht); begrenzt ist der Ausgleich nur durch das,
 was der Planstand am damaligen Tag mehr führt als der heutige Plan mit dem Datenstand des
 Planstands (`plan_fluesse` mit `angelegt_bis`/`daten_bis`), ohne das seitdem dorthin
-Verschobene (`Zuordnung.zugezogen_nach_stand`); erst nach dem Planstand angelegte Posten,
+Verschobene (`Zuordnung.zugezogen_nach_stand`). Was am damaligen Tag so nicht gedeckt ist
+– etwa weil der Planstand den Anteil am Ziel einer inzwischen gelöschten Verschiebung führte
+–, nimmt der Ausgleich je Zeile aus den übrigen Tagen seit dem Stichtag bis gestern mit
+demselben Maßstab (der Ausgleich wird dadurch nur größer, also vorsichtiger). Nach dem
+Planstand von einem vergangenen Tag auf einen Tag ab heute verschobenes **Budget** zählt
+ebenso in C3, begrenzt durch das, was der Planstand am Herkunftstag führte, und statt in B
+(Budget bindet nicht) im Soll der Zielwoche – nur wenn die ganze Kette nach dem Planstand
+angelegt ist (`Zuordnung.budget_nach_stand_verschoben`); so rechnet AUTO in jeder KW wie
+ein frischer Planstand. Erst nach dem Planstand angelegte Posten,
 Termine, Dauerbuchungen und Bestellungen (bzw. erst danach freigegebene) standen nicht in
 ihm und zählen nicht – wird ein solcher ungeplanter überfälliger Posten in die Zukunft
 verschoben, wechselt seine Belastung entwurfsgemäß von „überfällig in jeder KW“ zu „gebunden
@@ -748,10 +772,17 @@ das heute Gezahlte, auch wenn eine frühere Teilzahlung ohne Beleg erfasst wurde
 späteren Tag umdatiert) erkennt die Prüfung nicht – der Planstand speichert nur Beträge je
 Zeile und Tag, nicht, welcher Posten dahinter stand; die Minderausgabe erscheint dann in den
 übrigen KWs als Rahmen. Solche Änderungen als Verschiebung anlegen oder den Planstand neu
-einfrieren. Erledigte Termine ab heute deckt eine Mehrausgabe einmal über alle künftigen
-Anteile (unabhängig von der geprüften KW, die spätesten zuerst), und zwar aus dem eigenen
-Konto, ohne Konto aus der eigenen Terminzeile und dem Terminregel-Konto des Typs (nur ohne
-ein solches Konto aus der Gruppe) – eine Zahlung deckt so keinen fremden Termin.
+einfrieren. Führte der Planstand einen Anteil an einem künftigen Tag (etwa am Ziel einer
+inzwischen gelöschten Verschiebung) und wird er jetzt – auch vom Rolltag aus – in eine andere
+Woche verschoben, verlagert sich der Rahmen wie bei jeder Verschiebung gegenüber einem älteren
+Planstand: Die Woche des Planstand-Tags zeigt den Betrag frei, die Zielwoche gebunden (Summe
+beider Wochen unverändert). Erledigte Termine ab heute deckt eine Mehrausgabe einmal über
+alle künftigen Anteile (unabhängig von der geprüften KW, die spätesten zuerst), und zwar aus
+dem eigenen Konto, ohne Konto aus der eigenen Terminzeile und dem Terminregel-Konto des Typs (nur ohne
+ein solches Konto aus der Gruppe) – eine Zahlung deckt so keinen fremden Termin. Ein nach
+dem Planstand verschobener Termin, der an seinem neuen Tag bezahlt und erledigt gesetzt wird,
+gibt an diesem Tag den Terminbetrag in den Folge-KWs als Rahmen frei (ab dem Folgetag nicht
+mehr).
 
 **Ablösung und Abgleich.** Ablösungen verweisen auf eine Ist-Buchung, einen Bankumsatz
 (nicht zugleich im OP-Ausgleich; umgekehrt lässt der OP-Ausgleich Umsätze mit

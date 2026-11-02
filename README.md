@@ -2,7 +2,9 @@
 
 Mandantenfähige 13-Wochen-Liquiditätsplanung für Insolvenzbuchhalter – Web-Anwendung als
 Ablösung der Excel-Planung. Fachkonzept und Architektur: **[KONZEPT.md](KONZEPT.md)** ·
-Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)**
+Betrieb auf Proxmox/LXC: **[deploy/PROXMOX_LXC.md](deploy/PROXMOX_LXC.md)** – Updates mit
+Sicherung und Rücksprung über `deploy/aktualisieren.sh` und `deploy/zuruecksetzen.sh`
+(Abschnitt 6 dort).
 
 ## Funktionsumfang
 
