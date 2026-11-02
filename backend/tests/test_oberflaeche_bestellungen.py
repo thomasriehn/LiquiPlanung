@@ -155,6 +155,21 @@ def test_plan_zellendialog_abgeloeste_bestellung_mit_planbetrag(tmp_path):
     assert "überfällig, vorgetragen" in gerollt and "595,00 €" in gerollt
 
 
+def test_plan_zellendialog_fragt_mit_dem_fensterbeginn_des_plans(tmp_path):
+    """Der Bestellabschnitt des Zellendialogs schickt den Fensterbeginn der Planseite mit
+    (start) – der Plan führt Bestellungen vor dem Fenster am ersten Bankarbeitstag."""
+    code = """
+      const urls = [];
+      __antworten.push([(m, u) => { urls.push(u); return u.includes("/plan/bestellungen"); }, []]);
+      daten = { start: "2026-07-27" };
+      await bestellAbschnitt({ key: "42" }, { tage: ["2026-07-27", "2026-07-31"] });
+      return urls;
+    """
+    urls = _lauf(tmp_path, ["app.js", "plan.js"], code)
+    url = next(u for u in urls if "/plan/bestellungen" in u)
+    assert "von=2026-07-27" in url and "bis=2026-07-31" in url and "start=2026-07-27" in url
+
+
 # ---------------------------------------------------------------- bestellungen.js
 
 

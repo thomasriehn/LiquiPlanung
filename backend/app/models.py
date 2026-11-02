@@ -446,6 +446,10 @@ class OffenerPosten(Base):
     # werden auf den nächsten offenen Sammelposten vorgetragen.
     sammel: Mapped[bool] = mapped_column(Boolean, default=False)
     notiz: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Anlagezeitpunkt (Zuordnung der Planverschiebungen: erst danach erfasste Posten rangieren
+    # hinter dem Budget); NULL = vor Einführung angelegt, unbekannt
+    erstellt_am: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True,
+                                                         default=utcnow)
 
     konto: Mapped[Konto | None] = relationship()
 
@@ -468,6 +472,10 @@ class Dauerbuchung(Base):
     # nicht gebuchte fällige Zahlungen in der Ansicht „mit Vortrag“ auf den
     # nächsten Bankarbeitstag vortragen
     vortragen: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Anlagezeitpunkt (Zuordnung der Planverschiebungen: Raten einer erst danach angelegten
+    # Dauerbuchung rangieren hinter dem Budget); NULL = vor Einführung angelegt, unbekannt
+    erstellt_am: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True,
+                                                         default=utcnow)
 
     konto: Mapped[Konto | None] = relationship()
 
@@ -550,6 +558,9 @@ class Zahlungstermin(Base):
     konto_id: Mapped[int | None] = mapped_column(ForeignKey("konten.id", ondelete="SET NULL"), nullable=True)
     kommentar: Mapped[str | None] = mapped_column(String(255), nullable=True)
     generiert: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Anlagezeitpunkt (wie bei offenen Posten); NULL = unbekannt
+    erstellt_am: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True,
+                                                         default=utcnow)
 
     konto: Mapped[Konto | None] = relationship()
 

@@ -848,18 +848,21 @@ def bestellungen_journal(mandant_id: int, bestellung_id: int | None = None, limi
 
 @router.get("/mandanten/{mandant_id}/plan/bestellungen")
 def plan_bestellungen(mandant_id: int, von: str | None = None, bis: str | None = None,
-                      konto_id: str | None = None, benutzer=Depends(aktueller_benutzer),
-                      db: Session = Depends(get_db)):
+                      konto_id: str | None = None, start: str | None = None,
+                      benutzer=Depends(aktueller_benutzer), db: Session = Depends(get_db)):
     """Bestellungen einer Planzelle; konto_id leer bzw. „TERMIN:BESTELLUNG“ =
-    Zeile „Bestellungen (ohne Konto)“."""
+    Zeile „Bestellungen (ohne Konto)“; start: Fensterbeginn der Planseite (der Plan führt
+    Bestellungen vor dem Fenster am ersten Bankarbeitstag des Fensters)."""
     m = mandant_oder_403(db, benutzer, mandant_id)
     d_von, d_bis = _datum_param(von, "von"), _datum_param(bis, "bis")
     if d_bis < d_von:
         raise HTTPException(422, "Das Ende des Zeitraums liegt vor dem Beginn")
+    d_start = _datum_param(start, "start") if start else None
     roh = (konto_id or "").strip()
     kid = None if roh in ("", BESTELL_KEY) else _ganzzahl(roh, "konto_id")
     with _fehler(db):
-        return bestellungen.plan_bestellungen(db, m, konto_id=kid, von=d_von, bis=d_bis)
+        return bestellungen.plan_bestellungen(db, m, konto_id=kid, von=d_von, bis=d_bis,
+                                              start=d_start)
 
 
 # ---------------------------------------------------------------- Datei-Proxy (Seite)

@@ -36,10 +36,13 @@ from ..services.kontenrahmen import (
 )
 from ..services.feiertage import naechster_bankarbeitstag
 from ..services.liquiditaet import (
+    Zuordnung,
     berechne_plan,
     erstelle_snapshot,
+    plan_verschiebungen,
     soll_ist_vergleich,
     szenarien_vergleich,
+    verschiebung_key,
     wochen_start,
 )
 from ..services.zahlungskalender import generiere_termine
@@ -3381,18 +3384,31 @@ def verschiebung_anlegen(
     if von <= ziel <= bis:
         raise HTTPException(422, "Der Zielzeitraum entspricht dem Ausgangszeitraum")
 
+    # Beträge stets aus dem Basisplan: eine Verschiebung wirkt in jeder Sicht (auch in
+    # Szenarien) auf dieselben Bestandteile – ein Szenariofaktor darf nicht als Basisbetrag
+    # gespeichert werden
     szenario = _szenario_oder_none(db, mandant.id, daten.szenario_id)
-    plan = berechne_plan(
-        db, mandant, start=_datum(daten.start, "start") if daten.start else None,
-        wochen=daten.wochen, szenario=szenario, heute=heute,
-    )
+    start = _datum(daten.start, "start") if daten.start else None
+    plan = berechne_plan(db, mandant, start=start, wochen=daten.wochen, heute=heute)
     zeile = _plan_zeile(plan, daten.key)
     feld = "plan" if daten.quelle == "PLAN" else "vortrag"
-    werte = sorted(
-        (date.fromisoformat(t), Decimal(str(w)))
-        for t, w in (zeile or {}).get(feld, {}).items()
-        if von <= date.fromisoformat(t) <= bis and date.fromisoformat(t) > heute
-    )
+
+    def zellwerte(z: dict | None) -> list[tuple[date, Decimal]]:
+        return sorted(
+            (date.fromisoformat(t), Decimal(str(w)))
+            for t, w in (z or {}).get(feld, {}).items()
+            if von <= date.fromisoformat(t) <= bis and date.fromisoformat(t) > heute and w
+        )
+
+    werte = zellwerte(zeile)
+    if szenario is not None:
+        im_szenario = zellwerte(_plan_zeile(berechne_plan(
+            db, mandant, start=start, wochen=daten.wochen, szenario=szenario, heute=heute),
+            daten.key))
+        if im_szenario != werte:
+            raise HTTPException(
+                422, "Diese Zeile weicht im Szenario vom Basisplan ab – Verschiebungen dieser "
+                "Zeile bitte in der Basisansicht anlegen")
     netto = sum((w for _, w in werte), Decimal("0"))
     if not netto:
         raise HTTPException(
@@ -3438,16 +3454,41 @@ def verschiebung_loeschen(
     benutzer=Depends(aktueller_benutzer),
     db: Session = Depends(get_db),
 ):
+    """Verschiebung zurücknehmen. Folgeverschiebungen derselben Zeile, die von ihr Gebrachtes
+    weiterverschoben haben (Kette), werden um diesen Anteil gekürzt bzw. mit zurückgenommen –
+    sonst nähmen sie nach der Rücknahme einen Bestandteil, den der Nutzer nie verschoben hat."""
     nur_schreibend(benutzer)
     mandant = mandant_oder_403(db, benutzer, mandant_id)
     v = db.get(models.PlanVerschiebung, verschiebung_id)
     if v is None or v.mandant_id != mandant.id:
         raise HTTPException(404, "Verschiebung nicht gefunden")
+    angepasst = []
+    if v.quelle == "PLAN":
+        key = verschiebung_key(v)
+        zeile = [w for w in plan_verschiebungen(db, mandant.id, "PLAN") if verschiebung_key(w) == key]
+        folgen = Zuordnung(db, mandant, date.today(), verschiebungen=zeile,
+                           nur_konten={key} if isinstance(key, int) else set()).folgen_von(v.id)
+        for w_id, anteil in sorted(folgen.items()):
+            w = db.get(models.PlanVerschiebung, w_id)
+            if w is None or w.id == v.id:
+                continue
+            rest = (abs(w.betrag) - anteil).quantize(Decimal("0.01"))
+            text = (f"{w.quelle} {w.von.isoformat()} → {w.nach.isoformat()}: "
+                    f"{_eur_text(abs(w.betrag))} € (Folge der Rücknahme {v.von.isoformat()} → "
+                    f"{v.nach.isoformat()})")
+            if rest <= 0:
+                audit(db, benutzer, mandant.id, "PLAN_VERSCHIEBUNG_GELOESCHT", text)
+                db.delete(w)
+            else:
+                audit(db, benutzer, mandant.id, "PLAN_VERSCHIEBUNG_GEKUERZT",
+                      f"{text} auf {_eur_text(rest)} €")
+                w.betrag = rest if w.betrag > 0 else -rest
+            angepasst.append(w_id)
     audit(db, benutzer, mandant.id, "PLAN_VERSCHIEBUNG_GELOESCHT",
           f"{v.quelle} {v.von.isoformat()} → {v.nach.isoformat()}: {_eur_text(abs(v.betrag))} €")
     db.delete(v)
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "angepasst": angepasst}
 
 
 EXPORT_ANSICHTEN = ("tage", "wochen", "monate")
