@@ -14,7 +14,8 @@ const PROFIL_TEXT = {
   WTAG_MO: "wöchentlich montags", WTAG_DI: "wöchentlich dienstags", WTAG_MI: "wöchentlich mittwochs",
   WTAG_DO: "wöchentlich donnerstags", WTAG_FR: "wöchentlich freitags",
 };
-const AUFTEILUNG_TEXT = { KW: "je KW", TAG: "je Tag", KONTO: "laut Konto", "": "laut Konto" };
+const AUFTEILUNG_TEXT = { KW: "je KW", TAG: "je Tag", ERST: "erster Banktag", KONTO: "laut Konto",
+                          "": "laut Konto" };
 
 const ansichtFeld = document.getElementById("ansicht");
 ansichtFeld.value = ANSICHT;
@@ -251,6 +252,9 @@ function ebeneZeigen() {
   betrag.placeholder = ebene === "monat" && i.monat.fortgeschrieben_aus
     ? `${eur(i.monat.fortgeschrieben_aus.betrag)} (fortgeschrieben)` : "";
   document.getElementById("bd-aufteilung-zeile").style.display = ebene === "tag" ? "none" : "";
+  document.getElementById("bd-erst-text").textContent = ebene === "woche"
+    ? "voller Betrag am ersten Bankarbeitstag der KW"
+    : "voller Betrag am ersten Bankarbeitstag des Monats";
   // Standard: je KW und Fortschreibung an – gespeicherte Einstellungen gelten,
   // sobald ein Wert einmal über diesen Dialog erfasst wurde (ältere Werte ohne
   // Aufteilung erhalten die Standardvorgaben)

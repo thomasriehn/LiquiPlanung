@@ -3,10 +3,11 @@
 
 Erfassungsebenen (Vorrang Tag > Woche > Monat):
   - Monat: Netto-Budget mit Aufteilung je KW (eine Zahlung je Kalenderwoche),
-    je Tag (gleichmäßig auf die Bankarbeitstage) oder nach Verteilungsprofil des
-    Kontos; optional in die Folgemonate fortgeschrieben (bis zum nächsten
-    erfassten Monatswert),
-  - Woche (ISO-KW): ersetzt die anteiligen Monatswerte dieser Woche,
+    je Tag (gleichmäßig auf die Bankarbeitstage), voller Betrag am ersten
+    Bankarbeitstag des Monats oder nach Verteilungsprofil des Kontos; optional in
+    die Folgemonate fortgeschrieben (bis zum nächsten erfassten Monatswert),
+  - Woche (ISO-KW): ersetzt die anteiligen Monatswerte dieser Woche; Aufteilung
+    je KW, je Tag oder voller Betrag am ersten Bankarbeitstag der Woche,
   - Tag: ersetzt den verteilten Wert dieses Tages (0 = kein Budget).
 Die Verteilung entspricht der Planungs-Engine (budget_basis_woche) – ohne
 Restbudget, Szenario und Insolvenzgeld, die erst im Plan wirken.
@@ -254,7 +255,8 @@ def budget_zelle_speichern(db: Session, mandant: models.Mandant, konto: models.K
     if ebene not in EBENEN:
         raise ValueError("Ebene: monat, woche oder tag")
     if aufteilung is not None and aufteilung not in AUFTEILUNGEN:
-        raise ValueError("Aufteilung: KW, TAG oder KONTO (Verteilungsprofil des Kontos)")
+        raise ValueError("Aufteilung: KW, TAG, ERST (erster Bankarbeitstag) oder KONTO "
+                         "(Verteilungsprofil des Kontos)")
     if betrag is not None and betrag < 0:
         raise ValueError("Budgetbeträge bitte positiv (netto) erfassen")
     tag = _periode_tag(ebene, periode)

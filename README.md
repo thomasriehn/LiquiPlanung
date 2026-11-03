@@ -120,7 +120,8 @@ Sicherung und Rücksprung über `deploy/aktualisieren.sh` und `deploy/zurueckset
   Kontozelle öffnet den **Eingabedialog**: Gültigkeit (Monat bzw. nur diese KW / nur
   dieser Tag), Betrag, **Aufteilung je KW** (Standard: eine Zahlung je Kalenderwoche
   am Wochentag laut Konto bzw. am ersten Bankarbeitstag), je Tag (gleichmäßig auf die
-  Bankarbeitstage) oder laut Verteilungsprofil des Kontos, und **Fortschreiben in die
+  Bankarbeitstage), **erster Banktag** (voller Betrag am ersten Bankarbeitstag des
+  Monats bzw. der KW) oder laut Verteilungsprofil des Kontos, und **Fortschreiben in die
   Folgemonate** (Standard an; gilt bis zum nächsten erfassten Monatswert, spätere
   Monatswerte lassen sich dabei ersetzen). Wochen- bzw. Tageswerte übersteuern den
   verteilten Monatswert (Vorrang Tag vor Woche vor Monat, 0 = kein Budget). In der

@@ -200,16 +200,20 @@ def _monats_verteilung(jahr: int, monat: int, profil: str, bl: str) -> dict[date
 
 
 # KW = eine Zahlung je Kalenderwoche, TAG = gleichmäßig auf die Bankarbeitstage,
+# ERST = voller Betrag am ersten Bankarbeitstag (des Monats bzw. der KW),
 # KONTO = ausdrücklich das Verteilungsprofil des Kontos; leer (ältere Werte) = Konto
-AUFTEILUNGEN = ("KW", "TAG", "KONTO")
+AUFTEILUNGEN = ("KW", "TAG", "ERST", "KONTO")
 
 
 def budget_profil(konto: models.Konto, aufteilung: str | None) -> str:
-    """Verteilungsprofil eines Budgetwerts: Aufteilung je KW bzw. Tag oder –
-    bei KONTO bzw. ohne Angabe – das Verteilungsprofil des Kontos."""
+    """Verteilungsprofil eines Monatswerts: Aufteilung je KW, je Tag, voller Betrag am
+    ersten Bankarbeitstag des Monats oder – bei KONTO bzw. ohne Angabe – das
+    Verteilungsprofil des Kontos."""
     profil = konto.verteilung if konto.verteilung in VERTEILUNGEN else "GLEICH"
     if aufteilung == "TAG":
         return "GLEICH"
+    if aufteilung == "ERST":
+        return "MONATSANFANG"
     if aufteilung == "KW":
         return f"KW:{_WOCHENTAG[profil]}" if profil in _WOCHENTAG else "KW"
     return profil
@@ -2575,7 +2579,8 @@ def budget_basis_woche(
     """Budgetbasis eines Kontos in der Woche ab `w_von` (bis `w_bis`): je Tag
     (Netto-Quellbetrag, Anteil, Teiler) – der Tageswert ist Quelle × Anteil ÷ Teiler.
     Vorrang: Tageswert > Wochenwert > Monatsbudget (ggf. fortgeschrieben), verteilt
-    nach seiner Aufteilung (KW/Tag) bzw. dem Verteilungsprofil des Kontos."""
+    nach seiner Aufteilung (KW/Tag/erster Bankarbeitstag) bzw. dem Verteilungsprofil
+    des Kontos."""
     konto_id = konto.id
     profil = konto.verteilung if konto.verteilung in VERTEILUNGEN else "GLEICH"
     iso = w_von.isocalendar()
@@ -2587,11 +2592,14 @@ def budget_basis_woche(
         netto = abs(betrag)
         if netto:
             # Wochenwert: je KW auf einen Zahltag (Wochentag laut Konto bzw. erster
-            # Bankarbeitstag), je Tag gleichmäßig auf die Banktage; ohne Angabe
-            # wöchentliche Profile auf den Zahltag, sonst auf die Banktage
+            # Bankarbeitstag), je Tag gleichmäßig auf die Banktage, ERST voll auf den
+            # ersten Bankarbeitstag der Woche (auch bei wöchentlichem Kontoprofil);
+            # ohne Angabe wöchentliche Profile auf den Zahltag, sonst auf die Banktage
             wtag = _WOCHENTAG.get(profil)
             if aufteilung == "TAG" or (aufteilung is None and wtag is None):
                 zieltage = banktage
+            elif aufteilung == "ERST":
+                zieltage = [banktage[0]]
             elif wtag is not None:
                 ziel = naechster_bankarbeitstag(w_von + timedelta(days=wtag), bl)
                 zieltage = [ziel if ziel <= w_bis else banktage[-1]]

@@ -224,14 +224,19 @@ dadurch entstehen die BWA-Zeilen. Bank-an-Bank = Umbuchung (nur Bestandsverschie
    **Aufteilung**: `KW` = eine Zahlung je Kalenderwoche (Anteil der Woche = ihre
    Bankarbeitstage im Monat ÷ alle Bankarbeitstage; Zahltag = Wochentag laut
    Konto bzw. erster Bankarbeitstag der Woche), `TAG` = gleichmäßig auf die
-   Bankarbeitstage, `KONTO`/leer = Verteilungsprofil des Kontos (ältere Werte).
+   Bankarbeitstage, `ERST` = voller Betrag am ersten Bankarbeitstag des Monats bzw.
+   der KW (unabhängig vom Verteilungsprofil des Kontos; Wochenwerte und Tageswerte
+   gehen wie stets vor – ein Wochenwert in der Woche des ersten Bankarbeitstags ersetzt
+   also die ganze Monatszahlung), `KONTO`/leer = Verteilungsprofil des Kontos (ältere
+   Werte).
    Monatswerte mit `fortschreiben` gelten auch in allen Folgemonaten bis zum
    nächsten erfassten Monatswert (`MonatsBudgets`); das nutzen Engine,
    Budgetseite, USt-Vorschau und Insolvenzgeld-Vorschau gleichermaßen. Die Verteilung je Woche liefert eine gemeinsame
    Funktion (`budget_basis_woche`), die auch die Budgetseite nutzt
    (`services/budget.py`: wirksames Netto-Budget je Tag, summiert auf Tage, Wochen
    oder Monate). Wochenweise **gekürzt** um explizite Posten desselben Kontos
-   (Restbudget ≥ 0). Netto-Budgets werden über den USt-Satz des Kontos auf
+   (Restbudget ≥ 0) – bei `ERST` mindern so nur Posten in der Woche des ersten
+   Bankarbeitstags das Monatsbudget. Netto-Budgets werden über den USt-Satz des Kontos auf
    Brutto-Zahlungswirkung umgerechnet.
    Persönliche Anzeige-Einstellungen (z. B. Spalten Tage/Wochen/Monate für Plan und
    Budget) stehen in `benutzer.einstellungen` (JSON, `PUT /api/profil/einstellungen`).

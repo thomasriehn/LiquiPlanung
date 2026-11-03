@@ -2570,7 +2570,7 @@ class BudgetZelleSpeichern(BaseModel):
     ebene: str                      # monat | woche | tag
     periode: str                    # JJJJ-MM | JJJJ-Www | JJJJ-MM-TT
     betrag_netto: float | None = None   # None = Eintrag entfernen
-    aufteilung: str | None = "KW"   # KW | TAG | KONTO (Verteilungsprofil des Kontos)
+    aufteilung: str | None = "KW"   # KW | TAG | ERST (erster Bankarbeitstag) | KONTO
     fortschreiben: bool = True      # nur Monat: in die Folgemonate fortschreiben
     spaetere_entfernen: bool = False    # nur Monat: spätere Monatswerte löschen
 
